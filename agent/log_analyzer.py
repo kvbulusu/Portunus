@@ -70,6 +70,20 @@ _TRIAGE_RULES = [
      "missing lib, then either rebuild OpenROAD (./build_openroad.sh inside "
      "OpenROAD-flow-scripts) or add the dir containing libortools.so.9 to "
      "LD_LIBRARY_PATH in your janus_asic_env.sh. This is NOT an RTL/config bug."),
+    # kepler-formal (ORFS logic-equivalence checker, run after synth/CTS) is a
+    # frequent offender: its libnaja_snl_pyloader.so isn't on the loader path.
+    # The equivalence check is OPTIONAL — the layout is already correct without
+    # it — so the fastest unblock is to disable it; or put the lib on the path.
+    (re.compile(r"(kepler-formal|libnaja\S*\.so)", re.I), "env-kepler-formal",
+     "ORFS's optional logic-equivalence check (kepler-formal) failed to start "
+     "because libnaja_snl_pyloader.so is not on the loader path. The place/route "
+     "result itself is fine — this check is a verification extra. TWO fixes: "
+     "(A) DISABLE it: add  export EQUIVALENCE_CHECK = 0  to the block .mk (and "
+     "re-run scripts/03), OR set it in the flow; the flow then skips kepler. "
+     "(B) Or PUT THE LIB ON THE PATH: run  find $ORFS_DIR -name 'libnaja*.so*'  "
+     "then add that directory to LD_LIBRARY_PATH in janus_asic_env.sh and "
+     "re-source it. Not an RTL/config bug. Re-run with --resume to continue from "
+     "the completed CTS stage (no re-synthesis)."),
     (re.compile(r"error while loading shared libraries", re.I), "env-shared-lib",
      "A tool binary failed to start because a shared library is missing. Run "
      "ldd on the failing binary, install the matching runtime package, or add "
