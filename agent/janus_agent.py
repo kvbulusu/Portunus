@@ -60,7 +60,7 @@ for _p in (_HERE, os.path.join(_ROOT, "utils")):
         sys.path.insert(0, _p)
 
 from dependency_manager import DependencyManager, Status, DEFAULT_GRAPH  # noqa: E402
-from log_analyzer import LogAnalyzer                                     # noqa: E402
+from log_analyzer import LogAnalyzer, classify_failure                  # noqa: E402
 from llm_interface import AbacusLLM                                      # noqa: E402
 from fix_applier import FixApplier                                       # noqa: E402
 from checkpoint import Checkpoint                                        # noqa: E402
@@ -295,6 +295,21 @@ class JANUSAutonomousAgent:
 
             # --- failed -----------------------------------------------------
             self.ui.warn(f"{block}: make rc={rc}; {report.headline()}")
+
+            # Deterministic triage FIRST: if this is a known environment /
+            # infrastructure error (missing .so, OOM, missing tool, etc.) the
+            # LLM cannot fix it by editing RTL/config. Skip the LLM entirely,
+            # save credits, and give a precise manual instruction.
+            triage = classify_failure(report)
+            if triage is not None:
+                res.status = "NEEDS_MANUAL"
+                res.note = f"[{triage.category}] {triage.message}"[:240]
+                self.ui.err(f"{block}: environment/infra error "
+                            f"[{triage.category}] — NOT sending to LLM (no credits spent).")
+                self.ui.err(f"{block}: matched: {triage.matched_line}")
+                self.ui.err(f"{block}: fix: {triage.message}")
+                return res
+
             if self.args.no_llm or not self.llm.available():
                 res.status = "FAILED"
                 res.note = "failed; LLM disabled — see log: " + res.log_path
@@ -481,6 +496,34 @@ class JANUSAutonomousAgent:
                 if not os.path.isfile(self._config_path(b)):
                     problems.append(f"missing config for '{b}': {self._config_path(b)} "
                                     "(run scripts/03_setup_janus_configs.sh)")
+        # Verify the OpenROAD binary actually loads its shared libs BEFORE we
+        # run any block. A broken install (e.g. missing libortools.so.9) would
+        # otherwise fail every block and waste an LLM call per block.
+        if need_cfg and self.orfs:
+            orbin = os.path.join(self.orfs, "tools", "install", "OpenROAD",
+                                 "bin", "openroad")
+            if os.path.isfile(orbin):
+                try:
+                    import subprocess
+                    proc = subprocess.run([orbin, "-version"],
+                                          capture_output=True, text=True, timeout=30)
+                    combined = (proc.stdout or "") + (proc.stderr or "")
+                    if proc.returncode != 0 and (
+                        "shared libraries" in combined
+                        or "libortools" in combined
+                        or "cannot open shared object" in combined):
+                        problems.append(
+                            "OpenROAD binary is installed but cannot start — "
+                            "missing shared library. Run:\n"
+                            f"      ldd {orbin} | grep 'not found'\n"
+                            "    Likely libortools.so.9 (OR-Tools 9). Rebuild "
+                            "OpenROAD or add its lib dir to LD_LIBRARY_PATH in "
+                            "janus_asic_env.sh. Detail: " + combined.strip()[:200])
+                except (OSError, subprocess.SubprocessError) as exc:
+                    problems.append(f"could not exec OpenROAD binary {orbin}: {exc}")
+            # if the binary is missing entirely, a block run would say so; we
+            # don't hard-fail here because some setups use a PATH openroad.
+
         if problems and need_cfg:
             self.ui.err("Preflight failed:")
             for p in problems:

@@ -54,6 +54,84 @@ _RE_POWER = re.compile(r"\btotal\s+power\s*[:=]?\s*(\d+\.?\d*([eE]-?\d+)?)", re.
 _RE_UTIL = re.compile(r"utiliz\w*\s*[:=]?\s*(\d+\.?\d*)\s*%?", re.I)
 
 
+# =============================================================================
+# Deterministic failure triage — runs BEFORE any LLM call.
+# These are environment / infrastructure / tooling errors that an LLM cannot
+# fix by editing RTL or config. Detecting them here saves LLM credits and gives
+# the user a precise, actionable manual instruction instead of a vague guess.
+# Each entry: (compiled regex, category, human-readable manual fix message).
+# =============================================================================
+_TRIAGE_RULES = [
+    # --- missing shared libraries (OpenROAD / OR-Tools runtime) -------------
+    (re.compile(r"libortools\S*\.so", re.I), "env-openroad-ortools",
+     "OpenROAD binary cannot load OR-Tools (libortools.so.*). The OpenROAD "
+     "install is incomplete or its lib dir is not on the loader path. Fix: "
+     "run  ldd $ORFS_DIR/tools/install/OpenROAD/bin/openroad  to see the "
+     "missing lib, then either rebuild OpenROAD (./build_openroad.sh inside "
+     "OpenROAD-flow-scripts) or add the dir containing libortools.so.9 to "
+     "LD_LIBRARY_PATH in your janus_asic_env.sh. This is NOT an RTL/config bug."),
+    (re.compile(r"error while loading shared libraries", re.I), "env-shared-lib",
+     "A tool binary failed to start because a shared library is missing. Run "
+     "ldd on the failing binary, install the matching runtime package, or add "
+     "its directory to LD_LIBRARY_PATH. Not an RTL/config bug."),
+    (re.compile(r"cannot open shared object file", re.I), "env-shared-lib",
+     "A required shared object is missing on this machine. Install the runtime "
+     "package or fix LD_LIBRARY_PATH. Not an RTL/config bug."),
+    # --- missing tool binaries ----------------------------------------------
+    (re.compile(r"(openroad|yosys|klayout|sta):?\s*(command not found|No such file)", re.I),
+     "env-missing-tool",
+     "A required EDA tool binary was not found. Verify the OpenROAD-flow-scripts "
+     "build completed and that ORFS_DIR/env.sh is sourced. Not an RTL/config bug."),
+    # --- out-of-memory / OS killed the process ------------------------------
+    (re.compile(r"\b(Killed|Out of memory|Cannot allocate memory|std::bad_alloc|"
+                r"bad_alloc|MemoryError)\b"), "env-oom",
+     "The process was killed, most likely out of memory. This 20GB-RAM WSL2 "
+     "setup can OOM on large blocks (user_domain CVA6+Ara). Lower parallelism, "
+     "increase the WSL2 memory limit in .wslconfig, or reduce design params "
+     "(e.g. SCRATCH_KB). Not fixable by editing RTL syntax."),
+    # --- yosys-slang plugin not loaded --------------------------------------
+    (re.compile(r"(slang\.so|yosys-slang).*(not found|cannot|No such|failed to load)", re.I),
+     "env-slang-plugin",
+     "The yosys-slang plugin could not be loaded. Re-run "
+     "scripts/03_setup_janus_configs.sh so SLANG_PLUGIN_PATH points at a valid "
+     "slang.so, and confirm SYNTH_HDL_FRONTEND=slang in your env file."),
+    # --- disk full -----------------------------------------------------------
+    (re.compile(r"No space left on device", re.I), "env-disk-full",
+     "The disk is full. Free space (old runs/ directories are bulky) and retry. "
+     "Not an RTL/config bug."),
+]
+
+
+@dataclass
+class Triage:
+    """Result of deterministic (pre-LLM) failure classification."""
+    category: str
+    message: str
+    matched_line: str
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+
+def classify_failure(rep: "LogReport") -> Optional[Triage]:
+    """Return a Triage if the failure is a known environment/infra error that
+    the LLM cannot fix (so the caller should skip the LLM and surface a precise
+    manual instruction). Returns None if the failure looks like a real RTL/
+    config problem worth sending to the LLM.
+
+    Scans the captured error lines first (most specific), then the log tail.
+    """
+    haystack: List[str] = list(rep.error_lines)
+    if rep.tail:
+        haystack.extend(rep.tail.splitlines())
+    for line in haystack:
+        for rx, category, message in _TRIAGE_RULES:
+            if rx.search(line):
+                return Triage(category=category, message=message,
+                              matched_line=line.strip()[:200])
+    return None
+
+
 @dataclass
 class LogReport:
     block: str
