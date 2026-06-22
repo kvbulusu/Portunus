@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -233,17 +234,78 @@ class JANUSAutonomousAgent:
     def _make_cmd(self, block: str) -> List[str]:
         return ["make", f"DESIGN_CONFIG={self._config_path(block)}"]
 
+    # ----- map a raw ORFS output line to a human-readable flow stage ---------
+    # ORFS emits markers like "Running synth_odb.tcl, stage 1_synth" and step
+    # banners; we translate those into a coarse stage label so the heartbeat can
+    # tell the user *where* in the flow a long-running block currently is.
+    _STAGE_PATTERNS = [
+        (re.compile(r"stage\s+1_synth", re.I),            "1_synth (synthesis)"),
+        (re.compile(r"stage\s+2_floorplan", re.I),        "2_floorplan"),
+        (re.compile(r"stage\s+3_place", re.I),            "3_place"),
+        (re.compile(r"stage\s+4_cts", re.I),              "4_cts (clock tree)"),
+        (re.compile(r"stage\s+5_route", re.I),            "5_route"),
+        (re.compile(r"stage\s+6_(final|report)", re.I),   "6_final"),
+        (re.compile(r"Running\s+(\S+?)\.tcl", re.I),      None),   # fallback: script name
+        (re.compile(r"\bglobal_place\b", re.I),           "3_place (global)"),
+        (re.compile(r"\bdetailed_place\b", re.I),         "3_place (detailed)"),
+        (re.compile(r"\bclock_tree_synthesis\b", re.I),   "4_cts"),
+        (re.compile(r"\bglobal_route\b", re.I),           "5_route (global)"),
+        (re.compile(r"\bdetailed_route\b", re.I),         "5_route (detailed)"),
+        (re.compile(r"\bdetailed routing\b", re.I),       "5_route (detailed)"),
+    ]
+
+    @classmethod
+    def _detect_stage(cls, line: str) -> Optional[str]:
+        for pat, label in cls._STAGE_PATTERNS:
+            m = pat.search(line)
+            if m:
+                return label if label is not None else f"{m.group(1)}"
+        return None
+
+    @staticmethod
+    def _fmt_elapsed(seconds: float) -> str:
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
+
     # ----- run one make and capture the log ---------------------------------
     def _run_make(self, block: str) -> int:
         log_path = self._block_log(block)
         cmd = self._make_cmd(block)
         self.ui.debug(f"{block}: cwd={self.flow_dir} cmd={' '.join(cmd)}")
+
+        # Shared state updated by the reader loop, read by the heartbeat thread.
+        t_start = time.time()
+        state = {"stage": "starting", "lines": 0, "last_msg": ""}
+        state_lock = threading.Lock()
+        hb_stop = threading.Event()
+
+        interval = max(5.0, float(getattr(self.args, "heartbeat", 30.0)))
+
+        def _heartbeat() -> None:
+            # Periodically reassure the user the block is alive and show where it
+            # is. Fires even when ORFS is silent for minutes (e.g. detailed_route),
+            # because it runs independently of the (blocking) stdout reader.
+            while not hb_stop.wait(interval):
+                with state_lock:
+                    stg, n = state["stage"], state["lines"]
+                el = self._fmt_elapsed(time.time() - t_start)
+                self.ui.info(
+                    f"    … {block}: running — stage={stg}  elapsed={el}  "
+                    f"({n} log lines)  log: {os.path.basename(log_path)}"
+                )
+
+        hb = threading.Thread(target=_heartbeat, name=f"hb-{block}", daemon=True)
+        hb.start()
+
         with open(log_path, "ab", buffering=0) as logf:
             header = f"\n===== {block} : {' '.join(cmd)} @ {datetime.now()} =====\n"
             logf.write(header.encode())
+            # bufsize=0 (unbuffered) avoids the "line buffering isn't supported
+            # in binary mode" RuntimeWarning that bufsize=1 raised on every run.
             proc = subprocess.Popen(
                 cmd, cwd=self.flow_dir, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, bufsize=1,
+                stderr=subprocess.STDOUT, bufsize=0,
             )
             try:
                 for raw in iter(proc.stdout.readline, b""):
@@ -251,11 +313,25 @@ class JANUSAutonomousAgent:
                         proc.terminate()
                         break
                     logf.write(raw)
+                    line = raw.decode("utf-8", "replace").rstrip()
+                    # Update shared progress state; announce stage transitions
+                    # immediately so the user sees synth→floorplan→place→cts→route.
+                    stg = self._detect_stage(line)
+                    with state_lock:
+                        state["lines"] += 1
+                        if stg and stg != state["stage"]:
+                            state["stage"] = stg
+                            el = self._fmt_elapsed(time.time() - t_start)
+                            self.ui.step(f"{block}: → {stg}  (elapsed {el})")
                     if self.args.verbose:
-                        self.ui.debug(f"{block}| {raw.decode('utf-8','replace').rstrip()}")
+                        self.ui.debug(f"{block}| {line}")
                 proc.stdout.close()
             finally:
                 proc.wait()
+                hb_stop.set()
+                hb.join(timeout=2.0)
+        el = self._fmt_elapsed(time.time() - t_start)
+        self.ui.info(f"    {block}: make exited rc={proc.returncode} after {el}")
         return proc.returncode
 
     # ----- process one block end-to-end (with LLM retry loop) ---------------
@@ -608,6 +684,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="LLM network retry attempts per call (default 3)")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="stream ORFS output and debug detail to the console")
+    p.add_argument("--heartbeat", type=float, default=30.0,
+                   help="seconds between 'still running' progress lines per "
+                        "block (default 30; min 5). Lets you see a long block "
+                        "is alive without --verbose.")
     return p
 
 
