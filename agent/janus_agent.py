@@ -42,6 +42,7 @@ Requires the env file written by the install scripts:
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import re
 import subprocess
@@ -556,9 +557,71 @@ class JANUSAutonomousAgent:
                     self.results[b].status = "BLOCKED"
                     self.results[b].note = "skipped — a dependency failed"
 
+    # ----- kepler-formal shared-library auto-fix -----------------------------
+    def _ensure_kepler_libpath(self) -> None:
+        """Make ORFS's logic-equivalence checker (kepler-formal) loadable.
+
+        Symptom we are defending against (seen on the user's WSL2 install):
+            cts.tcl, 83 ... kepler-formal: error while loading shared libraries:
+            libnaja_snl_pyloader.so: cannot open shared object file
+
+        kepler-formal ships its own .so deps (the 'naja' SNL python loader) but
+        ORFS does NOT add their directory to LD_LIBRARY_PATH, so the binary
+        cannot start and the *whole* flow dies at CTS — even though the equiv
+        check is OPTIONAL.  This is a pure environment/packaging problem (NOT an
+        RTL/config bug), so we fix it ourselves instead of burning an LLM call.
+
+        Strategy (version-independent — does not depend on how a given ORFS
+        release gates the check):
+          1. Locate libnaja*.so anywhere under <ORFS>/tools/install.
+          2. Prepend each containing dir (plus any kepler-formal '*/lib' dir) to
+             this process's LD_LIBRARY_PATH.  _run_make()'s Popen inherits
+             os.environ, so the child make/openroad/kepler-formal sees it.
+        If the .so genuinely does not exist (incomplete install) we cannot fix
+        it here — we warn, and rely on EQUIVALENCE_CHECK=0 in the block configs
+        to skip the check entirely.
+        """
+        if not self.orfs:
+            return
+        install = os.path.join(self.orfs, "tools", "install")
+        if not os.path.isdir(install):
+            return
+        lib_dirs = set()
+        # primary: the naja loader libs that the error names explicitly
+        for so in glob.glob(os.path.join(install, "**", "libnaja*.so*"),
+                            recursive=True):
+            lib_dirs.add(os.path.dirname(so))
+        # secondary: any kepler-formal lib dir (other deps live alongside)
+        for libdir in glob.glob(os.path.join(install, "**", "kepler-formal",
+                                             "**", "lib"), recursive=True):
+            if os.path.isdir(libdir):
+                lib_dirs.add(libdir)
+        if not lib_dirs:
+            self.ui.warn(
+                "kepler-formal libs (libnaja*.so) not found under "
+                f"{install} — cannot auto-fix LD_LIBRARY_PATH. If a block dies "
+                "at cts.tcl with 'libnaja_snl_pyloader.so: cannot open shared "
+                "object file', the equiv-check is broken in this ORFS install; "
+                "EQUIVALENCE_CHECK=0 in the block configs should skip it.")
+            return
+        current = os.environ.get("LD_LIBRARY_PATH", "")
+        existing = current.split(os.pathsep) if current else []
+        added = [d for d in sorted(lib_dirs) if d not in existing]
+        if added:
+            os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(added + existing)
+            self.ui.good("kepler-formal: added to LD_LIBRARY_PATH so the "
+                         "equiv-check can load instead of crashing CTS:")
+            for d in added:
+                self.ui.info(f"      {d}")
+        else:
+            self.ui.debug("kepler-formal lib dir(s) already on LD_LIBRARY_PATH")
+
     # ----- preflight checks --------------------------------------------------
     def _preflight(self) -> None:
         problems = []
+        # Fix the kepler-formal shared-lib path up front so the optional
+        # equiv-check loads (or is cleanly skipped) instead of crashing CTS.
+        self._ensure_kepler_libpath()
         if not self.orfs:
             problems.append("ORFS_DIR not set (source ~/janus_asic/janus_asic_env.sh or pass --orfs)")
         elif not os.path.isdir(self.flow_dir):
