@@ -31,14 +31,25 @@ class AppliedFix:
     ok: bool
     detail: str
     file: Optional[str] = None
+    # If the same edit was also mirrored into the repository *source* (so it
+    # survives a re-stamp by scripts/03 and can be git-committed), the repo path
+    # is recorded here. The orchestrator collects these to hand to GitOps.
+    repo_file: Optional[str] = None
 
 
 @dataclass
 class FixApplier:
-    block_config_path: str          # .../janus/<block>/config.mk
-    block_sdc_path: str             # .../janus/<block>/constraint.sdc
+    block_config_path: str          # .../janus/<block>/config.mk  (STAMPED copy in ORFS tree)
+    block_sdc_path: str             # .../janus/<block>/constraint.sdc (STAMPED copy)
     rtl_root: str                   # repo root (rtl/ lives under here)
     logger: Any = None
+    # Repository SOURCE files that the stamped copies were generated from. When
+    # provided, config/sdc fixes are mirrored here too, so they persist across
+    # `scripts/03_setup_janus_configs.sh` re-stamping and can be committed.
+    #   repo_config_path -> asic_flow/configs/<block>.mk
+    #   repo_sdc_path     -> asic_flow/configs/constraints/<block>.sdc
+    repo_config_path: Optional[str] = None
+    repo_sdc_path: Optional[str] = None
     _backed_up: set = field(default_factory=set)
 
     def __post_init__(self):
@@ -102,18 +113,24 @@ class FixApplier:
         path = self.block_config_path
         if not os.path.isfile(path):
             return AppliedFix("config", False, f"config not found: {path}", path)
-        self._backup(path)
-        with open(path) as fh:
-            text = fh.read()
+
         # Replace an existing 'export KEY = ...' or append a new one.
         pat = re.compile(rf"^(\s*export\s+{re.escape(key)}\s*=).*$", re.M)
-        if pat.search(text):
-            new = pat.sub(rf"\1 {val}", text, count=1)
-        else:
-            new = text.rstrip() + f"\nexport {key} = {val}   # added by JANUS agent\n"
-        with open(path, "w") as fh:
-            fh.write(new)
-        return AppliedFix("config", True, f"set {key}={val}", path)
+
+        def _transform(text: str) -> str:
+            if pat.search(text):
+                return pat.sub(rf"\1 {val}", text, count=1)
+            return text.rstrip() + f"\nexport {key} = {val}   # added by JANUS agent\n"
+
+        self._backup(path)
+        self._rewrite(path, _transform)
+        # Mirror into the repo source so the fix survives a scripts/03 re-stamp
+        # and can be committed. Config filename == block name (e.g. security.mk).
+        repo_file = self._mirror(self.repo_config_path, _transform)
+        detail = f"set {key}={val}"
+        if repo_file:
+            detail += " (mirrored to repo source)"
+        return AppliedFix("config", True, detail, path, repo_file=repo_file)
 
     # ---- constraint.sdc -----------------------------------------------------
     def _apply_sdc_period(self, fx: Dict) -> AppliedFix:
@@ -124,34 +141,60 @@ class FixApplier:
         path = self.block_sdc_path
         if not os.path.isfile(path):
             return AppliedFix("sdc_period", False, f"sdc not found: {path}", path)
+        with open(path) as fh:
+            probe = fh.read()
+
+        # Decide WHICH substitution applies (based on the stamped file), then
+        # apply that exact same transform to both the stamped and repo copies.
+        transform = None
+        # Case A: variable-driven SDC (set clk_period 1.25)
+        if re.search(r"^\s*set\s+clk_period\b", probe, re.M) and (clock in ("", "core_clk")
+                or re.search(r"set\s+clk_name\s+" + re.escape(clock), probe)):
+            transform = lambda t: re.sub(r"^(\s*set\s+clk_period\s+).*$",
+                                         rf"\g<1>{val}", t, count=1, flags=re.M)
+        # Case B: explicit create_clock -name <clock> -period <p>
+        if transform is None and clock:
+            pat = re.compile(rf"(create_clock\s+-name\s+{re.escape(clock)}\s+-period\s+)[\d.]+")
+            if pat.search(probe):
+                transform = lambda t, _p=pat: _p.sub(rf"\g<1>{val}", t, count=1)
+        # Case C: single unnamed create_clock -period
+        if transform is None:
+            pat = re.compile(r"(create_clock\s+(?:-name\s+\S+\s+)?-period\s+)[\d.]+")
+            if pat.search(probe):
+                transform = lambda t, _p=pat: _p.sub(rf"\g<1>{val}", t, count=1)
+
+        if transform is None:
+            return AppliedFix("sdc_period", False, f"could not locate clock '{clock}' period in SDC", path)
+
         self._backup(path)
+        self._rewrite(path, transform)
+        repo_file = self._mirror(self.repo_sdc_path, transform)
+        detail = f"set period of '{clock or 'clock'}' to {val} ns"
+        if repo_file:
+            detail += " (mirrored to repo source)"
+        return AppliedFix("sdc_period", True, detail, path, repo_file=repo_file)
+
+    # ---- shared write / mirror helpers --------------------------------------
+    def _rewrite(self, path: str, transform) -> None:
+        """Apply `transform(text)->text` to a file in place."""
         with open(path) as fh:
             text = fh.read()
-
-        changed = False
-        # Case A: variable-driven SDC (set clk_period 1.25)
-        if re.search(r"^\s*set\s+clk_period\b", text, re.M) and (clock in ("", "core_clk")
-                or re.search(r"set\s+clk_name\s+" + re.escape(clock), text)):
-            text = re.sub(r"^(\s*set\s+clk_period\s+).*$", rf"\g<1>{val}", text, count=1, flags=re.M)
-            changed = True
-        # Case B: explicit create_clock -name <clock> -period <p>
-        if not changed and clock:
-            pat = re.compile(rf"(create_clock\s+-name\s+{re.escape(clock)}\s+-period\s+)[\d.]+")
-            if pat.search(text):
-                text = pat.sub(rf"\g<1>{val}", text, count=1)
-                changed = True
-        # Case C: single unnamed create_clock -period
-        if not changed:
-            pat = re.compile(r"(create_clock\s+(?:-name\s+\S+\s+)?-period\s+)[\d.]+")
-            if pat.search(text):
-                text = pat.sub(rf"\g<1>{val}", text, count=1)
-                changed = True
-
-        if not changed:
-            return AppliedFix("sdc_period", False, f"could not locate clock '{clock}' period in SDC", path)
         with open(path, "w") as fh:
-            fh.write(text)
-        return AppliedFix("sdc_period", True, f"set period of '{clock or 'clock'}' to {val} ns", path)
+            fh.write(transform(text))
+
+    def _mirror(self, repo_path: Optional[str], transform) -> Optional[str]:
+        """Apply the same transform to the repo SOURCE file, if provided and it
+        exists. Returns the repo path on success (for git), else None. Never
+        raises — a mirror failure must not break the primary (stamped) edit."""
+        if not repo_path or not os.path.isfile(repo_path):
+            return None
+        try:
+            self._backup(repo_path)
+            self._rewrite(repo_path, transform)
+            return repo_path
+        except Exception as e:  # pragma: no cover
+            self.log(f"[fix] could not mirror to repo source {repo_path}: {e}")
+            return None
 
     # ---- RTL edit -----------------------------------------------------------
     def _apply_rtl(self, fx: Dict) -> AppliedFix:
@@ -178,7 +221,9 @@ class FixApplier:
         self._backup(path)
         with open(path, "w") as fh:
             fh.write(text.replace(find, replace, 1))
-        return AppliedFix("rtl", True, f"applied 1 edit in {os.path.relpath(path, self.rtl_root)}", path)
+        # RTL lives in the repo tree, so the edited path IS the commit target.
+        return AppliedFix("rtl", True, f"applied 1 edit in {os.path.relpath(path, self.rtl_root)}",
+                          path, repo_file=path)
 
 
 # ---- validators -------------------------------------------------------------
