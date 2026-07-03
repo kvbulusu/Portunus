@@ -395,20 +395,38 @@ class JANUSAutonomousAgent:
     # ORFS emits markers like "Running synth_odb.tcl, stage 1_synth" and step
     # banners; we translate those into a coarse stage label so the heartbeat can
     # tell the user *where* in the flow a long-running block currently is.
+    # Order matters: put the MOST specific / earliest-in-flow markers first so a
+    # long-running sub-phase (e.g. yosys read_slang) is named precisely instead
+    # of falling through to a coarser label. Every marker below was observed in a
+    # real ORFS (Yosys 0.64 + slang) security.log — the yosys/slang phase used to
+    # show as "starting" for HOURS because none of these were recognized.
     _STAGE_PATTERNS = [
+        # ---- 1_synth: yosys front-end (slang read is the long pole) ----------
+        # read_slang parses ALL RTL; on big elaborations it can run for HOURS,
+        # so name it explicitly and warn the user it is expected to be slow.
+        (re.compile(r"Executing\s+SLANG\s+frontend", re.I),
+                                                          "1_synth (yosys: SLANG parse — SLOW, can take minutes→hours)"),
+        (re.compile(r"\bread_slang\b", re.I),             "1_synth (yosys: SLANG parse — SLOW)"),
+        (re.compile(r"yosys[_-]?canonicalize", re.I),     "1_synth (yosys canonicalize / read RTL)"),
+        (re.compile(r"Executing\s+SYNTH\s+pass", re.I),   "1_synth (yosys: synth/optimize)"),
+        (re.compile(r"\bExecuting\s+ABC\b", re.I),        "1_synth (yosys: ABC tech-map)"),
+        (re.compile(r"Executing\s+Liberty\s+frontend", re.I),
+                                                          "1_synth (yosys: reading .lib)"),
+        (re.compile(r"1_[0-9]+_yosys", re.I),             "1_synth (yosys)"),
         (re.compile(r"stage\s+1_synth", re.I),            "1_synth (synthesis)"),
+        # ---- 2_floorplan .. 6_final -----------------------------------------
         (re.compile(r"stage\s+2_floorplan", re.I),        "2_floorplan"),
         (re.compile(r"stage\s+3_place", re.I),            "3_place"),
         (re.compile(r"stage\s+4_cts", re.I),              "4_cts (clock tree)"),
         (re.compile(r"stage\s+5_route", re.I),            "5_route"),
         (re.compile(r"stage\s+6_(final|report)", re.I),   "6_final"),
-        (re.compile(r"Running\s+(\S+?)\.tcl", re.I),      None),   # fallback: script name
         (re.compile(r"\bglobal_place\b", re.I),           "3_place (global)"),
         (re.compile(r"\bdetailed_place\b", re.I),         "3_place (detailed)"),
         (re.compile(r"\bclock_tree_synthesis\b", re.I),   "4_cts"),
         (re.compile(r"\bglobal_route\b", re.I),           "5_route (global)"),
         (re.compile(r"\bdetailed_route\b", re.I),         "5_route (detailed)"),
         (re.compile(r"\bdetailed routing\b", re.I),       "5_route (detailed)"),
+        (re.compile(r"Running\s+(\S+?)\.tcl", re.I),      None),   # fallback: script name
     ]
 
     @classmethod
