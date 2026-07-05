@@ -142,18 +142,27 @@ class AbacusLLM:
         self._last_call_ts = time.time()
 
     # ---- main entry ---------------------------------------------------------
-    def request_fix(self, excerpt: str, physical: str = "") -> LLMResult:
+    def request_fix(self, excerpt: str, physical: str = "",
+                    reasoning: str = "") -> LLMResult:
         """Ask the LLM for a fix. `physical` is an optional pre-computed
         deterministic analysis block (e.g. SRAM macro-fit reshape
         recommendations) that we inject verbatim so the model grounds its
-        answer in real geometry instead of guessing."""
+        answer in real geometry instead of guessing. `reasoning` is the
+        deterministic 'principal-engineer' briefing from reasoning_engine that
+        frames the failure as a remedy-LAYER decision with cross-stage
+        blast-radius — injected so the model reasons about root cause and cost
+        instead of pattern-matching the log."""
         if not self.available():
             return LLMResult(ok=False, error="ABACUS_API_KEY not set")
 
         excerpt = excerpt.encode("utf-8")[: self.byte_budget].decode("utf-8", "replace")
         phys = ""
+        if reasoning:
+            phys += ("\n=== REASONING BRIEFING (deterministic classification — "
+                     "reason about LAYER + blast radius before you edit) ===\n"
+                     + reasoning + "\n")
         if physical:
-            phys = "\n=== PHYSICAL ANALYSIS (deterministic, trust this) ===\n" + physical + "\n"
+            phys += "\n=== PHYSICAL ANALYSIS (deterministic, trust this) ===\n" + physical + "\n"
         prompt = USER_TEMPLATE.format(excerpt=excerpt, physical=phys)
         chars_in = len(prompt) + len(SYSTEM_PROMPT)
 

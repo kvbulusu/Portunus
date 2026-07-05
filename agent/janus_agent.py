@@ -93,6 +93,8 @@ from fix_applier import FixApplier                                       # noqa:
 from git_ops import GitOps                                               # noqa: E402
 from physical_analyzer import (detect_macro_fit_failure,                 # noqa: E402
                                analyze_and_recommend, MacroGeom)
+from reasoning_engine import reason as reason_failure                    # noqa: E402
+from dependency_manager import DEFAULT_GRAPH as _DEP_GRAPH               # noqa: E402
 from checkpoint import Checkpoint                                        # noqa: E402
 from reporter import Reporter                                           # noqa: E402
 
@@ -583,6 +585,43 @@ class JANUSAutonomousAgent:
                 self.ui.err(f"{block}: fix: {triage.message}")
                 return res
 
+            # PRINCIPAL-ENGINEER REASONING (deterministic, ADVISORY ONLY).
+            # This does NOT edit anything. It classifies the failure into a
+            # remedy LAYER (RTL/SDC/SYNTH_OPT/FLOORPLAN/PLACE/CTS/ROUTE/tool),
+            # computes the cross-stage + cross-block blast radius, flags a
+            # suspected tool bug, and produces a framed briefing. That briefing
+            # is (a) printed so a human gets a real diagnosis even under
+            # --no-llm, and (b) injected into the LLM consult so the model
+            # reasons about root cause + cost instead of pattern-matching a log.
+            # It never auto-applies a speculative change — the ONLY deterministic
+            # auto-apply remains the geometry-exact macro-fit reshape below.
+            reason_ctx = ""
+            reason_tag = ""
+            if getattr(self.args, "reason", False):
+                rr = reason_failure(report.error_lines, report.tail, block,
+                                    _DEP_GRAPH, stage_hint=None)
+                reason_ctx = rr.briefing
+                if rr.top is not None:
+                    t = rr.top
+                    ripple = (f"; ripples to {', '.join(t.ripple_blocks)}"
+                              if t.ripple_blocks else "")
+                    self.ui.step(
+                        f"{block}: reasoning → likely {t.layer} "
+                        f"[{t.confidence:.2f}] ({t.signature}); "
+                        f"re-runs {', '.join(t.downstream)}{ripple}"
+                        + ("  [TOOL-BUG suspected]" if rr.tool_bug_suspected else ""))
+                    self.ui.info(f"      root cause: {t.root_cause}")
+                    self.ui.info(f"      remedy    : {t.remedy_hint}")
+                    # surface the classification in the report note (and keep a
+                    # tag so it survives even the terminal FAILED/no-LLM notes).
+                    reason_tag = f"[reason:{t.layer}/{t.signature} {t.confidence:.2f}] "
+                    res.note = (reason_tag + (res.note or ""))[:240]
+                else:
+                    self.ui.step(f"{block}: reasoning → novel failure "
+                                 "(no signature matched); reason from first principles")
+                if self.args.verbose:
+                    self.ui.panel(f"{block}: reasoning briefing", rr.briefing)
+
             # Deterministic PHYSICAL self-heal (no LLM): an RTL-MP "macro does
             # not fit in the core" (MPL-0006) failure is almost always a
             # pathological FakeRAM aspect ratio. Analyze the SRAM geometry the
@@ -604,13 +643,13 @@ class JANUSAutonomousAgent:
 
             if self.args.no_llm or not self.llm.available():
                 res.status = "FAILED"
-                res.note = "failed; LLM disabled — see log: " + res.log_path
+                res.note = reason_tag + "failed; LLM disabled — see log: " + res.log_path
                 self.ui.err(f"{block}: stopping (no LLM). Inspect {res.log_path}")
                 return res
 
             if attempt == self.args.max_retries:
                 res.status = "FAILED"
-                res.note = f"failed after {attempt} attempts — see {res.log_path}"
+                res.note = reason_tag + f"failed after {attempt} attempts — see {res.log_path}"
                 self.ui.err(f"{block}: exhausted retries.")
                 return res
 
@@ -633,11 +672,12 @@ class JANUSAutonomousAgent:
             # --- ask the LLM for a fix --------------------------------------
             excerpt = self.analyzer.build_llm_excerpt(report)
             self.ui.step(f"{block}: consulting Abacus LLM (attempt {attempt})")
-            llm_res = self.llm.request_fix(excerpt, physical=phys_ctx)
+            llm_res = self.llm.request_fix(excerpt, physical=phys_ctx,
+                                           reasoning=reason_ctx)
             res.llm_calls += 1
             if not llm_res.ok or not llm_res.fixes:
                 res.status = "FAILED"
-                res.note = f"LLM no actionable fix: {llm_res.error or llm_res.diagnosis}"[:160]
+                res.note = (reason_tag + f"LLM no actionable fix: {llm_res.error or llm_res.diagnosis}")[:200]
                 self.ui.err(f"{block}: LLM returned no fix. {res.note}")
                 return res
 
@@ -1045,6 +1085,7 @@ class JANUSAutonomousAgent:
                        f"  blocks   : {', '.join(self.dep.graph)}\n"
                        f"  parallel : {self.args.parallel}   max-retries: {self.args.max_retries}\n"
                        f"  LLM      : {'ENABLED' if (self.llm.available() and not self.args.no_llm) else 'disabled'}\n"
+                       f"  reasoning: {'ON — deterministic layer+blast-radius triage, advisory only' if getattr(self.args, 'reason', False) else 'off (--reason to enable)'}\n"
                        f"  git      : {git_state}\n"
                        f"  abstracts: {'skipped (--no-abstract)' if self.args.no_abstract else 'generate .lef/.lib after each block'}\n"
                        f"  mode     : {'INTERACTIVE (shell prompts)' if self.interactive else 'autonomous'}"))
@@ -1126,6 +1167,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "on origin, keeping mirror branches in lock-step "
                         "(e.g. --git-sync-branches main v5.1_integration). "
                         "Implies push; fast-forward only, never --force.")
+    p.add_argument("--reason", action="store_true",
+                   help="enable the deterministic 'principal-engineer' reasoning "
+                        "layer: on any failure, classify the remedy LAYER "
+                        "(RTL/SDC/synth/floorplan/place/CTS/route/tool), compute "
+                        "the cross-stage + cross-block blast radius, flag tool "
+                        "bugs, and frame the LLM consult accordingly. ADVISORY "
+                        "ONLY — it never auto-applies a change; the sole "
+                        "deterministic auto-fix remains the macro-fit reshape. "
+                        "Prints a real diagnosis even under --no-llm.")
     p.add_argument("--no-physical", action="store_true",
                    help="disable the deterministic macro-fit (MPL-0006) SRAM "
                         "reshape self-heal; send such failures to the LLM instead")

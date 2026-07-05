@@ -157,6 +157,87 @@ Implemented in `reasoning_engine.py`: `Layer`, `downstream_stages()`,
 
 ---
 
+## 5a. The collaborative two-agent model (design-intent agent ⇄ tool agent)
+
+Your vision — a **design agent** that understands the JANUS architecture / SDC /
+RTL / configs, and a **tool agent** that understands the EDA tool — is exactly
+the right decomposition. It maps onto the taxonomy above:
+
+```
+   ┌───────────────────────────────┐        ┌───────────────────────────────┐
+   │  DESIGN-INTENT AGENT           │        │  TOOL AGENT                    │
+   │  owns: RTL, SDC, SYNTH_OPT,    │◀──────▶│  owns: ENV, TOOL_WA, and the   │
+   │        FLOORPLAN, PLACE, CTS,  │ debate │        tool-specific *form* of  │
+   │        ROUTE  (design intent)  │        │        every workaround         │
+   │  knows: janus_pkg params, addr │        │  knows: ORFS/Yosys/OpenROAD    │
+   │  map, clock domains, macro     │        │  option names, known bugs,     │
+   │  geometry, dependency graph    │        │  version quirks, .so/pkg layout│
+   └───────────────┬───────────────┘        └───────────────┬───────────────┘
+                   └──────────────┬──────────────────────────┘
+                                  ▼
+                   ┌───────────────────────────────┐
+                   │  RECONCILER (reasoning_engine) │  deterministic referee:
+                   │  • is this a tool bug or a     │  arbitrates the two views,
+                   │    design bug? (tool-bug triage)│  scores by blast radius,
+                   │  • which layer owns the fix?   │  requires agreement + a
+                   │  • blast radius + reversibility│  confidence/blast gate
+                   │  • confidence gate → apply /   │  before ANY apply.
+                   │    escalate to human           │
+                   └───────────────────────────────┘
+```
+
+**Division of labour, made concrete on failures we have already seen:**
+
+| Failure | Design agent says | Tool agent says | Reconciler decision |
+|---|---|---|---|
+| MPL-0006 macro-fit | "SRAM aspect ratio is pathological — reshape banks; bitcells/pins unchanged" | "FakeRAM2.0 `banks`/`column_mux_factor` are the knobs; geometry is `KH·depth/F` × `KW·W·F`" | deterministic reshape (geometry-exact) → **auto-apply** |
+| `libnaja*.so` at CTS | "design is fine; equiv-check is optional" | "loader path bug; prepend dir or `EQUIVALENCE_CHECK=0`" | TOOL_WA → **auto** (already done at preflight) |
+| synth cell-count blowup | "an RTL structure exploded — fix the RTL" | "not a synth-option issue; ABC/flatten won't help" | RTL, high blast radius → **escalate to human** |
+| segfault in router | "not a design bug" | "tool defect; try alt option/order or pin version" | TOOL_WA, low confidence → **framed LLM consult** |
+| WNS < 0 | "is the SDC realistic? which path? arch too long?" | "retime/effort knobs exist but won't fix a real arch path" | SDC vs SYNTH_OPT → **framed LLM consult** |
+
+Today both "agents" are the **same LLM** invoked with different framing plus the
+deterministic reconciler (`reasoning_engine.py`). The **Phase-4 debate** upgrade
+splits them into two explicit personas (proposer/critic) that must *agree*
+before the reconciler will act — with the engine enforcing the confidence and
+blast-radius gates so a disagreement or a high-blast change always escalates to
+you rather than being auto-applied.
+
+## 5b. Determinism & anti-speculation guarantees (what can auto-apply)
+
+Because a bad fix can corrupt the design, autonomy is **strictly gated**:
+
+1. **Reasoning is advisory.** `reasoning_engine.reason()` NEVER edits a file. It
+   only classifies, computes blast radius, and frames the consult. Proven by
+   `tests/test_reasoning_loop.py` (RTL/timing/segfault/novel failures produce
+   **zero** commits and zero file edits).
+2. **The ONLY deterministic auto-apply is the macro-fit reshape** — and only
+   because its effect is *geometry-exact and reversible* (bitcell count and pin
+   interface are provably unchanged; it is a re-fold, not a design change).
+3. **Everything else is gated**: env/tool issues → precise manual instruction;
+   design-layer fixes → LLM consult that is itself gated behind `--interactive`
+   approval, and any applied fix is committed (never force-pushed) so you can
+   `git revert`. High-blast-radius changes are surfaced, not silently applied.
+4. **`--reason` changes nothing that gets applied** — it only enriches the
+   diagnosis and the LLM framing. `--reason` OFF reproduces the prior behaviour
+   exactly (verified).
+
+## 5c. Validation performed for this change
+
+- `reasoning_engine.py` self-test: 6/6 (detection, layer, blast radius,
+  cross-block ripple, tool-bug, novel).
+- `tests/test_reasoning_loop.py`: drives the **real** `_process_block` fail loop
+  with **real ORFS/Yosys/OpenROAD log text**, mocking only the `make` subprocess
+  and the git/LLM edges. 7/7 scenarios, including the safety property above.
+- **ORFS in this sandbox:** a full OpenROAD+ASAP7 flow was **not** run here — the
+  container has the docker *client* but no daemon/engine, no apt/conda/prebuilt
+  OpenROAD, and a from-source build is multi-hour and fragile. Crucially, a
+  *passing* block run would exercise **none** of this code (the reasoning/
+  self-heal path only fires on failures), so failure-log replay against the real
+  code path is the higher-fidelity validation. A real `noc`/`security` run
+  should still be done on your WSL2 install with `--reason` to confirm on live
+  tool output.
+
 ## 6. Honesty caveats
 - FakeRAM macros are abstract (floorplan/rough-PPA only) — reshapes preserve
   bitcell count and pins but are not silicon-signoff geometry.
