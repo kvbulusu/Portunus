@@ -72,6 +72,14 @@ class FixApplier:
             shutil.copy2(path, bak)
         self._backed_up.add(path)
 
+    def _restore(self, path: str) -> bool:
+        """Restore a single file from its .janusbak (revert the last edit)."""
+        bak = f"{path}.janusbak"
+        if os.path.exists(bak):
+            shutil.copy2(bak, path)
+            return True
+        return False
+
     def rollback_all(self) -> List[str]:
         restored = []
         for path in list(self._backed_up):
@@ -253,9 +261,14 @@ class FixApplier:
                               f"refused: SRAM setup script not found: {script or '(none)'}")
         if not macro or not re.fullmatch(r"[\w.]+", macro):
             return AppliedFix("sram_reshape", False, f"refused: bad macro name '{macro}'", script)
-        if not _is_pos_int(banks) or int(banks) not in (1, 2, 4, 8, 16, 32, 64):
+        # FakeRAM2.0 ONLY builds banks in {1,2,4}; anything else makes regen
+        # raise "Unsupported number of banks" -> a committed-but-unbuildable
+        # macro. Hard-refuse here as defense in depth (the recommender already
+        # only emits legal values).
+        if not _is_pos_int(banks) or int(banks) not in (1, 2, 4):
             return AppliedFix("sram_reshape", False,
-                              f"refused: banks '{banks}' not a power of two in 1..64", script)
+                              f"refused: banks '{banks}' illegal for FakeRAM2.0 "
+                              f"(must be 1, 2 or 4)", script)
         banks = int(banks)
         if col_mux is not None and (not _is_pos_int(col_mux) or int(col_mux) not in (1, 2, 4, 8)):
             return AppliedFix("sram_reshape", False,
@@ -297,12 +310,28 @@ class FixApplier:
         if col_mux is not None:
             detail += f", column_mux_factor={col_mux}"
 
-        # 3) best-effort regenerate so an in-process retry sees the new shapes.
+        # 3) regenerate so an in-process retry sees the new shapes.
+        #    SAFETY: if regen is ENABLED and FAILS, the reshaped macros do NOT
+        #    exist on disk — committing the script edit would strand an
+        #    unbuildable change (exactly the bug that produced a committed-but-
+        #    broken f02537d). So we ROLL BACK the edit and return ok=False; the
+        #    caller must NOT commit and should escalate. Only when regen is
+        #    intentionally disabled (--no-sram-regen, user regenerates manually)
+        #    is an edit-only, uncommitted-by-us... committable result correct.
         if self.regen_srams:
             ok, note = self._regen_srams(script)
+            if not ok:
+                self._restore(script)   # revert the script to pre-edit state
+                return AppliedFix(
+                    "sram_reshape", False,
+                    f"regen FAILED for {macro} (banks={banks}"
+                    + (f", col_mux={col_mux}" if col_mux is not None else "")
+                    + f"): {note}. Reverted script edit — NOT committing an "
+                      "unbuildable macro. Escalating.",
+                    script)
             detail += f"; regen: {note}"
-            # even if regen failed, the edit is valid and committable — the user
-            # can regenerate manually on `git pull`. Keep ok=True.
+        else:
+            detail += "; regen: skipped (--no-sram-regen; regenerate manually)"
         return AppliedFix("sram_reshape", True, detail, script, repo_file=script)
 
     def _regen_srams(self, script: str) -> Tuple[bool, str]:

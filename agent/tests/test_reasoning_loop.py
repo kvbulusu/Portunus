@@ -71,6 +71,23 @@ LOGS = {
 }
 
 
+# A self-contained, pathological SRAM setup script used by the macro-fit test.
+# fakeram7_8192x32 at banks=1, col_mux=1 is ~645:1 tall — the deterministic
+# recommender always has a legal fold ({1,2,4} x col_mux) to propose here,
+# regardless of what geometry the real tracked script currently carries.
+SYNTH_SRAM_SCRIPT = '''#!/usr/bin/env bash
+# synthetic stand-in for scripts/04_setup_srams.sh (test only)
+SRAMS=(
+  "fakeram7_8192x32   32   8192  1"
+  "fakeram7_256x128  128    256  1"
+)
+: <<'PY'
+cfg["column_mux_factor"] = 1
+PY
+exit 0
+'''
+
+
 class FakeGit:
     def __init__(self):
         self.commits = []
@@ -124,13 +141,15 @@ def build_agent(tmp, **over):
     ag = JA.JANUSAutonomousAgent(args)
     ag.git = FakeGit()
     ag.llm = FakeLLM()
-    # point the SRAM setup script at a throwaway copy so a reshape never
-    # touches the real tracked script, and never regenerates macros.
-    real = os.path.join(_AGENT, "..", "scripts", "04_setup_srams.sh")
-    if os.path.isfile(real):
-        dst = os.path.join(tmp, "04_setup_srams.sh")
-        shutil.copy(real, dst)
-        ag.sram_setup_script = dst
+    # Point the SRAM setup script at a SYNTHETIC throwaway so a reshape never
+    # touches the real tracked script, never regenerates macros, and — crucially
+    # — is independent of the repo's current (possibly already-reshaped) SRAM
+    # geometry. We seed a pathologically deep macro at banks=1, col_mux=1 so the
+    # deterministic recommender always has a legal fold to propose.
+    dst = os.path.join(tmp, "04_setup_srams.sh")
+    with open(dst, "w") as fh:
+        fh.write(SYNTH_SRAM_SCRIPT)
+    ag.sram_setup_script = dst
     ag.sram_out_dir = os.path.join(tmp, "srams")  # empty -> model fallback
     return ag
 

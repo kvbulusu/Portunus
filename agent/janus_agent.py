@@ -823,7 +823,15 @@ class JANUSAutonomousAgent:
         for a in applied:
             self.ui.debug(f"{block}: fix[{a.type}] {'ok' if a.ok else 'skip'}: {a.detail}")
         if not applier.applied_any(applied):
-            return False, phys
+            # A reshape was refused or its regen failed (edit already rolled
+            # back). Do NOT commit — surface the exact reason so the human/LLM
+            # can act instead of silently retrying an unbuildable macro.
+            why = "; ".join(a.detail for a in applied if not a.ok) or "no fix applied"
+            self.ui.err(f"{block}: SRAM reshape NOT applied — {why}")
+            return False, (phys + f"\n[MACRO-FIT SELF-HEAL ABORTED] {why}\n"
+                           "The reshape did not produce buildable macros; a "
+                           "different fold (banks in {1,2,4} x column_mux 1/2/4/8) "
+                           "or a larger core may be required.")
 
         paths = sorted({a.repo_file for a in applied if a.ok and a.repo_file})
         reshaped = ", ".join(f"{p.macro}(banks {p.old_banks}->{p.new_banks})"
