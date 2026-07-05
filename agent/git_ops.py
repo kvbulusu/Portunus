@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
 
@@ -41,6 +41,14 @@ class GitOps:
     logger: Any = None
     enable_commit: bool = True
     enable_push: bool = False
+    # When non-empty, a committed fix is published to EVERY branch named here
+    # (in addition to / instead of the current-branch push). This keeps mirror
+    # branches that must stay identical — e.g. ["main", "v5.1_integration"] —
+    # in lock-step: the new commit (HEAD) is pushed to each branch ref on
+    # origin. Pushes are fast-forward only (never --force), so a branch that
+    # has genuinely diverged is reported as a failure instead of being
+    # clobbered. Empty list => fall back to a single current-branch push.
+    sync_branches: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.log = self.logger or (lambda *a, **k: None)
@@ -127,16 +135,55 @@ class GitOps:
 
     # ---- push ---------------------------------------------------------------
     def push(self) -> Tuple[bool, str]:
-        """Push the current branch to origin (only if enabled)."""
+        """Publish the just-made commit to origin (only if enabled).
+
+        If `sync_branches` is set, the current HEAD is pushed to EACH of those
+        branch refs on origin (keeping mirror branches like main +
+        v5.1_integration identical). Otherwise the current branch is pushed.
+        Returns (all_ok, combined_message). Never forces.
+        """
         if not self.enable_push:
             return False, "push disabled (default; pass --git-push to enable)"
         if not self.available():
             return False, "not a git repo"
+        if self.sync_branches:
+            return self.push_branches(self.sync_branches)
         branch = self.current_branch()
         rc, out = self._git("push", "origin", branch, timeout=180)
         if rc != 0:
             return False, f"git push failed (credentials?): {out.strip()[:200]}"
         return True, f"pushed {branch} to origin"
+
+    def push_branches(self, branches: List[str]) -> Tuple[bool, str]:
+        """Push the current HEAD to each named branch ref on origin.
+
+        Fast-forward only (no --force): if origin/<branch> has diverged from
+        HEAD the push is rejected and reported, never clobbered. Returns
+        (all_ok, per-branch summary). A branch already at HEAD counts as OK
+        (git prints 'Everything up-to-date').
+        """
+        if not self.available():
+            return False, "not a git repo"
+        wanted = [b for b in dict.fromkeys(branches) if b]  # de-dup, keep order
+        if not wanted:
+            return False, "no branches to push"
+        results: List[str] = []
+        all_ok = True
+        for b in wanted:
+            # HEAD:refs/heads/<b> publishes whatever we just committed to that
+            # branch regardless of which branch is checked out locally.
+            rc, out = self._git("push", "origin", f"HEAD:refs/heads/{b}", timeout=180)
+            if rc == 0:
+                results.append(f"{b}✓")
+            else:
+                all_ok = False
+                reason = out.strip().replace("\n", " ")[:120]
+                # a non-fast-forward is the common, expected "diverged" case
+                if "non-fast-forward" in out or "rejected" in out:
+                    reason = "rejected (diverged — resolve manually, not forced)"
+                results.append(f"{b}✗ [{reason}]")
+        summary = "pushed HEAD -> " + ", ".join(results)
+        return all_ok, summary
 
 
 # ---- self-test (creates a throwaway repo) -----------------------------------

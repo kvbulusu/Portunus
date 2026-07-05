@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -50,6 +51,13 @@ class FixApplier:
     #   repo_sdc_path     -> asic_flow/configs/constraints/<block>.sdc
     repo_config_path: Optional[str] = None
     repo_sdc_path: Optional[str] = None
+    # SRAM setup script (scripts/04_setup_srams.sh) — the tracked source of
+    # truth for FakeRAM macro geometry. `sram_reshape` fixes edit it and
+    # (optionally) regenerate the macros so a same-process retry sees the new
+    # shapes. sram_out_dir is where the .lef/.lib land (ASAP7_SRAM_DIR).
+    sram_setup_script: Optional[str] = None
+    sram_out_dir: Optional[str] = None
+    regen_srams: bool = True         # run the script to regenerate after editing
     _backed_up: set = field(default_factory=set)
 
     def __post_init__(self):
@@ -85,6 +93,8 @@ class FixApplier:
                     results.append(self._apply_sdc_period(fx))
                 elif t == "rtl":
                     results.append(self._apply_rtl(fx))
+                elif t == "sram_reshape":
+                    results.append(self._apply_sram_reshape(fx))
                 elif t == "manual":
                     results.append(AppliedFix("manual", False,
                                               fx.get("instruction", "(no instruction)")))
@@ -226,7 +236,101 @@ class FixApplier:
                           path, repo_file=path)
 
 
+    # ---- SRAM reshape (scripts/04_setup_srams.sh) ---------------------------
+    def _apply_sram_reshape(self, fx: Dict) -> AppliedFix:
+        """Reshape a FakeRAM macro by editing the SRAMS=() array (banks column)
+        and the global column_mux_factor in scripts/04_setup_srams.sh, then
+        (best-effort) regenerating the macros so a same-process retry uses the
+        new geometry. The script is the tracked source of truth, so the edit is
+        the git commit target (repo_file).
+        """
+        script = (fx.get("script") or self.sram_setup_script or "").strip()
+        macro = (fx.get("macro") or "").strip()
+        banks = fx.get("banks")
+        col_mux = fx.get("column_mux_factor")
+        if not script or not os.path.isfile(script):
+            return AppliedFix("sram_reshape", False,
+                              f"refused: SRAM setup script not found: {script or '(none)'}")
+        if not macro or not re.fullmatch(r"[\w.]+", macro):
+            return AppliedFix("sram_reshape", False, f"refused: bad macro name '{macro}'", script)
+        if not _is_pos_int(banks) or int(banks) not in (1, 2, 4, 8, 16, 32, 64):
+            return AppliedFix("sram_reshape", False,
+                              f"refused: banks '{banks}' not a power of two in 1..64", script)
+        banks = int(banks)
+        if col_mux is not None and (not _is_pos_int(col_mux) or int(col_mux) not in (1, 2, 4, 8)):
+            return AppliedFix("sram_reshape", False,
+                              f"refused: column_mux_factor '{col_mux}' invalid (1,2,4,8)", script)
+
+        with open(script) as fh:
+            text = fh.read()
+
+        # 1) update the banks column of this macro's SRAMS row. Row form:
+        #      "fakeram7_8192x32   32    8192  4"   # comment
+        #    keep name/width/depth + trailing comment; swap the 4th field.
+        row_re = re.compile(
+            rf'("{re.escape(macro)}\s+\d+\s+\d+\s+)(\d+)(\s*")', re.M)
+        # also tolerate a row with only 3 fields (no banks yet) -> append banks
+        row3_re = re.compile(
+            rf'("{re.escape(macro)}\s+\d+\s+\d+)(\s*")', re.M)
+        if row_re.search(text):
+            new_text = row_re.sub(rf"\g<1>{banks}\g<3>", text, count=1)
+        elif row3_re.search(text):
+            new_text = row3_re.sub(rf"\g<1>  {banks}\g<2>", text, count=1)
+        else:
+            return AppliedFix("sram_reshape", False,
+                              f"refused: macro '{macro}' not found in SRAMS=() array", script)
+
+        # 2) update the global column_mux_factor (if requested and different).
+        if col_mux is not None:
+            cm_re = re.compile(r'(cfg\["column_mux_factor"\]\s*=\s*)\d+')
+            if cm_re.search(new_text):
+                new_text = cm_re.sub(rf"\g<1>{int(col_mux)}", new_text, count=1)
+
+        if new_text == text:
+            return AppliedFix("sram_reshape", False,
+                              f"no change (macro '{macro}' already banks={banks})", script)
+
+        self._backup(script)
+        with open(script, "w") as fh:
+            fh.write(new_text)
+        detail = f"set {macro} banks={banks}"
+        if col_mux is not None:
+            detail += f", column_mux_factor={col_mux}"
+
+        # 3) best-effort regenerate so an in-process retry sees the new shapes.
+        if self.regen_srams:
+            ok, note = self._regen_srams(script)
+            detail += f"; regen: {note}"
+            # even if regen failed, the edit is valid and committable — the user
+            # can regenerate manually on `git pull`. Keep ok=True.
+        return AppliedFix("sram_reshape", True, detail, script, repo_file=script)
+
+    def _regen_srams(self, script: str) -> Tuple[bool, str]:
+        """Run scripts/04_setup_srams.sh to regenerate the FakeRAM macros.
+        Returns (ok, short_note). Never raises."""
+        try:
+            proc = subprocess.run(
+                ["bash", script], capture_output=True, text=True, timeout=900,
+                cwd=os.path.dirname(script) or ".",
+            )
+            if proc.returncode == 0:
+                return True, "regenerated macros OK"
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            return False, "regen failed: " + (tail[-1][:120] if tail else "unknown")
+        except subprocess.TimeoutExpired:
+            return False, "regen timed out (>900s)"
+        except (OSError, subprocess.SubprocessError) as e:
+            return False, f"regen could not run: {e}"
+
+
 # ---- validators -------------------------------------------------------------
+def _is_pos_int(v) -> bool:
+    try:
+        return int(v) > 0
+    except (ValueError, TypeError):
+        return False
+
+
 def _is_pos_float(v: str) -> bool:
     try:
         return float(v) > 0

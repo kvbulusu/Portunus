@@ -57,7 +57,7 @@ SYSTEM_PROMPT = (
 USER_TEMPLATE = """A stage failed in the JANUS ASIC flow. Here is the context.
 
 {excerpt}
-
+{physical}
 Reply with ONLY a JSON object:
 {{
   "diagnosis": "<root cause, one short paragraph>",
@@ -66,11 +66,21 @@ Reply with ONLY a JSON object:
     {{"type":"config","key":"<ORFS make var>","value":"<new value>","reason":"..."}},
     {{"type":"sdc_period","clock":"<clock name>","value":"<period ns>","reason":"..."}},
     {{"type":"rtl","file":"<path>","find":"<exact text>","replace":"<new text>","reason":"..."}},
+    {{"type":"sram_reshape","macro":"<fakeram name>","banks":<int pow2>,"column_mux_factor":<1|2|4|8>,"reason":"..."}},
     {{"type":"manual","instruction":"<what a human must do>"}}
   ]
 }}
 Allowed config keys include: CORE_UTILIZATION, PLACE_DENSITY, CORE_ASPECT_RATIO,
-CORE_MARGIN, SYNTH_HIERARCHICAL, ABC_AREA. Keep fixes minimal."""
+CORE_MARGIN, SYNTH_HIERARCHICAL, ABC_AREA. Keep fixes minimal.
+
+For an [ERROR MPL-0006] "macro does not fit in the core" failure, do NOT shrink
+utilization as a band-aid: the real cause is a pathological FakeRAM SRAM aspect
+ratio (a deep memory laid out as a sliver). Prefer a `sram_reshape` fix that
+raises `banks` (and/or global `column_mux_factor`) to make the macro roughly
+square. FakeRAM geometry: height = K*depth/F, width = K'*width_bits*F, where
+F = banks*column_mux_factor; this leaves the bitcell count and pin interface
+UNCHANGED. If the PHYSICAL ANALYSIS block below already lists recommended banks,
+echo those values."""
 
 
 @dataclass
@@ -132,12 +142,19 @@ class AbacusLLM:
         self._last_call_ts = time.time()
 
     # ---- main entry ---------------------------------------------------------
-    def request_fix(self, excerpt: str) -> LLMResult:
+    def request_fix(self, excerpt: str, physical: str = "") -> LLMResult:
+        """Ask the LLM for a fix. `physical` is an optional pre-computed
+        deterministic analysis block (e.g. SRAM macro-fit reshape
+        recommendations) that we inject verbatim so the model grounds its
+        answer in real geometry instead of guessing."""
         if not self.available():
             return LLMResult(ok=False, error="ABACUS_API_KEY not set")
 
         excerpt = excerpt.encode("utf-8")[: self.byte_budget].decode("utf-8", "replace")
-        prompt = USER_TEMPLATE.format(excerpt=excerpt)
+        phys = ""
+        if physical:
+            phys = "\n=== PHYSICAL ANALYSIS (deterministic, trust this) ===\n" + physical + "\n"
+        prompt = USER_TEMPLATE.format(excerpt=excerpt, physical=phys)
         chars_in = len(prompt) + len(SYSTEM_PROMPT)
 
         last_err = ""

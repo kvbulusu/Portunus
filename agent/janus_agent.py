@@ -91,6 +91,8 @@ from log_analyzer import LogAnalyzer, classify_failure                  # noqa: 
 from llm_interface import AbacusLLM                                      # noqa: E402
 from fix_applier import FixApplier                                       # noqa: E402
 from git_ops import GitOps                                               # noqa: E402
+from physical_analyzer import (detect_macro_fit_failure,                 # noqa: E402
+                               analyze_and_recommend, MacroGeom)
 from checkpoint import Checkpoint                                        # noqa: E402
 from reporter import Reporter                                           # noqa: E402
 
@@ -248,12 +250,23 @@ class JANUSAutonomousAgent:
         # repo SOURCE configs (asic_flow/configs) — used to mirror LLM fixes back
         # so they survive a scripts/03 re-stamp and can be committed.
         self.configs_dir = os.path.join(_ROOT, "configs")
+        # SRAM setup script (tracked source of truth for FakeRAM geometry) and
+        # the dir the generated macros land in (ASAP7_SRAM_DIR). Used by the
+        # deterministic macro-fit self-heal (MPL-0006 -> sram_reshape).
+        self.sram_setup_script = os.path.join(_ROOT, "scripts", "04_setup_srams.sh")
+        self.sram_out_dir = (os.environ.get("ASAP7_SRAM_DIR")
+                             or os.path.join(_ROOT, "srams", "asap7"))
+        # branches a committed fix should be published to (keeps mirror branches
+        # like main + v5.1_integration in lock-step). Empty => current branch.
+        sync = list(getattr(args, "git_sync_branches", None) or [])
         # git auto-commit of applied fixes (on by default; push off by default).
+        # Naming sync branches implies push (that's the whole point of syncing).
         self.git = GitOps(
             repo_root=self.rtl_root,
             logger=self.ui.debug,
             enable_commit=not args.no_git_commit,
-            enable_push=args.git_push,
+            enable_push=args.git_push or bool(sync),
+            sync_branches=sync,
         )
         # abstract (.lef/.lib) generation target — resolved lazily at first use.
         self._abstract_target: Optional[str] = None
@@ -519,6 +532,10 @@ class JANUSAutonomousAgent:
             rtl_root=self.rtl_root, logger=self.ui.debug,
             repo_config_path=self._repo_config_path(block),
             repo_sdc_path=self._repo_sdc_path(block),
+            sram_setup_script=(self.sram_setup_script
+                               if os.path.isfile(self.sram_setup_script) else None),
+            sram_out_dir=self.sram_out_dir,
+            regen_srams=not self.args.no_sram_regen,
         )
 
         best_wns: Optional[float] = None
@@ -566,6 +583,25 @@ class JANUSAutonomousAgent:
                 self.ui.err(f"{block}: fix: {triage.message}")
                 return res
 
+            # Deterministic PHYSICAL self-heal (no LLM): an RTL-MP "macro does
+            # not fit in the core" (MPL-0006) failure is almost always a
+            # pathological FakeRAM aspect ratio. Analyze the SRAM geometry the
+            # same way a human would, reshape the offending macro(s) via the
+            # tracked setup script, regenerate + commit — all without spending a
+            # credit. Runs even under --no-llm (it isn't an LLM path).
+            phys_ctx = ""
+            if not self.args.no_physical:
+                handled, phys_ctx = self._macro_fit_selfheal(block, attempt, applier, report)
+                if handled:
+                    self._snapshot(block)
+                    if attempt == self.args.max_retries:
+                        res.status = "NEEDS_MANUAL"
+                        res.note = ("SRAM reshape applied on final attempt — "
+                                    "re-run with --resume to retry floorplan")
+                        self.ui.warn(f"{block}: {res.note}")
+                        return res
+                    continue   # retry make with the reshaped macros
+
             if self.args.no_llm or not self.llm.available():
                 res.status = "FAILED"
                 res.note = "failed; LLM disabled — see log: " + res.log_path
@@ -597,7 +633,7 @@ class JANUSAutonomousAgent:
             # --- ask the LLM for a fix --------------------------------------
             excerpt = self.analyzer.build_llm_excerpt(report)
             self.ui.step(f"{block}: consulting Abacus LLM (attempt {attempt})")
-            llm_res = self.llm.request_fix(excerpt)
+            llm_res = self.llm.request_fix(excerpt, physical=phys_ctx)
             res.llm_calls += 1
             if not llm_res.ok or not llm_res.fixes:
                 res.status = "FAILED"
@@ -674,16 +710,92 @@ class JANUSAutonomousAgent:
                f"Diagnosis: {diag}\n"
                f"Applied by janus_agent.py on ORFS failure. NOT yet revalidated "
                f"— review before trusting.")
+        self._publish(block, paths, msg)
+
+    # ----- commit + (optional) push shared by all fix paths ------------------
+    def _publish(self, block: str, paths: List[str], msg: str) -> None:
+        """Commit `paths` with `msg`, then push if pushing is enabled. Honors
+        --git-sync-branches (publishes HEAD to every mirror branch). Best-effort:
+        never blocks the run — the fix is always on disk regardless."""
         ok, info = self.git.commit_paths(paths, msg)
-        if ok:
-            self.ui.good(f"{block}: {info} — files: "
-                         + ", ".join(os.path.relpath(p, self.rtl_root) for p in paths))
-            if self.args.git_push:
-                pok, pinfo = self.git.push()
-                (self.ui.good if pok else self.ui.warn)(f"{block}: {pinfo}")
-        else:
+        if not ok:
             self.ui.warn(f"{block}: git commit skipped — {info} "
                          "(fix is on disk; commit manually if desired).")
+            return
+        self.ui.good(f"{block}: {info} — files: "
+                     + ", ".join(os.path.relpath(p, self.rtl_root) for p in paths))
+        # push() is a no-op (returns disabled) unless --git-push or sync branches
+        # were given; when sync branches are set it publishes HEAD to each.
+        pok, pinfo = self.git.push()
+        if "disabled" not in pinfo:
+            (self.ui.good if pok else self.ui.warn)(f"{block}: {pinfo}")
+
+    # ----- deterministic macro-fit (MPL-0006) self-heal ----------------------
+    def _render_proposals(self, mfit, proposals) -> str:
+        """Human/LLM-readable summary of the macro-fit analysis + reshapes."""
+        lines = ["[ERROR MPL-0006] macro does not fit in the core.",
+                 f"  failing: {mfit.instance or mfit.master_hint or mfit.matched_line}"]
+        for p in proposals:
+            oa = MacroGeom.aspect(*p.old_dims)
+            na = MacroGeom.aspect(*p.new_dims)
+            lines.append(
+                f"  reshape {p.macro}: banks {p.old_banks}->{p.new_banks} "
+                f"(col_mux {p.col_mux}): {p.old_dims[0]}x{p.old_dims[1]}um "
+                f"({oa:.1f}:1) -> {p.new_dims[0]}x{p.new_dims[1]}um ({na:.1f}:1) "
+                f"— same bitcell count & pins.")
+        return "\n".join(lines)
+
+    def _macro_fit_selfheal(self, block: str, attempt: int, applier, report):
+        """Detect an MPL-0006 macro-fit failure and, if so, reshape the
+        offending FakeRAM macro(s) deterministically (no LLM), regenerate, and
+        commit. Returns (handled, phys_ctx):
+          handled=True  -> a reshape was applied+committed; caller should retry.
+          handled=False -> not a macro-fit issue (or nothing actionable); the
+                           returned phys_ctx (possibly "") is fed to the LLM.
+        """
+        mfit = detect_macro_fit_failure(report.error_lines, report.tail)
+        if mfit is None:
+            return False, ""
+        if not applier.sram_setup_script:
+            # detected, but we don't have the setup script to act on — hand the
+            # LLM a precise hint instead of guessing.
+            return False, (f"[ERROR MPL-0006] macro-fit at "
+                           f"{mfit.instance or mfit.matched_line}; SRAM setup "
+                           f"script not found so no auto-reshape was computed.")
+        proposals = analyze_and_recommend(
+            applier.sram_setup_script, self.sram_out_dir, issue=mfit)
+        if not proposals:
+            return False, (f"[ERROR MPL-0006] macro-fit at "
+                           f"{mfit.instance or mfit.matched_line}; current SRAM "
+                           f"aspect ratios already look square — inspect the log.")
+        phys = self._render_proposals(mfit, proposals)
+        self.ui.step(f"{block}: MPL-0006 macro-fit — deterministic SRAM reshape "
+                     f"of {len(proposals)} macro(s), NO LLM credit spent")
+        self.ui.info(phys)
+
+        if self.interactive:
+            if not self._ask("Apply these SRAM reshapes?",
+                             "y=apply / n=send to LLM instead", "y").startswith("y"):
+                return False, phys
+
+        fixes = [p.to_fix(applier.sram_setup_script) for p in proposals]
+        applied = applier.apply(fixes)
+        for a in applied:
+            self.ui.debug(f"{block}: fix[{a.type}] {'ok' if a.ok else 'skip'}: {a.detail}")
+        if not applier.applied_any(applied):
+            return False, phys
+
+        paths = sorted({a.repo_file for a in applied if a.ok and a.repo_file})
+        reshaped = ", ".join(f"{p.macro}(banks {p.old_banks}->{p.new_banks})"
+                             for p in proposals)
+        msg = (f"janus-agent: fix {block} MPL-0006 macro-fit via SRAM reshape "
+               f"(attempt {attempt}) [deterministic]\n\n"
+               f"Reshaped: {reshaped}. FakeRAM banks/column_mux folded so deep "
+               f"macros are ~square (fit the core); bitcell count and pin "
+               f"interface unchanged. Regenerated via scripts/04_setup_srams.sh. "
+               f"Auto-derived by janus_agent.py — review before trusting.")
+        self._publish(block, paths, msg)
+        return True, phys
 
     # ----- planning / estimate ----------------------------------------------
     def _print_plan(self) -> None:
@@ -920,7 +1032,9 @@ class JANUSAutonomousAgent:
         if not self.args.no_git_commit:
             if self.git.available():
                 git_state = f"commit -> {self.git.current_branch()}"
-                if self.args.git_push:
+                if self.git.sync_branches:
+                    git_state += f" (+push sync: {', '.join(self.git.sync_branches)})"
+                elif self.args.git_push:
                     git_state += " (+push origin)"
             else:
                 git_state = "commit requested but repo not a git work tree"
@@ -1007,6 +1121,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--git-push", action="store_true",
                    help="after committing a fix, push the current branch to "
                         "origin (default: off; uses your existing git creds)")
+    p.add_argument("--git-sync-branches", nargs="+", metavar="BRANCH",
+                   help="publish each committed fix (HEAD) to EVERY named branch "
+                        "on origin, keeping mirror branches in lock-step "
+                        "(e.g. --git-sync-branches main v5.1_integration). "
+                        "Implies push; fast-forward only, never --force.")
+    p.add_argument("--no-physical", action="store_true",
+                   help="disable the deterministic macro-fit (MPL-0006) SRAM "
+                        "reshape self-heal; send such failures to the LLM instead")
+    p.add_argument("--no-sram-regen", action="store_true",
+                   help="when reshaping SRAMs, edit scripts/04_setup_srams.sh but "
+                        "do NOT regenerate the macros in-process (you regenerate "
+                        "manually on `git pull` before --resume)")
     p.add_argument("--no-abstract", action="store_true",
                    help="skip generating each block's .lef/.lib abstract after "
                         "it hardens (default: generate them for hierarchical "
