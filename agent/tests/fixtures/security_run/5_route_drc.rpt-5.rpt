@@ -1,0 +1,36 @@
+violation type: Lef58EolKeepOut
+	srcs: net:u_kv_cache/_063229_ net:u_kv_cache/_063232_
+	bbox = (110.9750, 151.5420) - (110.9830, 151.5420) on Layer M2
+violation type: Lef58EolKeepOut
+	srcs: net:u_kv_cache/_063229_ net:u_kv_cache/_063232_
+	bbox = (110.9750, 151.5420) - (110.9830, 151.5600) on Layer M2
+violation type: Lef58EolKeepOut
+	srcs: net:u_kv_cache/_063229_ net:u_kv_cache/_063232_
+	bbox = (110.9750, 151.5600) - (110.9830, 151.5600) on Layer M2
+violation type: Lef58EolKeepOut
+	srcs: net:u_kv_cache/_063234_ net:u_kv_cache/_063238_
+	bbox = (111.1190, 152.1900) - (111.1450, 152.1900) on Layer M2
+violation type: Lef58EolKeepOut
+	srcs: net:u_kv_cache/_063234_ net:u_kv_cache/_063238_
+	bbox = (111.1190, 152.1900) - (111.1450, 152.2080) on Layer M2
+violation type: Lef58EolKeepOut
+	srcs: net:u_kv_cache/_063234_ net:u_kv_cache/_063238_
+	bbox = (111.1190, 152.2080) - (111.1450, 152.2080) on Layer M2
+violation type: Lef58EolKeepOut
+	srcs: net:u_kv_cache/net60725 net:u_kv_cache/_063232_
+	bbox = (110.9880, 151.5800) - (110.9880, 151.6090) on Layer M3
+violation type: Lef58EolKeepOut
+	srcs: net:u_kv_cache/net60725 net:u_kv_cache/_063232_
+	bbox = (110.9880, 151.5800) - (111.0060, 151.6090) on Layer M3
+violation type: Lef58EolKeepOut
+	srcs: net:u_kv_cache/net60725 net:u_kv_cache/_063232_
+	bbox = (111.0060, 151.5800) - (111.0060, 151.6090) on Layer M3
+violation type: Metal Spacing
+	srcs: net:u_kv_cache/_063229_ net:u_kv_cache/_063232_
+	bbox = (110.9750, 151.5420) - (110.9830, 151.5600) on Layer M2
+violation type: Lef58SpacingEndOfLine
+	srcs: net:u_kv_cache/_063234_ net:u_kv_cache/_063238_
+	bbox = (111.1190, 152.1900) - (111.1450, 152.2080) on Layer M2
+violation type: Lef58SpacingEndOfLine
+	srcs: net:u_kv_cache/net60725 net:u_kv_cache/_063232_
+	bbox = (110.9880, 151.5800) - (111.0060, 151.6090) on Layer M3

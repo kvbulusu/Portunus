@@ -1,0 +1,7 @@
+worst slack max -6.20
+tns max -60.00
+wns max -6.20
+Group   Internal Switching Leakage Total
+Sequential 1.0 0.1 0.0 1.1 25.0%
+Clock 0.8 0.4 0.0 1.2 22.0%
+Total 4.0 1.0 0.0 5.0 100.0%

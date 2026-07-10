@@ -1,0 +1,6 @@
+Startpoint: u_core/reg_a[3]$_DFF_P_
+Endpoint: u_core/reg_b[7]$_DFF_P_
+   3   1.20   2.40   30.00   slack (MET)
+worst slack max 38.20
+tns max 0.00
+wns max 38.20

@@ -1,0 +1,2 @@
+   Chip area for module '\u_core': 30000.00
+   Chip area for module '\top': 100000.00

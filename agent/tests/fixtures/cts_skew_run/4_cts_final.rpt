@@ -1,0 +1,5 @@
+Startpoint: u_core/reg_a[3]$_DFF_P_
+Endpoint: u_core/reg_b[7]$_DFF_P_
+worst slack max -8.50
+tns max -95.00
+wns max -8.50

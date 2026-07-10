@@ -1,0 +1,317 @@
+
+==========================================================================
+global place report_tns
+--------------------------------------------------------------------------
+tns max -49438544.00
+
+==========================================================================
+global place report_wns
+--------------------------------------------------------------------------
+wns max -1166.54
+
+==========================================================================
+global place report_worst_slack
+--------------------------------------------------------------------------
+worst slack max -1166.54
+
+==========================================================================
+global place report_clock_min_period
+--------------------------------------------------------------------------
+core_clk period_min = 1167.53 fmax = 856.51
+
+==========================================================================
+global place report_checks -path_delay min
+--------------------------------------------------------------------------
+Startpoint: u_kv_cache/tag_q[3843][15]$_DFFE_PP_
+            (rising edge-triggered flip-flop clocked by core_clk)
+Endpoint: u_kv_cache/tag_q[3843][15]$_DFFE_PP_
+          (rising edge-triggered flip-flop clocked by core_clk)
+Path Group: core_clk
+Path Type: min
+
+Fanout     Cap    Slew   Delay    Time   Description
+-----------------------------------------------------------------------------
+                  0.05    0.00    0.00   clock core_clk (rise edge)
+                          0.00    0.00   clock network delay (ideal)
+                  0.05    0.00    0.00 ^ u_kv_cache/tag_q[3843][15]$_DFFE_PP_/CLK (DFFHQNx1_ASAP7_75t_R)
+     2    1.46   17.28   35.61   35.61 ^ u_kv_cache/tag_q[3843][15]$_DFFE_PP_/QN (DFFHQNx1_ASAP7_75t_R)
+                                         u_kv_cache/_0005036_ (net)
+                 17.28    0.04   35.66 ^ u_kv_cache/_1028549_/A1 (AOI21x1_ASAP7_75t_R)
+     1    0.64    6.01    8.82   44.48 v u_kv_cache/_1028549_/Y (AOI21x1_ASAP7_75t_R)
+                                         u_kv_cache/_0144192_ (net)
+                  6.01    0.03   44.50 v u_kv_cache/tag_q[3843][15]$_DFFE_PP_/D (DFFHQNx1_ASAP7_75t_R)
+                                 44.50   data arrival time
+
+                  0.05    0.00    0.00   clock core_clk (rise edge)
+                          0.00    0.00   clock network delay (ideal)
+                          0.02    0.02   clock uncertainty
+                          0.00    0.02   clock reconvergence pessimism
+                                  0.02 ^ u_kv_cache/tag_q[3843][15]$_DFFE_PP_/CLK (DFFHQNx1_ASAP7_75t_R)
+                          8.66    8.68   library hold time
+                                  8.68   data required time
+-----------------------------------------------------------------------------
+                                  8.68   data required time
+                                -44.50   data arrival time
+-----------------------------------------------------------------------------
+                                 35.82   slack (MET)
+
+
+
+==========================================================================
+global place report_checks -path_delay max
+--------------------------------------------------------------------------
+Startpoint: u_kv_cache/tag_q[3575][6]$_DFFE_PP_
+            (rising edge-triggered flip-flop clocked by core_clk)
+Endpoint: u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/u_ram
+          (rising edge-triggered flip-flop clocked by core_clk)
+Path Group: core_clk
+Path Type: max
+
+Fanout     Cap    Slew   Delay    Time   Description
+-----------------------------------------------------------------------------
+                  0.05    0.00    0.00   clock core_clk (rise edge)
+                          0.00    0.00   clock network delay (ideal)
+                  0.05    0.00    0.00 ^ u_kv_cache/tag_q[3575][6]$_DFFE_PP_/CLK (DFFHQNx1_ASAP7_75t_R)
+     2    2.35   22.92   38.93   38.93 ^ u_kv_cache/tag_q[3575][6]$_DFFE_PP_/QN (DFFHQNx1_ASAP7_75t_R)
+                                         u_kv_cache/_0073013_ (net)
+                 22.93    0.14   39.07 ^ u_kv_cache/_0602490_/A (NAND2x1_ASAP7_75t_R)
+     1    1.16   22.54    9.01   48.08 v u_kv_cache/_0602490_/Y (NAND2x1_ASAP7_75t_R)
+                                         u_kv_cache/_0188858_ (net)
+                 22.55    0.13   48.21 v u_kv_cache/_0602491_/B (OA211x2_ASAP7_75t_R)
+     1    1.18   12.68   30.63   78.84 v u_kv_cache/_0602491_/Y (OA211x2_ASAP7_75t_R)
+                                         u_kv_cache/_0188859_ (net)
+                 12.69    0.12   78.95 v u_kv_cache/_0602492_/C (OR3x1_ASAP7_75t_R)
+     1    0.80   10.82   21.36  100.31 v u_kv_cache/_0602492_/Y (OR3x1_ASAP7_75t_R)
+                                         u_kv_cache/_0188860_ (net)
+                 10.82    0.06  100.37 v u_kv_cache/_0602493_/B (OA211x2_ASAP7_75t_R)
+     1    1.34   13.07   27.19  127.56 v u_kv_cache/_0602493_/Y (OA211x2_ASAP7_75t_R)
+                                         u_kv_cache/_0188861_ (net)
+                 13.08    0.16  127.72 v u_kv_cache/_0602509_/B (OR3x1_ASAP7_75t_R)
+     1    3.64   24.95   29.27  156.99 v u_kv_cache/_0602509_/Y (OR3x1_ASAP7_75t_R)
+                                         u_kv_cache/_0188877_ (net)
+                 25.12    1.13  158.11 v u_kv_cache/place228812/A (BUFx6f_ASAP7_75t_R)
+     1   19.49   14.75   21.65  179.77 v u_kv_cache/place228812/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net228811 (net)
+                 86.14   26.73  206.50 v u_kv_cache/_0602510_/D (AND4x1_ASAP7_75t_R)
+     1    0.93    9.11   28.20  234.70 v u_kv_cache/_0602510_/Y (AND4x1_ASAP7_75t_R)
+                                         u_kv_cache/_0188878_ (net)
+                  9.11    0.07  234.77 v u_kv_cache/_0602511_/E (OR5x1_ASAP7_75t_R)
+     1    1.78   17.66   36.50  271.28 v u_kv_cache/_0602511_/Y (OR5x1_ASAP7_75t_R)
+                                         u_kv_cache/_0188879_ (net)
+                 17.68    0.29  271.57 v u_kv_cache/_0602512_/B2 (OA22x2_ASAP7_75t_R)
+     1    6.33   24.42   28.98  300.55 v u_kv_cache/_0602512_/Y (OA22x2_ASAP7_75t_R)
+                                         u_kv_cache/_0188880_ (net)
+                 26.27    3.54  304.09 v u_kv_cache/place201083/A (BUFx6f_ASAP7_75t_R)
+     1   18.44   14.40   21.71  325.80 v u_kv_cache/place201083/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net201082 (net)
+                 77.67   24.02  349.81 v u_kv_cache/_0603999_/B (AND5x1_ASAP7_75t_R)
+     1    4.75   29.38   39.49  389.30 v u_kv_cache/_0603999_/Y (AND5x1_ASAP7_75t_R)
+                                         u_kv_cache/_0190367_ (net)
+                 29.82    1.99  391.29 v u_kv_cache/place200292/A (BUFx6f_ASAP7_75t_R)
+     1   13.56   12.60   21.31  412.60 v u_kv_cache/place200292/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net200291 (net)
+                 44.38   13.28  425.88 v u_kv_cache/place200291/A (BUFx6f_ASAP7_75t_R)
+     1   20.75   15.99   26.14  452.02 v u_kv_cache/place200291/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net200290 (net)
+                 97.13   30.18  482.20 v u_kv_cache/_0608360_/B (OR3x1_ASAP7_75t_R)
+     2    1.94   16.51   37.70  519.90 v u_kv_cache/_0608360_/Y (OR3x1_ASAP7_75t_R)
+                                         u_kv_cache/_0194728_ (net)
+                 16.51    0.09  519.99 v u_kv_cache/_0718005_/B (XOR2x2_ASAP7_75t_R)
+     2    1.61   10.28   21.74  541.73 v u_kv_cache/_0718005_/Y (XOR2x2_ASAP7_75t_R)
+                                         u_kv_cache/_0303933_ (net)
+                 10.29    0.13  541.86 v u_kv_cache/_0718009_/B (OR5x1_ASAP7_75t_R)
+     2    2.00   19.01   33.72  575.58 v u_kv_cache/_0718009_/Y (OR5x1_ASAP7_75t_R)
+                                         u_kv_cache/_0303937_ (net)
+                 19.02    0.17  575.75 v u_kv_cache/_1030890_/C (OR5x2_ASAP7_75t_R)
+     1    6.44   29.57   48.84  624.58 v u_kv_cache/_1030890_/Y (OR5x2_ASAP7_75t_R)
+                                         u_kv_cache/_0546614_ (net)
+                 31.22    3.70  628.28 v u_kv_cache/place199449/A (BUFx6f_ASAP7_75t_R)
+     2   10.87   13.19   20.82  649.10 v u_kv_cache/place199449/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net199448 (net)
+                 29.79    8.37  657.47 v u_kv_cache/_1050793_/B (NOR2x2_ASAP7_75t_R)
+     1    7.59   32.14   19.99  677.45 ^ u_kv_cache/_1050793_/Y (NOR2x2_ASAP7_75t_R)
+                                         u_kv_cache/_0562413_ (net)
+                 35.13    5.11  682.56 ^ u_kv_cache/place196879/A (BUFx6f_ASAP7_75t_R)
+     2   22.38   17.98   22.80  705.36 ^ u_kv_cache/place196879/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net196878 (net)
+                112.67   35.00  740.36 ^ u_kv_cache/_1050795_/B (AND2x4_ASAP7_75t_R)
+     2    8.21   19.82   30.87  771.23 ^ u_kv_cache/_1050795_/Y (AND2x4_ASAP7_75t_R)
+                                         u_kv_cache/spa_req (net)
+                 25.19    5.29  776.52 ^ u_kv_cache/u_spm/_1048_/A (INVx2_ASAP7_75t_R)
+     2    2.92   13.47   10.35  786.87 v u_kv_cache/u_spm/_1048_/Y (INVx2_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/_0005_ (net)
+                 13.56    0.62  787.48 v u_kv_cache/u_spm/_1056_/A2 (OA211x2_ASAP7_75t_R)
+     1    5.19   22.45   30.21  817.69 v u_kv_cache/u_spm/_1056_/Y (OA211x2_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/_0013_ (net)
+                 23.32    2.38  820.07 v u_kv_cache/u_spm/place194422/A (BUFx6f_ASAP7_75t_R)
+     1   20.75   14.90   21.36  841.43 v u_kv_cache/u_spm/place194422/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/net194421 (net)
+                 96.77   30.12  871.55 v u_kv_cache/u_spm/place194421/A (BUFx6f_ASAP7_75t_R)
+     2    8.89   15.77   30.92  902.47 v u_kv_cache/u_spm/place194421/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/net194420 (net)
+                 18.03    3.01  905.48 v u_kv_cache/u_spm/place194408/A (BUFx3_ASAP7_75t_R)
+    12   15.59   33.32   24.24  929.72 v u_kv_cache/u_spm/place194408/Y (BUFx3_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/net194407 (net)
+                 39.12    7.17  936.89 v u_kv_cache/u_spm/_1082_/B (AND2x2_ASAP7_75t_R)
+     1    0.95    7.26   22.56  959.45 v u_kv_cache/u_spm/_1082_/Y (AND2x2_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/_0029_ (net)
+                  7.26    0.07  959.52 v u_kv_cache/u_spm/_1083_/B (AO21x1_ASAP7_75t_R)
+     1   13.04   74.26   39.67  999.19 v u_kv_cache/u_spm/_1083_/Y (AO21x1_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/g_bank[0].ma_wdata[125] (net)
+                 85.09   14.65 1013.84 v u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/place194101/A (BUFx6f_ASAP7_75t_R)
+     1   32.24   19.70   34.16 1048.00 v u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/place194101/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/net194100 (net)
+                165.87   69.48 1117.47 v u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/u_ram/wd_in[125] (fakeram7_2048x128)
+                               1117.47   data arrival time
+
+                  0.05    1.00    1.00   clock core_clk (rise edge)
+                          0.00    1.00   clock network delay (ideal)
+                         -0.06    0.94   clock uncertainty
+                          0.00    0.94   clock reconvergence pessimism
+                                  0.94 ^ u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/u_ram/clk (fakeram7_2048x128)
+                        -50.00  -49.06   library setup time
+                                -49.06   data required time
+-----------------------------------------------------------------------------
+                                -49.06   data required time
+                               -1117.47   data arrival time
+-----------------------------------------------------------------------------
+                               -1166.54   slack (VIOLATED)
+
+
+
+==========================================================================
+global place report_checks -unconstrained
+--------------------------------------------------------------------------
+Startpoint: u_kv_cache/tag_q[3575][6]$_DFFE_PP_
+            (rising edge-triggered flip-flop clocked by core_clk)
+Endpoint: u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/u_ram
+          (rising edge-triggered flip-flop clocked by core_clk)
+Path Group: core_clk
+Path Type: max
+
+Fanout     Cap    Slew   Delay    Time   Description
+-----------------------------------------------------------------------------
+                  0.05    0.00    0.00   clock core_clk (rise edge)
+                          0.00    0.00   clock network delay (ideal)
+                  0.05    0.00    0.00 ^ u_kv_cache/tag_q[3575][6]$_DFFE_PP_/CLK (DFFHQNx1_ASAP7_75t_R)
+     2    2.35   22.92   38.93   38.93 ^ u_kv_cache/tag_q[3575][6]$_DFFE_PP_/QN (DFFHQNx1_ASAP7_75t_R)
+                                         u_kv_cache/_0073013_ (net)
+                 22.93    0.14   39.07 ^ u_kv_cache/_0602490_/A (NAND2x1_ASAP7_75t_R)
+     1    1.16   22.54    9.01   48.08 v u_kv_cache/_0602490_/Y (NAND2x1_ASAP7_75t_R)
+                                         u_kv_cache/_0188858_ (net)
+                 22.55    0.13   48.21 v u_kv_cache/_0602491_/B (OA211x2_ASAP7_75t_R)
+     1    1.18   12.68   30.63   78.84 v u_kv_cache/_0602491_/Y (OA211x2_ASAP7_75t_R)
+                                         u_kv_cache/_0188859_ (net)
+                 12.69    0.12   78.95 v u_kv_cache/_0602492_/C (OR3x1_ASAP7_75t_R)
+     1    0.80   10.82   21.36  100.31 v u_kv_cache/_0602492_/Y (OR3x1_ASAP7_75t_R)
+                                         u_kv_cache/_0188860_ (net)
+                 10.82    0.06  100.37 v u_kv_cache/_0602493_/B (OA211x2_ASAP7_75t_R)
+     1    1.34   13.07   27.19  127.56 v u_kv_cache/_0602493_/Y (OA211x2_ASAP7_75t_R)
+                                         u_kv_cache/_0188861_ (net)
+                 13.08    0.16  127.72 v u_kv_cache/_0602509_/B (OR3x1_ASAP7_75t_R)
+     1    3.64   24.95   29.27  156.99 v u_kv_cache/_0602509_/Y (OR3x1_ASAP7_75t_R)
+                                         u_kv_cache/_0188877_ (net)
+                 25.12    1.13  158.11 v u_kv_cache/place228812/A (BUFx6f_ASAP7_75t_R)
+     1   19.49   14.75   21.65  179.77 v u_kv_cache/place228812/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net228811 (net)
+                 86.14   26.73  206.50 v u_kv_cache/_0602510_/D (AND4x1_ASAP7_75t_R)
+     1    0.93    9.11   28.20  234.70 v u_kv_cache/_0602510_/Y (AND4x1_ASAP7_75t_R)
+                                         u_kv_cache/_0188878_ (net)
+                  9.11    0.07  234.77 v u_kv_cache/_0602511_/E (OR5x1_ASAP7_75t_R)
+     1    1.78   17.66   36.50  271.28 v u_kv_cache/_0602511_/Y (OR5x1_ASAP7_75t_R)
+                                         u_kv_cache/_0188879_ (net)
+                 17.68    0.29  271.57 v u_kv_cache/_0602512_/B2 (OA22x2_ASAP7_75t_R)
+     1    6.33   24.42   28.98  300.55 v u_kv_cache/_0602512_/Y (OA22x2_ASAP7_75t_R)
+                                         u_kv_cache/_0188880_ (net)
+                 26.27    3.54  304.09 v u_kv_cache/place201083/A (BUFx6f_ASAP7_75t_R)
+     1   18.44   14.40   21.71  325.80 v u_kv_cache/place201083/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net201082 (net)
+                 77.67   24.02  349.81 v u_kv_cache/_0603999_/B (AND5x1_ASAP7_75t_R)
+     1    4.75   29.38   39.49  389.30 v u_kv_cache/_0603999_/Y (AND5x1_ASAP7_75t_R)
+                                         u_kv_cache/_0190367_ (net)
+                 29.82    1.99  391.29 v u_kv_cache/place200292/A (BUFx6f_ASAP7_75t_R)
+     1   13.56   12.60   21.31  412.60 v u_kv_cache/place200292/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net200291 (net)
+                 44.38   13.28  425.88 v u_kv_cache/place200291/A (BUFx6f_ASAP7_75t_R)
+     1   20.75   15.99   26.14  452.02 v u_kv_cache/place200291/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net200290 (net)
+                 97.13   30.18  482.20 v u_kv_cache/_0608360_/B (OR3x1_ASAP7_75t_R)
+     2    1.94   16.51   37.70  519.90 v u_kv_cache/_0608360_/Y (OR3x1_ASAP7_75t_R)
+                                         u_kv_cache/_0194728_ (net)
+                 16.51    0.09  519.99 v u_kv_cache/_0718005_/B (XOR2x2_ASAP7_75t_R)
+     2    1.61   10.28   21.74  541.73 v u_kv_cache/_0718005_/Y (XOR2x2_ASAP7_75t_R)
+                                         u_kv_cache/_0303933_ (net)
+                 10.29    0.13  541.86 v u_kv_cache/_0718009_/B (OR5x1_ASAP7_75t_R)
+     2    2.00   19.01   33.72  575.58 v u_kv_cache/_0718009_/Y (OR5x1_ASAP7_75t_R)
+                                         u_kv_cache/_0303937_ (net)
+                 19.02    0.17  575.75 v u_kv_cache/_1030890_/C (OR5x2_ASAP7_75t_R)
+     1    6.44   29.57   48.84  624.58 v u_kv_cache/_1030890_/Y (OR5x2_ASAP7_75t_R)
+                                         u_kv_cache/_0546614_ (net)
+                 31.22    3.70  628.28 v u_kv_cache/place199449/A (BUFx6f_ASAP7_75t_R)
+     2   10.87   13.19   20.82  649.10 v u_kv_cache/place199449/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net199448 (net)
+                 29.79    8.37  657.47 v u_kv_cache/_1050793_/B (NOR2x2_ASAP7_75t_R)
+     1    7.59   32.14   19.99  677.45 ^ u_kv_cache/_1050793_/Y (NOR2x2_ASAP7_75t_R)
+                                         u_kv_cache/_0562413_ (net)
+                 35.13    5.11  682.56 ^ u_kv_cache/place196879/A (BUFx6f_ASAP7_75t_R)
+     2   22.38   17.98   22.80  705.36 ^ u_kv_cache/place196879/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/net196878 (net)
+                112.67   35.00  740.36 ^ u_kv_cache/_1050795_/B (AND2x4_ASAP7_75t_R)
+     2    8.21   19.82   30.87  771.23 ^ u_kv_cache/_1050795_/Y (AND2x4_ASAP7_75t_R)
+                                         u_kv_cache/spa_req (net)
+                 25.19    5.29  776.52 ^ u_kv_cache/u_spm/_1048_/A (INVx2_ASAP7_75t_R)
+     2    2.92   13.47   10.35  786.87 v u_kv_cache/u_spm/_1048_/Y (INVx2_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/_0005_ (net)
+                 13.56    0.62  787.48 v u_kv_cache/u_spm/_1056_/A2 (OA211x2_ASAP7_75t_R)
+     1    5.19   22.45   30.21  817.69 v u_kv_cache/u_spm/_1056_/Y (OA211x2_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/_0013_ (net)
+                 23.32    2.38  820.07 v u_kv_cache/u_spm/place194422/A (BUFx6f_ASAP7_75t_R)
+     1   20.75   14.90   21.36  841.43 v u_kv_cache/u_spm/place194422/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/net194421 (net)
+                 96.77   30.12  871.55 v u_kv_cache/u_spm/place194421/A (BUFx6f_ASAP7_75t_R)
+     2    8.89   15.77   30.92  902.47 v u_kv_cache/u_spm/place194421/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/net194420 (net)
+                 18.03    3.01  905.48 v u_kv_cache/u_spm/place194408/A (BUFx3_ASAP7_75t_R)
+    12   15.59   33.32   24.24  929.72 v u_kv_cache/u_spm/place194408/Y (BUFx3_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/net194407 (net)
+                 39.12    7.17  936.89 v u_kv_cache/u_spm/_1082_/B (AND2x2_ASAP7_75t_R)
+     1    0.95    7.26   22.56  959.45 v u_kv_cache/u_spm/_1082_/Y (AND2x2_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/_0029_ (net)
+                  7.26    0.07  959.52 v u_kv_cache/u_spm/_1083_/B (AO21x1_ASAP7_75t_R)
+     1   13.04   74.26   39.67  999.19 v u_kv_cache/u_spm/_1083_/Y (AO21x1_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/g_bank[0].ma_wdata[125] (net)
+                 85.09   14.65 1013.84 v u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/place194101/A (BUFx6f_ASAP7_75t_R)
+     1   32.24   19.70   34.16 1048.00 v u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/place194101/Y (BUFx6f_ASAP7_75t_R)
+                                         u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/net194100 (net)
+                165.87   69.48 1117.47 v u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/u_ram/wd_in[125] (fakeram7_2048x128)
+                               1117.47   data arrival time
+
+                  0.05    1.00    1.00   clock core_clk (rise edge)
+                          0.00    1.00   clock network delay (ideal)
+                         -0.06    0.94   clock uncertainty
+                          0.00    0.94   clock reconvergence pessimism
+                                  0.94 ^ u_kv_cache/u_spm/g_bank[0].g_deep_macro.u_macro_a/u_ram/clk (fakeram7_2048x128)
+                        -50.00  -49.06   library setup time
+                                -49.06   data required time
+-----------------------------------------------------------------------------
+                                -49.06   data required time
+                               -1117.47   data arrival time
+-----------------------------------------------------------------------------
+                               -1166.54   slack (VIOLATED)
+
+
+
+==========================================================================
+global place report_power
+--------------------------------------------------------------------------
+Group                  Internal  Switching    Leakage      Total
+                          Power      Power      Power      Power (Watts)
+----------------------------------------------------------------
+Sequential             1.24e+02   1.94e-01   1.14e-05   1.24e+02  88.0%
+Combinational          1.74e+00   1.91e+00   5.74e-05   3.64e+00   2.6%
+Clock                  0.00e+00   0.00e+00   0.00e+00   0.00e+00   0.0%
+Macro                  1.35e+01   0.00e+00   6.44e-04   1.35e+01   9.6%
+Pad                    0.00e+00   0.00e+00   0.00e+00   0.00e+00   0.0%
+----------------------------------------------------------------
+Total                  1.39e+02   2.10e+00   7.14e-04   1.41e+02 100.0%
+                          98.5%       1.5%       0.0%

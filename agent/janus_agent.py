@@ -94,6 +94,7 @@ from git_ops import GitOps                                               # noqa:
 from physical_analyzer import (detect_macro_fit_failure,                 # noqa: E402
                                analyze_and_recommend, MacroGeom)
 from reasoning_engine import reason as reason_failure                    # noqa: E402
+from reasoning_engine import reason_with_reports                         # noqa: E402
 from dependency_manager import DEFAULT_GRAPH as _DEP_GRAPH               # noqa: E402
 from checkpoint import Checkpoint                                        # noqa: E402
 from reporter import Reporter                                           # noqa: E402
@@ -287,6 +288,69 @@ class JANUSAutonomousAgent:
 
     def _block_log(self, block: str) -> str:
         return os.path.join(self.run_dir, f"{block}.log")
+
+    # ----- ORFS stage-report directory for a block ---------------------------
+    def _reports_dir(self, block: str) -> Optional[str]:
+        """Locate the ORFS reports dir for a block (holds 2_floorplan…6_finish).
+
+        ORFS writes reports under flow/reports/<platform>/<design>/base/. The
+        design folder is usually the block name or 'janus_<block>'. We glob a
+        few known layouts and return the first that actually contains stage
+        reports; None if nothing is found (Tier-1 then degrades to log-only).
+        An explicit --reports-dir override wins if provided.
+        """
+        override = getattr(self.args, "reports_dir", None)
+        if override:
+            return override
+        if not self.flow_dir:
+            return None
+        cands = [
+            os.path.join(self.flow_dir, "reports", "asap7", block, "base"),
+            os.path.join(self.flow_dir, "reports", "asap7", f"janus_{block}", "base"),
+        ]
+        # last resort: glob for any reports dir whose name contains the block
+        cands += glob.glob(os.path.join(self.flow_dir, "reports", "*", f"*{block}*", "base"))
+        for d in cands:
+            if os.path.isdir(d) and glob.glob(os.path.join(d, "*_*.rpt")):
+                return d
+        return None
+
+    def _synth_stat_path(self, block: str) -> Optional[str]:
+        """synth_stat.txt lives in the ORFS logs tree (1_synth) for a block."""
+        if not self.flow_dir:
+            return None
+        for pat in (
+            os.path.join(self.flow_dir, "logs", "asap7", block, "base", "*synth_stat*"),
+            os.path.join(self.flow_dir, "reports", "asap7", block, "base", "synth_stat.txt"),
+            os.path.join(self.flow_dir, "logs", "asap7", f"janus_{block}", "base", "*synth_stat*"),
+        ):
+            hits = sorted(glob.glob(pat))
+            if hits:
+                return hits[-1]
+        return None
+
+    # ----- map an LLM fix to the remedy LAYER (for the evidence guardrail) ----
+    # config keys that move the die/core geometry are FLOORPLAN; density/padding
+    # is PLACE; clock period is SDC; RTL edits are RTL. This lets the Tier-1
+    # guardrail veto a fix whose layer cannot explain the evidence (e.g. a
+    # PLACE density tweak for a violation that already exists pre-placement).
+    _CONFIG_KEY_LAYER = {
+        "PLACE_DENSITY": "PLACE", "CELL_PAD_IN_SITES_GLOBAL_PLACEMENT": "PLACE",
+        "CORE_UTILIZATION": "FLOORPLAN", "CORE_ASPECT_RATIO": "FLOORPLAN",
+        "CORE_MARGIN": "FLOORPLAN", "CORE_AREA": "FLOORPLAN", "DIE_AREA": "FLOORPLAN",
+    }
+
+    @classmethod
+    def _fix_layer(cls, fx: Dict) -> str:
+        t = (fx.get("type") or "").lower()
+        if t == "sdc_period":
+            return "SDC"
+        if t == "rtl":
+            return "RTL"
+        if t == "config":
+            key = (fx.get("key") or fx.get("var") or "").upper()
+            return cls._CONFIG_KEY_LAYER.get(key, "FLOORPLAN")
+        return "UNKNOWN"
 
     # ----- the make command --------------------------------------------------
     def _make_cmd(self, block: str) -> List[str]:
@@ -597,11 +661,31 @@ class JANUSAutonomousAgent:
             # auto-apply remains the geometry-exact macro-fit reshape below.
             reason_ctx = ""
             reason_tag = ""
+            fused = None
             if getattr(self.args, "reason", False):
-                rr = reason_failure(report.error_lines, report.tail, block,
-                                    _DEP_GRAPH, stage_hint=None)
-                reason_ctx = rr.briefing
-                if rr.top is not None:
+                # EVIDENCE-FIRST: fuse the single-log signature with the FULL
+                # cross-stage report trajectory (Tier-1). The evidence-derived
+                # layer overrides the log-only guess when they disagree — this
+                # is what stops a route-abort being mislabelled "route" when the
+                # timing was already broken pre-placement.
+                rdir = self._reports_dir(block)
+                fused = reason_with_reports(
+                    report.error_lines, report.tail, block, _DEP_GRAPH,
+                    report_dir=rdir, synth_stat_path=self._synth_stat_path(block),
+                    stage_hint=None)
+                rr = fused.base
+                reason_ctx = fused.briefing
+                rc = fused.root_cause
+                if rc is not None:
+                    self.ui.step(
+                        f"{block}: reasoning → ROOT CAUSE {fused.root_layer} "
+                        f"[{rc.confidence:.2f}] (cross-stage evidence); "
+                        f"first violation @ {fused.evidence.first_violation_stage}")
+                    self.ui.info(f"      {rc.summary}")
+                    self.ui.info(f"      remedy    : {rc.fix_hint}")
+                    reason_tag = f"[reason:{fused.root_layer} {rc.confidence:.2f}/evidence] "
+                    res.note = (reason_tag + (res.note or ""))[:240]
+                elif rr.top is not None:
                     t = rr.top
                     ripple = (f"; ripples to {', '.join(t.ripple_blocks)}"
                               if t.ripple_blocks else "")
@@ -612,15 +696,13 @@ class JANUSAutonomousAgent:
                         + ("  [TOOL-BUG suspected]" if rr.tool_bug_suspected else ""))
                     self.ui.info(f"      root cause: {t.root_cause}")
                     self.ui.info(f"      remedy    : {t.remedy_hint}")
-                    # surface the classification in the report note (and keep a
-                    # tag so it survives even the terminal FAILED/no-LLM notes).
                     reason_tag = f"[reason:{t.layer}/{t.signature} {t.confidence:.2f}] "
                     res.note = (reason_tag + (res.note or ""))[:240]
                 else:
                     self.ui.step(f"{block}: reasoning → novel failure "
                                  "(no signature matched); reason from first principles")
                 if self.args.verbose:
-                    self.ui.panel(f"{block}: reasoning briefing", rr.briefing)
+                    self.ui.panel(f"{block}: reasoning briefing", fused.briefing)
 
             # Deterministic PHYSICAL self-heal (no LLM): an RTL-MP "macro does
             # not fit in the core" (MPL-0006) failure is almost always a
@@ -694,6 +776,35 @@ class JANUSAutonomousAgent:
                     res.note = "user declined the LLM fixes — inspect log: " + res.log_path
                     self.ui.warn(f"{block}: fixes declined by user.")
                     return res
+
+            # EVIDENCE GUARDRAIL (Tier-3 reconciler): before touching any file,
+            # veto any proposed fix whose LAYER cannot explain the cross-stage
+            # evidence — e.g. a PLACE/ROUTE density tweak when timing is already
+            # violated pre-placement. This is the deterministic referee that
+            # would have blocked the two reverted `PLACE_DENSITY` commits.
+            if fused is not None and fused.evidence is not None:
+                kept, vetoed = [], []
+                for fx in llm_res.fixes:
+                    layer = self._fix_layer(fx)
+                    ok_fix, why = fused.fix_allowed(layer)
+                    (kept if ok_fix else vetoed).append((fx, layer, why))
+                for fx, layer, why in vetoed:
+                    self.ui.warn(f"{block}: VETOED {layer} fix — {why}")
+                if vetoed and not kept:
+                    # every proposed fix contradicts the evidence: do NOT apply a
+                    # symptom fix. Surface the real root cause for review instead.
+                    rc = fused.root_cause
+                    res.status = "NEEDS_MANUAL"
+                    res.note = (reason_tag + "all LLM fixes vetoed by evidence "
+                                f"guardrail; root cause {fused.root_layer}: "
+                                + (rc.summary if rc else ""))[:240]
+                    self.ui.err(f"{block}: all proposed fixes contradict the "
+                                f"evidence (root cause {fused.root_layer}). "
+                                "Not applying a symptom fix.")
+                    if rc and rc.fix_hint:
+                        self.ui.info(f"      real remedy: {rc.fix_hint}")
+                    return res
+                llm_res.fixes = [fx for fx, _, _ in kept]
 
             applied = applier.apply(llm_res.fixes)
             for a in applied:
@@ -1184,6 +1295,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "ONLY — it never auto-applies a change; the sole "
                         "deterministic auto-fix remains the macro-fit reshape. "
                         "Prints a real diagnosis even under --no-llm.")
+    p.add_argument("--reports-dir", default=None,
+                   help="override the ORFS stage-report dir used by the "
+                        "cross-stage evidence analyzer (Tier-1). Normally "
+                        "auto-detected under $ORFS/flow/reports/...; set this to "
+                        "point at a saved reports dir (e.g. to replay a failure).")
     p.add_argument("--no-physical", action="store_true",
                    help="disable the deterministic macro-fit (MPL-0006) SRAM "
                         "reshape self-heal; send such failures to the LLM instead")

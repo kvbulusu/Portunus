@@ -1,0 +1,810 @@
+Found gzip magic in file `/home/kiran/projects/janus/janus-ai-soc/asic_flow/OpenROAD-flow-scripts/flow/platforms/asap7/lib/NLDM/asap7sc7p5t_AO_RVT_FF_nldm_211120.lib.gz', decompressing using zlib.
+Found gzip magic in file `/home/kiran/projects/janus/janus-ai-soc/asic_flow/OpenROAD-flow-scripts/flow/platforms/asap7/lib/NLDM/asap7sc7p5t_INVBUF_RVT_FF_nldm_220122.lib.gz', decompressing using zlib.
+Found gzip magic in file `/home/kiran/projects/janus/janus-ai-soc/asic_flow/OpenROAD-flow-scripts/flow/platforms/asap7/lib/NLDM/asap7sc7p5t_OA_RVT_FF_nldm_211120.lib.gz', decompressing using zlib.
+Found gzip magic in file `/home/kiran/projects/janus/janus-ai-soc/asic_flow/OpenROAD-flow-scripts/flow/platforms/asap7/lib/NLDM/asap7sc7p5t_SIMPLE_RVT_FF_nldm_211120.lib.gz', decompressing using zlib.
+
+23. Printing statistics.
+
+=== aes_encipher_block$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.enc_block ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+     1444        -     1444        - wires
+     1890        -     1890        - wire bits
+       13        -       13        - public wires
+      459        -      459        - public wire bits
+       11        -       11        - ports
+      457        -      457        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+     1592   237.45     1592   237.45 cells
+       36    3.149       36    3.149   AND2x2_ASAP7_75t_R
+        2    0.292        2    0.292   AND2x4_ASAP7_75t_R
+        2    0.175        2    0.175   AND3x1_ASAP7_75t_R
+        7    0.612        7    0.612   AO21x1_ASAP7_75t_R
+      128   18.662      128   18.662   AO221x1_ASAP7_75t_R
+      128   22.395      128   22.395   AO222x2_ASAP7_75t_R
+        2    0.233        2    0.233   AOI21x1_ASAP7_75t_R
+      101    7.363      101    7.363   BUFx2_ASAP7_75t_R
+       69    6.036       69    6.036   BUFx3_ASAP7_75t_R
+        9     1.05        9     1.05   BUFx4f_ASAP7_75t_R
+        9    1.312        9    1.312   BUFx6f_ASAP7_75t_R
+      139   52.692      139   52.692   DFFASRHQNx1_ASAP7_75t_R
+        6    0.787        6    0.787   HAxp5_ASAP7_75t_R
+      142    6.211      142    6.211   INVx1_ASAP7_75t_R
+        1    0.058        1    0.058   INVx2_ASAP7_75t_R
+       37    3.237       37    3.237   NAND2x1_ASAP7_75t_R
+      132   11.547      132   11.547   NOR2x1_ASAP7_75t_R
+       34    3.966       34    3.966   OA211x2_ASAP7_75t_R
+        2    0.204        2    0.204   OA21x2_ASAP7_75t_R
+       32    5.599       32    5.599   OA222x2_ASAP7_75t_R
+        3     0.35        3     0.35   OAI21x1_ASAP7_75t_R
+        1    0.146        1    0.146   OAI22x1_ASAP7_75t_R
+        1    0.087        1    0.087   OR3x1_ASAP7_75t_R
+        1    0.102        1    0.102   OR4x1_ASAP7_75t_R
+        1    0.044        1    0.044   TIEHIx1_ASAP7_75t_R
+       14    2.449       14    2.449   XNOR2x1_ASAP7_75t_R
+      366   58.699      366   58.699   XNOR2x2_ASAP7_75t_R
+      187   29.991      187   29.991   XOR2x2_ASAP7_75t_R
+
+   Chip area for module '\aes_encipher_block$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.enc_block': 237.449880
+     of which used for sequential elements: 52.692120 (22.19%)
+
+=== aes_key_mem$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.keymem ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+    12780        -    12780        - wires
+    13227        -    13227        - wire bits
+       44        -       44        - public wires
+      491        -      491        - public wire bits
+       10        -       10        - ports
+      457        -      457        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+    12924 1.84E+03    12924 1.84E+03 cells
+      518   45.315      518   45.315   AND2x2_ASAP7_75t_R
+        1    0.146        1    0.146   AND2x4_ASAP7_75t_R
+      225   19.683      225   19.683   AND3x1_ASAP7_75t_R
+        1    0.292        1    0.292   AND5x2_ASAP7_75t_R
+      996    87.13      996    87.13   AO21x1_ASAP7_75t_R
+        3    0.306        3    0.306   AO21x2_ASAP7_75t_R
+       41    5.978       41    5.978   AO221x1_ASAP7_75t_R
+       15    2.624       15    2.624   AO222x2_ASAP7_75t_R
+       16      2.1       16      2.1   AO22x1_ASAP7_75t_R
+       16    3.732       16    3.732   AO31x2_ASAP7_75t_R
+       41    4.782       41    4.782   AO32x1_ASAP7_75t_R
+        3    0.394        3    0.394   AO32x2_ASAP7_75t_R
+      428   49.922      428   49.922   AOI21x1_ASAP7_75t_R
+       22    3.208       22    3.208   AOI22x1_ASAP7_75t_R
+       21    5.511       21    5.511   BUFx12f_ASAP7_75t_R
+     1081   78.805     1081   78.805   BUFx2_ASAP7_75t_R
+       78    6.823       78    6.823   BUFx3_ASAP7_75t_R
+        4    0.467        4    0.467   BUFx4f_ASAP7_75t_R
+        2    0.233        2    0.233   BUFx5_ASAP7_75t_R
+       41    5.978       41    5.978   BUFx6f_ASAP7_75t_R
+     2193  831.322     2193  831.322   DFFASRHQNx1_ASAP7_75t_R
+        7    0.919        7    0.919   HAxp5_ASAP7_75t_R
+      897   39.235      897   39.235   INVx1_ASAP7_75t_R
+        1    0.087        1    0.087   INVx4_ASAP7_75t_R
+     2092  183.008     2092  183.008   NAND2x1_ASAP7_75t_R
+       18    2.624       18    2.624   NAND2x2_ASAP7_75t_R
+       24    3.849       24    3.849   NAND3x1_ASAP7_75t_R
+      210   18.371      210   18.371   NOR2x1_ASAP7_75t_R
+        1    0.146        1    0.146   NOR2x2_ASAP7_75t_R
+        2    0.321        2    0.321   NOR3x1_ASAP7_75t_R
+      892  104.043      892  104.043   OA211x2_ASAP7_75t_R
+     1678  171.257     1678  171.257   OA21x2_ASAP7_75t_R
+       76   11.081       76   11.081   OA22x2_ASAP7_75t_R
+        1    0.219        1    0.219   OA31x2_ASAP7_75t_R
+      112   13.064      112   13.064   OAI21x1_ASAP7_75t_R
+      136   19.829      136   19.829   OAI22x1_ASAP7_75t_R
+      351   30.705      351   30.705   OR2x2_ASAP7_75t_R
+      337   29.481      337   29.481   OR3x1_ASAP7_75t_R
+       18    1.837       18    1.837   OR4x1_ASAP7_75t_R
+        1    0.117        1    0.117   OR4x2_ASAP7_75t_R
+        1    0.044        1    0.044   TIEHIx1_ASAP7_75t_R
+        6     1.05        6     1.05   XNOR2x1_ASAP7_75t_R
+      259   41.538      259   41.538   XNOR2x2_ASAP7_75t_R
+       58    9.302       58    9.302   XOR2x2_ASAP7_75t_R
+
+   Chip area for module '\aes_key_mem$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.keymem': 1836.875880
+     of which used for sequential elements: 831.322440 (45.26%)
+
+=== aes_sbox$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.sbox_inst ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+     2214        -     2214        - wires
+     2276        -     2276        - wire bits
+        2        -        2        - public wires
+       64        -       64        - public wire bits
+        2        -        2        - ports
+       64        -       64        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+     2244  219.735     2244  219.735 cells
+      147    12.86      147    12.86   AND2x2_ASAP7_75t_R
+        1    0.146        1    0.146   AND2x4_ASAP7_75t_R
+       98    8.573       98    8.573   AND3x1_ASAP7_75t_R
+       26    2.654       26    2.654   AND4x1_ASAP7_75t_R
+       12      1.4       12      1.4   AND5x1_ASAP7_75t_R
+      366   32.018      366   32.018   AO21x1_ASAP7_75t_R
+        1    0.102        1    0.102   AO21x2_ASAP7_75t_R
+       92   13.414       92   13.414   AO221x1_ASAP7_75t_R
+       14    2.449       14    2.449   AO222x2_ASAP7_75t_R
+       15    1.968       15    1.968   AO22x1_ASAP7_75t_R
+       84    9.798       84    9.798   AO32x1_ASAP7_75t_R
+        1    0.146        1    0.146   AO33x2_ASAP7_75t_R
+       18    3.149       18    3.149   AOI211x1_ASAP7_75t_R
+       50    5.832       50    5.832   AOI21x1_ASAP7_75t_R
+        6    1.225        6    1.225   AOI221x1_ASAP7_75t_R
+       10    1.458       10    1.458   AOI22x1_ASAP7_75t_R
+      253   18.444      253   18.444   BUFx2_ASAP7_75t_R
+       33    2.887       33    2.887   BUFx3_ASAP7_75t_R
+        5    0.583        5    0.583   BUFx4f_ASAP7_75t_R
+        6    0.875        6    0.875   BUFx6f_ASAP7_75t_R
+       45    1.968       45    1.968   INVx1_ASAP7_75t_R
+        8    0.467        8    0.467   INVx2_ASAP7_75t_R
+        2    0.146        2    0.146   INVx3_ASAP7_75t_R
+        6    0.787        6    0.787   MAJx2_ASAP7_75t_R
+      196   17.146      196   17.146   NAND2x1_ASAP7_75t_R
+        1    0.146        1    0.146   NAND2x2_ASAP7_75t_R
+        3    0.481        3    0.481   NAND3x1_ASAP7_75t_R
+       79    6.911       79    6.911   NOR2x1_ASAP7_75t_R
+        1    0.146        1    0.146   NOR2x2_ASAP7_75t_R
+        2    0.321        2    0.321   NOR3x1_ASAP7_75t_R
+      155   18.079      155   18.079   OA211x2_ASAP7_75t_R
+      186   18.983      186   18.983   OA21x2_ASAP7_75t_R
+       10     1.75       10     1.75   OA222x2_ASAP7_75t_R
+       14    2.041       14    2.041   OA22x2_ASAP7_75t_R
+        5    0.729        5    0.729   OA33x2_ASAP7_75t_R
+       63    7.348       63    7.348   OAI21x1_ASAP7_75t_R
+        9    1.312        9    1.312   OAI22x1_ASAP7_75t_R
+       41    3.587       41    3.587   OR2x2_ASAP7_75t_R
+      118   10.323      118   10.323   OR3x1_ASAP7_75t_R
+       40    4.082       40    4.082   OR4x1_ASAP7_75t_R
+       12      1.4       12      1.4   OR5x1_ASAP7_75t_R
+        5    0.802        5    0.802   XNOR2x2_ASAP7_75t_R
+        5    0.802        5    0.802   XOR2x2_ASAP7_75t_R
+
+   Chip area for module '\aes_sbox$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.sbox_inst': 219.735180
+     of which used for sequential elements: 0.000000 (0.00%)
+
+=== asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[0].g_deep_macro.u_macro_a ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+        6        -        6        - wires
+      270        -      270        - wire bits
+        6        -        6        - public wires
+      270        -      270        - public wire bits
+        6        -        6        - ports
+      270        -      270        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+        1  1.1E+04        1  1.1E+04 cells
+        1  1.1E+04        1  1.1E+04   fakeram7_2048x128
+
+   Chip area for module '\asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[0].g_deep_macro.u_macro_a': 11007.531418
+     of which used for sequential elements: 0.000000 (0.00%)
+
+=== asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[0].g_deep_macro.u_macro_b ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+        6        -        6        - wires
+      270        -      270        - wire bits
+        6        -        6        - public wires
+      270        -      270        - public wire bits
+        6        -        6        - ports
+      270        -      270        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+        1  1.1E+04        1  1.1E+04 cells
+        1  1.1E+04        1  1.1E+04   fakeram7_2048x128
+
+   Chip area for module '\asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[0].g_deep_macro.u_macro_b': 11007.531418
+     of which used for sequential elements: 0.000000 (0.00%)
+
+=== asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[1].g_deep_macro.u_macro_a ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+        6        -        6        - wires
+      270        -      270        - wire bits
+        6        -        6        - public wires
+      270        -      270        - public wire bits
+        6        -        6        - ports
+      270        -      270        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+        1  1.1E+04        1  1.1E+04 cells
+        1  1.1E+04        1  1.1E+04   fakeram7_2048x128
+
+   Chip area for module '\asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[1].g_deep_macro.u_macro_a': 11007.531418
+     of which used for sequential elements: 0.000000 (0.00%)
+
+=== asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[1].g_deep_macro.u_macro_b ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+        6        -        6        - wires
+      270        -      270        - wire bits
+        6        -        6        - public wires
+      270        -      270        - public wire bits
+        6        -        6        - ports
+      270        -      270        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+        1  1.1E+04        1  1.1E+04 cells
+        1  1.1E+04        1  1.1E+04   fakeram7_2048x128
+
+   Chip area for module '\asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[1].g_deep_macro.u_macro_b': 11007.531418
+     of which used for sequential elements: 0.000000 (0.00%)
+
+=== asic_sram_256x128$janus_kv_secure_subsystem.u_sec_mem.u_cipher_ram ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+        6        -        6        - wires
+      267        -      267        - wire bits
+        6        -        6        - public wires
+      267        -      267        - public wire bits
+        6        -        6        - ports
+      267        -      267        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+        1 1.38E+03        1 1.38E+03 cells
+        1 1.38E+03        1 1.38E+03   fakeram7_256x128
+
+   Chip area for module '\asic_sram_256x128$janus_kv_secure_subsystem.u_sec_mem.u_cipher_ram': 1375.941427
+     of which used for sequential elements: 0.000000 (0.00%)
+
+=== dp_sram_asic_adapter$janus_kv_secure_subsystem.u_kv_cache.u_spm ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+     2159        -     2135        - wires
+     3745        -     2665        - wire bits
+     1112        -     1088        - public wires
+     2698        -     1618        - public wire bits
+       36        -       12        - ports
+     1622        -      542        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+     1871 4.42E+04     1867  164.769 cells
+      536   46.889      536   46.889   AND2x2_ASAP7_75t_R
+        2    0.292        2    0.292   AND2x4_ASAP7_75t_R
+      280   24.494      280   24.494   AND3x1_ASAP7_75t_R
+      719   62.898      719   62.898   AO21x1_ASAP7_75t_R
+       99   10.104       99   10.104   AO21x2_ASAP7_75t_R
+        2    0.525        2    0.525   BUFx12f_ASAP7_75t_R
+      151   11.008      151   11.008   BUFx2_ASAP7_75t_R
+       35    3.062       35    3.062   BUFx3_ASAP7_75t_R
+       22    3.208       22    3.208   BUFx6f_ASAP7_75t_R
+        2    0.758        2    0.758   DFFASRHQNx1_ASAP7_75t_R
+        6    0.262        6    0.262   INVx1_ASAP7_75t_R
+        4     0.35        4     0.35   NAND2x1_ASAP7_75t_R
+        2    0.233        2    0.233   OA211x2_ASAP7_75t_R
+        4    0.467        4    0.467   OAI21x1_ASAP7_75t_R
+        2    0.175        2    0.175   OR2x2_ASAP7_75t_R
+        1    0.044        1    0.044   TIEHIx1_ASAP7_75t_R
+        4  4.4E+04        -        -   fakeram7_2048x128
+        4  4.4E+04        4        - submodules
+        1  1.1E+04        1        -   asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[0].g_deep_macro.u_macro_a
+        1  1.1E+04        1        -   asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[0].g_deep_macro.u_macro_b
+        1  1.1E+04        1        -   asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[1].g_deep_macro.u_macro_a
+        1  1.1E+04        1        -   asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[1].g_deep_macro.u_macro_b
+
+   Chip area for module '\dp_sram_asic_adapter$janus_kv_secure_subsystem.u_kv_cache.u_spm': 44194.894252
+     of which used for sequential elements: 0.758160 (0.00%)
+
+=== janus_kv_secure_subsystem ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+   625866        -      756        - wires
+   631791        -     1603        - wire bits
+     3140        -      755        - public wires
+     9065        -     1602        - public wire bits
+      169        -       43        - ports
+     6094        -      890        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+   625158 1.19E+05        1    0.044 cells
+     4627   404.77        -        -   AND2x2_ASAP7_75t_R
+        7    1.021        -        -   AND2x4_ASAP7_75t_R
+    51911 4.54E+03        -        -   AND3x1_ASAP7_75t_R
+     1115  113.797        -        -   AND4x1_ASAP7_75t_R
+      200   23.328        -        -   AND5x1_ASAP7_75t_R
+        2    0.583        -        -   AND5x2_ASAP7_75t_R
+       56   13.064        -        -   AO211x2_ASAP7_75t_R
+    29554 2.59E+03        -        -   AO21x1_ASAP7_75t_R
+      105   10.716        -        -   AO21x2_ASAP7_75t_R
+     1386  202.079        -        -   AO221x1_ASAP7_75t_R
+        3    0.481        -        -   AO221x2_ASAP7_75t_R
+      280   48.989        -        -   AO222x2_ASAP7_75t_R
+      362   47.502        -        -   AO22x1_ASAP7_75t_R
+      184   42.924        -        -   AO31x2_ASAP7_75t_R
+     2969  346.304        -        -   AO32x1_ASAP7_75t_R
+        3    0.394        -        -   AO32x2_ASAP7_75t_R
+      414   60.361        -        -   AO33x2_ASAP7_75t_R
+     1099  192.281        -        -   AOI211x1_ASAP7_75t_R
+    38542  4.5E+03        -        -   AOI21x1_ASAP7_75t_R
+      293   59.807        -        -   AOI221x1_ASAP7_75t_R
+      254   37.033        -        -   AOI22x1_ASAP7_75t_R
+       24    6.299        -        -   BUFx12f_ASAP7_75t_R
+    67442 4.92E+03        -        -   BUFx2_ASAP7_75t_R
+      727   63.598        -        -   BUFx3_ASAP7_75t_R
+        1    0.102        -        -   BUFx4_ASAP7_75t_R
+       36    4.199        -        -   BUFx4f_ASAP7_75t_R
+        3     0.35        -        -   BUFx5_ASAP7_75t_R
+      118   17.204        -        -   BUFx6f_ASAP7_75t_R
+     6245 2.37E+03        -        -   DFFASRHQNx1_ASAP7_75t_R
+    77824 2.27E+04        -        -   DFFHQNx1_ASAP7_75t_R
+       55   11.227        -        -   FAx1_ASAP7_75t_R
+      131    17.19        -        -   HAxp5_ASAP7_75t_R
+    54691 2.39E+03        -        -   INVx1_ASAP7_75t_R
+       19    1.108        -        -   INVx2_ASAP7_75t_R
+        4    0.292        -        -   INVx3_ASAP7_75t_R
+        1    0.087        -        -   INVx4_ASAP7_75t_R
+        6    0.787        -        -   MAJx2_ASAP7_75t_R
+   102101 8.93E+03        -        -   NAND2x1_ASAP7_75t_R
+       22    3.208        -        -   NAND2x2_ASAP7_75t_R
+      118   18.925        -        -   NAND3x1_ASAP7_75t_R
+     8690  760.201        -        -   NOR2x1_ASAP7_75t_R
+        4    0.583        -        -   NOR2x2_ASAP7_75t_R
+      161   25.821        -        -   NOR3x1_ASAP7_75t_R
+    76620 8.94E+03        -        -   OA211x2_ASAP7_75t_R
+    44340  4525.34        -        -   OA21x2_ASAP7_75t_R
+       91   21.228        -        -   OA221x2_ASAP7_75t_R
+      248    43.39        -        -   OA222x2_ASAP7_75t_R
+      244   35.575        -        -   OA22x2_ASAP7_75t_R
+      185   40.459        -        -   OA31x2_ASAP7_75t_R
+     1437  209.515        -        -   OA33x2_ASAP7_75t_R
+     2472  288.334        -        -   OAI21x1_ASAP7_75t_R
+      551   80.336        -        -   OAI22x1_ASAP7_75t_R
+     1802  157.639        -        -   OR2x2_ASAP7_75t_R
+        2     0.35        -        -   OR2x6_ASAP7_75t_R
+    40340 3.53E+03        -        -   OR3x1_ASAP7_75t_R
+        3    0.306        -        -   OR3x2_ASAP7_75t_R
+     2301   234.84        -        -   OR4x1_ASAP7_75t_R
+        5    0.583        -        -   OR4x2_ASAP7_75t_R
+      666   77.682        -        -   OR5x1_ASAP7_75t_R
+        7    0.306        -        -   TIEHIx1_ASAP7_75t_R
+        4    0.175        1    0.044   TIELOx1_ASAP7_75t_R
+       72   12.597        -        -   XNOR2x1_ASAP7_75t_R
+     1355  217.315        -        -   XNOR2x2_ASAP7_75t_R
+        5    0.875        -        -   XOR2x1_ASAP7_75t_R
+      614   98.473        -        -   XOR2x2_ASAP7_75t_R
+        4  4.4E+04        -        -   fakeram7_2048x128
+        1 1.38E+03        -        -   fakeram7_256x128
+        4 1.19E+05        4        - submodules
+        1  1.1E+05        1        -   kv_cache_datapath$janus_kv_secure_subsystem.u_kv_cache
+        1  202.312        1        -   kv_key_manager$janus_kv_secure_subsystem.u_key_mgr
+        1  1.9E+03        1        -   performance_monitor_unit$janus_kv_secure_subsystem.u_pmu
+        1 7.24E+03        1        -   secure_kv_axi_mem$janus_kv_secure_subsystem.u_sec_mem
+
+   Chip area for module '\janus_kv_secure_subsystem': 119377.332599
+     of which used for sequential elements: 25060.833000 (20.99%)
+
+=== kv_cache_datapath$janus_kv_secure_subsystem.u_kv_cache ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+   565061        -   562902        - wires
+   567484        -   563739        - wire bits
+     1551        -      439        - public wires
+     3974        -     1276        - public wire bits
+       58        -       22        - ports
+     2481        -      859        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+   564903  1.1E+05   563032 6.58E+04 cells
+     3250   284.31     2714  237.421   AND2x2_ASAP7_75t_R
+        2    0.292        -        -   AND2x4_ASAP7_75t_R
+    50537 4.42E+03    50257  4.4E+03   AND3x1_ASAP7_75t_R
+      884   90.221      884   90.221   AND4x1_ASAP7_75t_R
+      116    13.53      116    13.53   AND5x1_ASAP7_75t_R
+       43   10.031       43   10.031   AO211x2_ASAP7_75t_R
+    24609 2.15E+03    23890 2.09E+03   AO21x1_ASAP7_75t_R
+       99   10.104        -        -   AO21x2_ASAP7_75t_R
+     1040  151.632     1040  151.632   AO221x1_ASAP7_75t_R
+      120   20.995      120   20.995   AO222x2_ASAP7_75t_R
+      309   40.547      309   40.547   AO22x1_ASAP7_75t_R
+      155   36.158      155   36.158   AO31x2_ASAP7_75t_R
+     2714  316.561     2714  316.561   AO32x1_ASAP7_75t_R
+      411   59.924      411   59.924   AO33x2_ASAP7_75t_R
+      916  160.263      916  160.263   AOI211x1_ASAP7_75t_R
+    37439 4.37E+03    37439 4.37E+03   AOI21x1_ASAP7_75t_R
+      272   55.521      272   55.521   AOI221x1_ASAP7_75t_R
+      170   24.786      170   24.786   AOI22x1_ASAP7_75t_R
+        2    0.525        -        -   BUFx12f_ASAP7_75t_R
+    62237 4.54E+03    62086 4.53E+03   BUFx2_ASAP7_75t_R
+      395   34.555      360   31.493   BUFx3_ASAP7_75t_R
+        4    0.467        4    0.467   BUFx4f_ASAP7_75t_R
+       32    4.666       10    1.458   BUFx6f_ASAP7_75t_R
+      710  269.147      708  268.389   DFFASRHQNx1_ASAP7_75t_R
+    73728 2.15E+04    73728 2.15E+04   DFFHQNx1_ASAP7_75t_R
+       55   11.227       55   11.227   FAx1_ASAP7_75t_R
+       68    8.923       68    8.923   HAxp5_ASAP7_75t_R
+    49002 2.14E+03    48996 2.14E+03   INVx1_ASAP7_75t_R
+        1    0.058        1    0.058   INVx2_ASAP7_75t_R
+    93693  8.2E+03    93689  8.2E+03   NAND2x1_ASAP7_75t_R
+        1    0.146        1    0.146   NAND2x2_ASAP7_75t_R
+       57    9.142       57    9.142   NAND3x1_ASAP7_75t_R
+     7538  659.424     7538  659.424   NOR2x1_ASAP7_75t_R
+       73   11.708       73   11.708   NOR3x1_ASAP7_75t_R
+    72759  8486.61    72757 8.49E+03   OA211x2_ASAP7_75t_R
+    36416 3.72E+03    36416 3.72E+03   OA21x2_ASAP7_75t_R
+       90   20.995       90   20.995   OA221x2_ASAP7_75t_R
+      188   32.892      188   32.892   OA222x2_ASAP7_75t_R
+      141   20.558      141   20.558   OA22x2_ASAP7_75t_R
+      170   37.179      170   37.179   OA31x2_ASAP7_75t_R
+     1429  208.348     1429  208.348   OA33x2_ASAP7_75t_R
+     1939  226.165     1935  225.698   OAI21x1_ASAP7_75t_R
+      324   47.239      324   47.239   OAI22x1_ASAP7_75t_R
+     1001   87.567      999   87.393   OR2x2_ASAP7_75t_R
+    37685  3.3E+03    37685  3.3E+03   OR3x1_ASAP7_75t_R
+     1593  162.582     1593  162.582   OR4x1_ASAP7_75t_R
+      335   39.074      335   39.074   OR5x1_ASAP7_75t_R
+        2    0.087        1    0.044   TIEHIx1_ASAP7_75t_R
+        1    0.044        1    0.044   TIELOx1_ASAP7_75t_R
+      129   20.689      129   20.689   XNOR2x2_ASAP7_75t_R
+       15    2.406       15    2.406   XOR2x2_ASAP7_75t_R
+        4  4.4E+04        -        -   fakeram7_2048x128
+        1 4.42E+04        1        - submodules
+        1 4.42E+04        1        -   dp_sram_asic_adapter$janus_kv_secure_subsystem.u_kv_cache.u_spm
+
+   Chip area for module '\kv_cache_datapath$janus_kv_secure_subsystem.u_kv_cache': 110037.153652
+     of which used for sequential elements: 21768.231600 (19.78%)
+
+=== kv_key_manager$janus_kv_secure_subsystem.u_key_mgr ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+     1195        -     1195        - wires
+     1705        -     1705        - wire bits
+       13        -       13        - public wires
+      523        -      523        - public wire bits
+       13        -       13        - ports
+      523        -      523        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+     1443  202.312     1443  202.312 cells
+        2    0.175        2    0.175   AND2x2_ASAP7_75t_R
+      258    22.57      258    22.57   AND3x1_ASAP7_75t_R
+        1    0.117        1    0.117   AO32x1_ASAP7_75t_R
+      256    29.86      256    29.86   AOI21x1_ASAP7_75t_R
+       49    3.572       49    3.572   BUFx2_ASAP7_75t_R
+       70    6.124       70    6.124   BUFx3_ASAP7_75t_R
+       10    1.166       10    1.166   BUFx4f_ASAP7_75t_R
+        1    0.117        1    0.117   BUFx5_ASAP7_75t_R
+       12     1.75       12     1.75   BUFx6f_ASAP7_75t_R
+      261    98.94      261    98.94   DFFASRHQNx1_ASAP7_75t_R
+      263   11.504      263   11.504   INVx1_ASAP7_75t_R
+        1    0.058        1    0.058   INVx2_ASAP7_75t_R
+        1    0.087        1    0.087   NOR2x1_ASAP7_75t_R
+      257   26.229      257   26.229   OA21x2_ASAP7_75t_R
+        1    0.044        1    0.044   TIEHIx1_ASAP7_75t_R
+
+   Chip area for module '\kv_key_manager$janus_kv_secure_subsystem.u_key_mgr': 202.312080
+     of which used for sequential elements: 98.939880 (48.90%)
+
+=== performance_monitor_unit$janus_kv_secure_subsystem.u_pmu ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+    13902        -    13902        - wires
+    13990        -    13990        - wire bits
+       48        -       48        - public wires
+      136        -      136        - public wire bits
+       12        -       12        - ports
+      100        -      100        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+    13889  1.9E+03    13889  1.9E+03 cells
+      383   33.505      383   33.505   AND2x2_ASAP7_75t_R
+      368   32.193      368   32.193   AND3x1_ASAP7_75t_R
+      168   17.146      168   17.146   AND4x1_ASAP7_75t_R
+       67    7.815       67    7.815   AND5x1_ASAP7_75t_R
+        8    1.866        8    1.866   AO211x2_ASAP7_75t_R
+      490   42.865      490   42.865   AO21x1_ASAP7_75t_R
+       61    8.894       61    8.894   AO221x1_ASAP7_75t_R
+       13    1.706       13    1.706   AO22x1_ASAP7_75t_R
+       11    2.566       11    2.566   AO31x2_ASAP7_75t_R
+       75    8.748       75    8.748   AO32x1_ASAP7_75t_R
+      126   22.045      126   22.045   AOI211x1_ASAP7_75t_R
+      223   26.011      223   26.011   AOI21x1_ASAP7_75t_R
+       42    6.124       42    6.124   AOI22x1_ASAP7_75t_R
+     1054   76.837     1054   76.837   BUFx2_ASAP7_75t_R
+       37    3.237       37    3.237   BUFx3_ASAP7_75t_R
+        1    0.102        1    0.102   BUFx4_ASAP7_75t_R
+        1    0.117        1    0.117   BUFx4f_ASAP7_75t_R
+        4    0.583        4    0.583   BUFx6f_ASAP7_75t_R
+     2194  831.702     2194  831.702   DFFASRHQNx1_ASAP7_75t_R
+       36    4.724       36    4.724   HAxp5_ASAP7_75t_R
+     1708   74.708     1708   74.708   INVx1_ASAP7_75t_R
+     1697  148.454     1697  148.454   NAND2x1_ASAP7_75t_R
+        1    0.146        1    0.146   NAND2x2_ASAP7_75t_R
+       18    2.887       18    2.887   NAND3x1_ASAP7_75t_R
+      250    21.87      250    21.87   NOR2x1_ASAP7_75t_R
+       76   12.189       76   12.189   NOR3x1_ASAP7_75t_R
+      562   65.552      562   65.552   OA211x2_ASAP7_75t_R
+     1277  130.331     1277  130.331   OA21x2_ASAP7_75t_R
+       16    2.799       16    2.799   OA222x2_ASAP7_75t_R
+        3    0.437        3    0.437   OA22x2_ASAP7_75t_R
+        8     1.75        8     1.75   OA31x2_ASAP7_75t_R
+        1    0.146        1    0.146   OA33x2_ASAP7_75t_R
+      265    30.91      265    30.91   OAI21x1_ASAP7_75t_R
+       75   10.935       75   10.935   OAI22x1_ASAP7_75t_R
+      231   20.208      231   20.208   OR2x2_ASAP7_75t_R
+     1125   98.415     1125   98.415   OR3x1_ASAP7_75t_R
+        1    0.102        1    0.102   OR3x2_ASAP7_75t_R
+      609   62.155      609   62.155   OR4x1_ASAP7_75t_R
+        1    0.117        1    0.117   OR4x2_ASAP7_75t_R
+      300   34.992      300   34.992   OR5x1_ASAP7_75t_R
+        1    0.044        1    0.044   TIEHIx1_ASAP7_75t_R
+        1    0.044        1    0.044   TIELOx1_ASAP7_75t_R
+       21    3.368       21    3.368   XNOR2x2_ASAP7_75t_R
+      280   44.906      280   44.906   XOR2x2_ASAP7_75t_R
+
+   Chip area for module '\performance_monitor_unit$janus_kv_secure_subsystem.u_pmu': 1896.245640
+     of which used for sequential elements: 831.701520 (43.86%)
+
+=== secure_kv_axi_mem$janus_kv_secure_subsystem.u_sec_mem ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+    44952        -    28508        - wires
+    47009        -    29349        - wire bits
+      773        -      708        - public wires
+     2830        -     1549        - public wire bits
+       43        -       14        - ports
+     2100        -      855        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+    44922 7.24E+03    28161 3.57E+03 cells
+      992    86.78      291   25.457   AND2x2_ASAP7_75t_R
+        5    0.729        1    0.146   AND2x4_ASAP7_75t_R
+      748   65.435      423   37.004   AND3x1_ASAP7_75t_R
+       63     6.43       37    3.776   AND4x1_ASAP7_75t_R
+       17    1.983        5    0.583   AND5x1_ASAP7_75t_R
+        2    0.583        1    0.292   AND5x2_ASAP7_75t_R
+        5    1.166        5    1.166   AO211x2_ASAP7_75t_R
+     4455  389.723     3086  269.963   AO21x1_ASAP7_75t_R
+        6    0.612        2    0.204   AO21x2_ASAP7_75t_R
+      285   41.553       24    3.499   AO221x1_ASAP7_75t_R
+        3    0.481        3    0.481   AO221x2_ASAP7_75t_R
+      160   27.994        3    0.525   AO222x2_ASAP7_75t_R
+       40    5.249        9    1.181   AO22x1_ASAP7_75t_R
+       18    4.199        2    0.467   AO31x2_ASAP7_75t_R
+      179   20.879       54    6.299   AO32x1_ASAP7_75t_R
+        3    0.394        -        -   AO32x2_ASAP7_75t_R
+        3    0.437        2    0.292   AO33x2_ASAP7_75t_R
+       57    9.973       39    6.823   AOI211x1_ASAP7_75t_R
+      624   72.783      144   16.796   AOI21x1_ASAP7_75t_R
+       21    4.287       15    3.062   AOI221x1_ASAP7_75t_R
+       42    6.124       10    1.458   AOI22x1_ASAP7_75t_R
+       22    5.774        1    0.262   BUFx12f_ASAP7_75t_R
+     4102  299.036     2667  194.424   BUFx2_ASAP7_75t_R
+      225   19.683       45    3.937   BUFx3_ASAP7_75t_R
+       21    2.449        3     0.35   BUFx4f_ASAP7_75t_R
+        2    0.233        -        -   BUFx5_ASAP7_75t_R
+       70   10.206       14    2.041   BUFx6f_ASAP7_75t_R
+     3080 1.17E+03      748  283.552   DFFASRHQNx1_ASAP7_75t_R
+     4096 1.19E+03     4096 1.19E+03   DFFHQNx1_ASAP7_75t_R
+       27    3.543       14    1.837   HAxp5_ASAP7_75t_R
+     3718  162.625     2634  115.211   INVx1_ASAP7_75t_R
+       17    0.991        8    0.467   INVx2_ASAP7_75t_R
+        4    0.292        2    0.146   INVx3_ASAP7_75t_R
+        1    0.087        -        -   INVx4_ASAP7_75t_R
+        6    0.787        -        -   MAJx2_ASAP7_75t_R
+     6711  587.078     4386  383.687   NAND2x1_ASAP7_75t_R
+       20    2.916        1    0.146   NAND2x2_ASAP7_75t_R
+       43    6.896       16    2.566   NAND3x1_ASAP7_75t_R
+      901   78.819      480    41.99   NOR2x1_ASAP7_75t_R
+        4    0.583        2    0.292   NOR2x2_ASAP7_75t_R
+       12    1.925        8    1.283   NOR3x1_ASAP7_75t_R
+     3299  384.795     2218  258.708   OA211x2_ASAP7_75t_R
+     6390  652.163     4524  461.719   OA21x2_ASAP7_75t_R
+        1    0.233        1    0.233   OA221x2_ASAP7_75t_R
+       44    7.698        2     0.35   OA222x2_ASAP7_75t_R
+      100    14.58       10    1.458   OA22x2_ASAP7_75t_R
+        7    1.531        6    1.312   OA31x2_ASAP7_75t_R
+        7    1.021        2    0.292   OA33x2_ASAP7_75t_R
+      268    31.26       90   10.498   OAI21x1_ASAP7_75t_R
+      152   22.162        6    0.875   OAI22x1_ASAP7_75t_R
+      570   49.864      178   15.571   OR2x2_ASAP7_75t_R
+        2     0.35        2     0.35   OR2x6_ASAP7_75t_R
+     1530  133.844     1074   93.954   OR3x1_ASAP7_75t_R
+        2    0.204        2    0.204   OR3x2_ASAP7_75t_R
+       99   10.104       40    4.082   OR4x1_ASAP7_75t_R
+        4    0.467        3     0.35   OR4x2_ASAP7_75t_R
+       31    3.616       19    2.216   OR5x1_ASAP7_75t_R
+        3    0.131        1    0.044   TIEHIx1_ASAP7_75t_R
+        1    0.044        1    0.044   TIELOx1_ASAP7_75t_R
+       72   12.597       52    9.098   XNOR2x1_ASAP7_75t_R
+     1205  193.258      575   92.219   XNOR2x2_ASAP7_75t_R
+        5    0.875        5    0.875   XOR2x1_ASAP7_75t_R
+      319   51.161       69   11.066   XOR2x2_ASAP7_75t_R
+        1 1.38E+03        -        -   fakeram7_256x128
+        4 3.67E+03        4        - submodules
+        1   237.45        1        -   aes_encipher_block$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.enc_block
+        1 1.84E+03        1        -   aes_key_mem$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.keymem
+        1  219.735        1        -   aes_sbox$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.sbox_inst
+        1 1.38E+03        1        -   asic_sram_256x128$janus_kv_secure_subsystem.u_sec_mem.u_cipher_ram
+
+   Chip area for module '\secure_kv_axi_mem$janus_kv_secure_subsystem.u_sec_mem': 7241.577487
+     of which used for sequential elements: 2361.960000 (32.62%)
+
+=== design hierarchy ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+   625158 1.19E+05        1    0.044 janus_kv_secure_subsystem
+   564903  1.1E+05   563032 6.58E+04 kv_cache_datapath$janus_kv_secure_subsystem.u_kv_cache
+     1871 4.42E+04     1867  164.769   dp_sram_asic_adapter$janus_kv_secure_subsystem.u_kv_cache.u_spm
+        1  1.1E+04        1  1.1E+04     asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[0].g_deep_macro.u_macro_a
+        1  1.1E+04        1  1.1E+04     asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[0].g_deep_macro.u_macro_b
+        1  1.1E+04        1  1.1E+04     asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[1].g_deep_macro.u_macro_a
+        1  1.1E+04        1  1.1E+04     asic_sram_2048x128$janus_kv_secure_subsystem.u_kv_cache.u_spm.g_bank[1].g_deep_macro.u_macro_b
+     1443  202.312     1443  202.312 kv_key_manager$janus_kv_secure_subsystem.u_key_mgr
+    13889  1.9E+03    13889  1.9E+03 performance_monitor_unit$janus_kv_secure_subsystem.u_pmu
+    44922 7.24E+03    28161 3.57E+03 secure_kv_axi_mem$janus_kv_secure_subsystem.u_sec_mem
+     1592   237.45     1592   237.45   aes_encipher_block$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.enc_block
+    12924 1.84E+03    12924 1.84E+03   aes_key_mem$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.keymem
+     2244  219.735     2244  219.735   aes_sbox$janus_kv_secure_subsystem.u_sec_mem.u_aes.u_aes_core.sbox_inst
+        1 1.38E+03        1 1.38E+03   asic_sram_256x128$janus_kv_secure_subsystem.u_sec_mem.u_cipher_ram
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+   625866        -      756        - wires
+   631791        -     1603        - wire bits
+     3140        -      755        - public wires
+     9065        -     1602        - public wire bits
+      169        -       43        - ports
+     6094        -      890        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+   625158 1.19E+05        1    0.044 cells
+     4627   404.77        -        -   AND2x2_ASAP7_75t_R
+        7    1.021        -        -   AND2x4_ASAP7_75t_R
+    51911 4.54E+03        -        -   AND3x1_ASAP7_75t_R
+     1115  113.797        -        -   AND4x1_ASAP7_75t_R
+      200   23.328        -        -   AND5x1_ASAP7_75t_R
+        2    0.583        -        -   AND5x2_ASAP7_75t_R
+       56   13.064        -        -   AO211x2_ASAP7_75t_R
+    29554 2.59E+03        -        -   AO21x1_ASAP7_75t_R
+      105   10.716        -        -   AO21x2_ASAP7_75t_R
+     1386  202.079        -        -   AO221x1_ASAP7_75t_R
+        3    0.481        -        -   AO221x2_ASAP7_75t_R
+      280   48.989        -        -   AO222x2_ASAP7_75t_R
+      362   47.502        -        -   AO22x1_ASAP7_75t_R
+      184   42.924        -        -   AO31x2_ASAP7_75t_R
+     2969  346.304        -        -   AO32x1_ASAP7_75t_R
+        3    0.394        -        -   AO32x2_ASAP7_75t_R
+      414   60.361        -        -   AO33x2_ASAP7_75t_R
+     1099  192.281        -        -   AOI211x1_ASAP7_75t_R
+    38542  4.5E+03        -        -   AOI21x1_ASAP7_75t_R
+      293   59.807        -        -   AOI221x1_ASAP7_75t_R
+      254   37.033        -        -   AOI22x1_ASAP7_75t_R
+       24    6.299        -        -   BUFx12f_ASAP7_75t_R
+    67442 4.92E+03        -        -   BUFx2_ASAP7_75t_R
+      727   63.598        -        -   BUFx3_ASAP7_75t_R
+        1    0.102        -        -   BUFx4_ASAP7_75t_R
+       36    4.199        -        -   BUFx4f_ASAP7_75t_R
+        3     0.35        -        -   BUFx5_ASAP7_75t_R
+      118   17.204        -        -   BUFx6f_ASAP7_75t_R
+     6245 2.37E+03        -        -   DFFASRHQNx1_ASAP7_75t_R
+    77824 2.27E+04        -        -   DFFHQNx1_ASAP7_75t_R
+       55   11.227        -        -   FAx1_ASAP7_75t_R
+      131    17.19        -        -   HAxp5_ASAP7_75t_R
+    54691 2.39E+03        -        -   INVx1_ASAP7_75t_R
+       19    1.108        -        -   INVx2_ASAP7_75t_R
+        4    0.292        -        -   INVx3_ASAP7_75t_R
+        1    0.087        -        -   INVx4_ASAP7_75t_R
+        6    0.787        -        -   MAJx2_ASAP7_75t_R
+   102101 8.93E+03        -        -   NAND2x1_ASAP7_75t_R
+       22    3.208        -        -   NAND2x2_ASAP7_75t_R
+      118   18.925        -        -   NAND3x1_ASAP7_75t_R
+     8690  760.201        -        -   NOR2x1_ASAP7_75t_R
+        4    0.583        -        -   NOR2x2_ASAP7_75t_R
+      161   25.821        -        -   NOR3x1_ASAP7_75t_R
+    76620 8.94E+03        -        -   OA211x2_ASAP7_75t_R
+    44340  4525.34        -        -   OA21x2_ASAP7_75t_R
+       91   21.228        -        -   OA221x2_ASAP7_75t_R
+      248    43.39        -        -   OA222x2_ASAP7_75t_R
+      244   35.575        -        -   OA22x2_ASAP7_75t_R
+      185   40.459        -        -   OA31x2_ASAP7_75t_R
+     1437  209.515        -        -   OA33x2_ASAP7_75t_R
+     2472  288.334        -        -   OAI21x1_ASAP7_75t_R
+      551   80.336        -        -   OAI22x1_ASAP7_75t_R
+     1802  157.639        -        -   OR2x2_ASAP7_75t_R
+        2     0.35        -        -   OR2x6_ASAP7_75t_R
+    40340 3.53E+03        -        -   OR3x1_ASAP7_75t_R
+        3    0.306        -        -   OR3x2_ASAP7_75t_R
+     2301   234.84        -        -   OR4x1_ASAP7_75t_R
+        5    0.583        -        -   OR4x2_ASAP7_75t_R
+      666   77.682        -        -   OR5x1_ASAP7_75t_R
+        7    0.306        -        -   TIEHIx1_ASAP7_75t_R
+        4    0.175        1    0.044   TIELOx1_ASAP7_75t_R
+       72   12.597        -        -   XNOR2x1_ASAP7_75t_R
+     1355  217.315        -        -   XNOR2x2_ASAP7_75t_R
+        5    0.875        -        -   XOR2x1_ASAP7_75t_R
+      614   98.473        -        -   XOR2x2_ASAP7_75t_R
+        4  4.4E+04        -        -   fakeram7_2048x128
+        1 1.38E+03        -        -   fakeram7_256x128
+        4 1.19E+05        4        - submodules
+        1  1.1E+05        1        -   kv_cache_datapath$janus_kv_secure_subsystem.u_kv_cache
+        1  202.312        1        -   kv_key_manager$janus_kv_secure_subsystem.u_key_mgr
+        1  1.9E+03        1        -   performance_monitor_unit$janus_kv_secure_subsystem.u_pmu
+        1 7.24E+03        1        -   secure_kv_axi_mem$janus_kv_secure_subsystem.u_sec_mem
+
+   Chip area for top module '\janus_kv_secure_subsystem': 119377.332599
+     of which used for sequential elements: 25060.833000 (20.99%)
+

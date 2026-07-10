@@ -1,0 +1,8 @@
+violation type: Metal Spacing
+  bbox = ( 10 10 ) ( 12 12 ) on Layer M2 u_core/net_aaa
+violation type: Metal Spacing
+  bbox on Layer M3 u_dma/net_bbb
+violation type: Short
+  bbox on Layer M2 u_noc/net_ccc
+violation type: Metal Spacing
+  bbox on Layer M4 u_alu/net_ddd

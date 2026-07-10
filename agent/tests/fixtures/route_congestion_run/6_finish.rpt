@@ -1,0 +1,11 @@
+Startpoint: u_core/reg_a[3]$_DFF_P_
+Endpoint: u_core/reg_b[7]$_DFF_P_
+worst slack max -12.10
+tns max -180.00
+wns max -12.10
+Group                  Internal  Switching    Leakage      Total
+Sequential             1.20e+00   1.00e-01   2.00e-06   1.30e+00  22.0%
+Combinational          2.10e+00   1.40e+00   1.00e-05   3.50e+00  40.0%
+Clock                  1.10e+00   6.00e-01   1.00e-07   1.70e+00  20.0%
+Macro                  1.00e+00   0.00e+00   1.00e-04   1.00e+00  18.0%
+Total                  5.40e+00   2.10e+00   1.10e-04   7.50e+00 100.0%

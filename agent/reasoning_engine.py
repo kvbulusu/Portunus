@@ -405,8 +405,88 @@ def build_briefing(block: str,
 
 
 # ---------------------------------------------------------------------------- #
-# self-test
+# Tier-1 fusion: combine the single-log signature reasoning with the
+# cross-stage report evidence, and apply the deterministic guardrail.
 # ---------------------------------------------------------------------------- #
+@dataclass
+class FusedReview:
+    """The full adaptive verdict handed to the agent's fail loop."""
+    base: ReasoningResult                 # signature-based (log-only) reasoning
+    evidence: object = None               # stage_timing_analyzer.StageEvidence
+    root_cause: object = None             # stage_timing_analyzer.RootCause
+    root_layer: str = Layer.UNKNOWN       # final agreed layer (evidence wins)
+    can_auto: bool = False
+    needs_llm: bool = True
+    briefing: str = ""
+
+    def fix_allowed(self, fix_layer: str) -> Tuple[bool, str]:
+        """Guardrail entry point used by the fail loop before applying any fix."""
+        if self.evidence is None:
+            return True, "no cross-stage evidence available; allowing (log-only mode)."
+        import stage_timing_analyzer as _sta
+        return _sta.verdict_on_fix(self.evidence, fix_layer)
+
+
+def reason_with_reports(error_lines: List[str],
+                        tail: str,
+                        block: str,
+                        dep_graph: Dict[str, Set[str]],
+                        report_dir: Optional[str] = None,
+                        synth_stat_path: Optional[str] = None,
+                        stage_hint: Optional[str] = None) -> FusedReview:
+    """Adaptive, evidence-first review.
+
+    1. Run the log-signature `reason()` (fast, always).
+    2. If a report directory is available, build the cross-stage evidence pack
+       and its deterministic root cause. The EVIDENCE-derived layer OVERRIDES the
+       log-signature layer when they disagree, because the trajectory is a
+       stronger signal than a single failing-stage excerpt (this is precisely
+       what stops the "route" mis-classification the security run hit).
+    3. Emit a combined briefing so, if the LLM is consulted, it sees the same
+       evidence a human lead would — and the guardrail (fix_allowed) can veto a
+       symptom fix.
+    """
+    base = reason(error_lines, tail, block, dep_graph, stage_hint)
+    fused = FusedReview(base=base, root_layer=base.top.layer if base.top else Layer.UNKNOWN,
+                        can_auto=base.can_auto, needs_llm=base.needs_llm,
+                        briefing=base.briefing)
+    if not report_dir:
+        return fused
+
+    try:
+        import stage_timing_analyzer as sta
+    except Exception:
+        return fused
+
+    ev = sta.analyze(report_dir, synth_stat_path=synth_stat_path)
+    if not ev.trajectory and not ev.synth.top_module:
+        return fused  # no usable reports; keep log-only verdict
+
+    rc = sta.classify_root_cause(ev)
+    fused.evidence, fused.root_cause = ev, rc
+
+    # Evidence wins on the LAYER decision when it is confident.
+    if rc.confidence >= 0.7 and rc.layer not in ("UNKNOWN",):
+        disagree = (base.top is not None and base.top.layer != rc.layer)
+        fused.root_layer = rc.layer
+        # A confident, structural root cause (pre-place timing hole, area
+        # explosion) is auto-actionable at the RTL/SDC layer and does NOT need
+        # the LLM to re-derive it — but it is NOT auto-*applied* (RTL edits are
+        # high blast-radius); the agent surfaces it for review.
+        fused.can_auto = False
+        fused.needs_llm = disagree or rc.layer in (Layer.RTL, Layer.SDC)
+        note = ""
+        if disagree:
+            note = (f"\n  NOTE: log-only signature suggested "
+                    f"{base.top.layer}, but the cross-stage EVIDENCE overrides it "
+                    f"to {rc.layer} (trajectory beats a single failing-stage excerpt).")
+        fused.briefing = (sta.evidence_briefing(ev, rc)
+                          + "\n\n" + base.briefing + note)
+    else:
+        fused.briefing = sta.evidence_briefing(ev, rc) + "\n\n" + base.briefing
+    return fused
+
+
 if __name__ == "__main__":
     dep = {
         "security": set(), "noc": set(), "ampo": {"security"},
