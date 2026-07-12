@@ -45,9 +45,24 @@ _IGNORE_PATTERNS = [
 ]
 
 # Metric extractors (best-effort; ORFS report formats vary by version).
+#
+# UNITS: for the ASAP7 PDK the standard-cell Liberty declares time_unit = 1ps,
+# so EVERY slack/WNS/TNS value OpenROAD prints for this flow is in PICOSECONDS,
+# not nanoseconds. The `wns_ns` field name below is retained only for
+# checkpoint.json backward-compatibility; the value it holds is ps. Displays
+# label it "ps" accordingly.
 _RE_WNS = re.compile(r"\bwns\b\s*[:=]?\s*(-?\d+\.?\d*)", re.I)
 _RE_TNS = re.compile(r"\btns\b\s*[:=]?\s*(-?\d+\.?\d*)", re.I)
 _RE_SLACK = re.compile(r"worst slack\s*[:=]?\s*(-?\d+\.?\d*)", re.I)
+# Setup vs hold split. OpenROAD's report_worst_slack prints "worst slack max ..."
+# (setup) and "worst slack min ..." (hold); ORFS metrics use the
+# "<stage>__timing__setup__ws" / "__hold__ws" keys. Prefer these specific forms
+# so setup and hold are never conflated.
+_RE_WS_MAX   = re.compile(r"worst\s+slack\s+max\s+(-?\d+\.?\d*)", re.I)
+_RE_WS_MIN   = re.compile(r"worst\s+slack\s+min\s+(-?\d+\.?\d*)", re.I)
+_RE_SETUP_WS = re.compile(r"timing__setup__ws\"?\s*[:=]?\s*(-?\d+\.?\d*)", re.I)
+_RE_HOLD_WS  = re.compile(r"timing__hold__ws\"?\s*[:=]?\s*(-?\d+\.?\d*)", re.I)
+_RE_SETUP_TNS = re.compile(r"timing__setup__tns\"?\s*[:=]?\s*(-?\d+\.?\d*)", re.I)
 _RE_DRC = re.compile(r"(?:total\s+)?(?:drc|violations?)\s*[:=]?\s*(\d+)", re.I)
 _RE_AREA = re.compile(r"(?:design|core|total)\s+area\s*[:=]?\s*(\d+\.?\d*)", re.I)
 _RE_POWER = re.compile(r"\btotal\s+power\s*[:=]?\s*(\d+\.?\d*([eE]-?\d+)?)", re.I)
@@ -155,8 +170,12 @@ class LogReport:
     failed: bool = False
     error_lines: List[str] = field(default_factory=list)
     warning_count: int = 0
-    # metrics (None if not found in this log)
-    wns_ns: Optional[float] = None
+    # metrics (None if not found in this log).
+    # NOTE: ASAP7 reports time in PICOSECONDS. `wns_ns` is the SETUP worst slack
+    # (name kept for checkpoint back-compat; value is ps). `hold_ps` is the HOLD
+    # worst slack in ps. Both are worst-slack, so negative = violation.
+    wns_ns: Optional[float] = None      # setup worst slack, ps
+    hold_ps: Optional[float] = None     # hold worst slack, ps
     tns_ns: Optional[float] = None
     drc_violations: Optional[int] = None
     area: Optional[float] = None
@@ -168,7 +187,10 @@ class LogReport:
         return asdict(self)
 
     def has_timing_violation(self) -> bool:
-        return self.wns_ns is not None and self.wns_ns < 0
+        # A violation is a NEGATIVE worst slack on EITHER setup or hold.
+        setup_bad = self.wns_ns is not None and self.wns_ns < 0
+        hold_bad = self.hold_ps is not None and self.hold_ps < 0
+        return setup_bad or hold_bad
 
     def headline(self) -> str:
         if self.failed:
@@ -176,7 +198,9 @@ class LogReport:
             return f"{self.block}/{self.stage}: FAILED — {first[:120]}"
         bits = []
         if self.wns_ns is not None:
-            bits.append(f"WNS={self.wns_ns:+.3f}ns")
+            bits.append(f"setup WNS={self.wns_ns:+.3f}ps")
+        if self.hold_ps is not None:
+            bits.append(f"hold WS={self.hold_ps:+.3f}ps")
         if self.drc_violations is not None:
             bits.append(f"DRC={self.drc_violations}")
         if self.area is not None:
@@ -238,10 +262,28 @@ class LogAnalyzer:
                     return None
             return None
 
-        rep.wns_ns = grab(_RE_WNS)
-        if rep.wns_ns is None:
-            rep.wns_ns = grab(_RE_SLACK)
-        rep.tns_ns = grab(_RE_TNS)
+        # ---- SETUP worst slack (ps) --------------------------------------
+        # Prefer the unambiguous ORFS metrics key, then OpenROAD's
+        # "worst slack max", then the generic "wns"/"worst slack" fallbacks.
+        setup = grab(_RE_SETUP_WS)
+        if setup is None:
+            setup = grab(_RE_WS_MAX)
+        if setup is None:
+            setup = grab(_RE_WNS)
+        if setup is None:
+            setup = grab(_RE_SLACK)
+        rep.wns_ns = setup   # field name kept for checkpoint back-compat; value is ps
+
+        # ---- HOLD worst slack (ps) ---------------------------------------
+        hold = grab(_RE_HOLD_WS)
+        if hold is None:
+            hold = grab(_RE_WS_MIN)
+        rep.hold_ps = hold
+
+        # ---- TNS (ps): prefer setup TNS key, else generic --------------------
+        rep.tns_ns = grab(_RE_SETUP_TNS)
+        if rep.tns_ns is None:
+            rep.tns_ns = grab(_RE_TNS)
         drc = grab(_RE_DRC, int)
         rep.drc_violations = drc
         rep.area = grab(_RE_AREA)
@@ -287,3 +329,22 @@ if __name__ == "__main__":
     assert r.has_timing_violation()
     print("log_analyzer self-test OK:", r.headline())
     print(a.build_llm_excerpt(r, 400)[:200])
+
+    # ---- setup + hold split (ASAP7 ps values) -------------------------------
+    metrics = """
+    finish__timing__setup__ws -9.305
+    finish__timing__setup__tns -152.0
+    finish__timing__hold__ws 12.4
+    """
+    r2 = a.analyze_text(metrics, "security", "finish")
+    assert r2.wns_ns == -9.305, r2.wns_ns          # setup worst slack (ps)
+    assert r2.hold_ps == 12.4, r2.hold_ps          # hold worst slack (ps)
+    assert r2.tns_ns == -152.0, r2.tns_ns
+    assert r2.has_timing_violation()               # setup negative
+    print("setup/hold split OK:", r2.headline())
+
+    # hold-only violation must also flag
+    r3 = a.analyze_text("worst slack max 5.0\nworst slack min -2.0\n", "noc", "finish")
+    assert r3.wns_ns == 5.0 and r3.hold_ps == -2.0
+    assert r3.has_timing_violation()
+    print("hold-violation detection OK:", r3.headline())

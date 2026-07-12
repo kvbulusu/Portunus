@@ -187,7 +187,9 @@ class FixApplier:
         self._backup(path)
         self._rewrite(path, transform)
         repo_file = self._mirror(self.repo_sdc_path, transform)
-        detail = f"set period of '{clock or 'clock'}' to {val} ns"
+        # ASAP7 SDCs are authored in picoseconds (Liberty time_unit = 1ps), so
+        # the create_clock -period value is ps, not ns.
+        detail = f"set period of '{clock or 'clock'}' to {val} ps"
         if repo_file:
             detail += " (mirrored to repo source)"
         return AppliedFix("sdc_period", True, detail, path, repo_file=repo_file)

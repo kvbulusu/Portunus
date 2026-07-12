@@ -156,8 +156,11 @@ class UI:
             return
         with self._lock:
             if self.console:
-                t = Table(title="JANUS block status", show_lines=False)
-                for col in ("block", "status", "tries", "WNS(ns)", "DRC", "note"):
+                t = Table(title="JANUS block status  (ASAP7 slacks in ps; -ve = violation)",
+                          show_lines=False)
+                # setup WNS and hold WS are BOTH worst-slack in picoseconds.
+                for col in ("block", "status", "tries",
+                            "setup WNS(ps)", "hold WS(ps)", "DRC", "note"):
                     t.add_column(col)
                 for r in rows:
                     t.add_row(
@@ -165,16 +168,19 @@ class UI:
                         str(r.get("status", "")),
                         str(r.get("tries", 0)),
                         _fmt(r.get("wns_ns")),
+                        _fmt(r.get("hold_ps")),
                         _fmt(r.get("drc_violations")),
                         str(r.get("note", ""))[:48],
                     )
                 self.console.print(t)
             else:
-                print("\nblock           status     tries  WNS      DRC   note")
+                print("\n# ASAP7 slacks in picoseconds (ps); negative = violation")
+                print("block           status     tries  setupWNS(ps) holdWS(ps) DRC   note")
                 for r in rows:
-                    print("{:<15} {:<10} {:<6} {:<8} {:<5} {}".format(
+                    print("{:<15} {:<10} {:<6} {:<12} {:<10} {:<5} {}".format(
                         r.get("block", ""), r.get("status", ""), r.get("tries", 0),
-                        _fmt(r.get("wns_ns")), _fmt(r.get("drc_violations")),
+                        _fmt(r.get("wns_ns")), _fmt(r.get("hold_ps")),
+                        _fmt(r.get("drc_violations")),
                         str(r.get("note", ""))[:48]))
 
 
@@ -194,8 +200,9 @@ class BlockResult:
     block: str
     status: str = "PENDING"
     tries: int = 0
-    wns_ns: Optional[float] = None
-    tns_ns: Optional[float] = None
+    wns_ns: Optional[float] = None      # SETUP worst slack (ASAP7 → picoseconds)
+    hold_ps: Optional[float] = None     # HOLD worst slack (picoseconds)
+    tns_ns: Optional[float] = None      # SETUP TNS (picoseconds)
     drc_violations: Optional[int] = None
     area: Optional[float] = None
     power: Optional[float] = None
@@ -207,7 +214,7 @@ class BlockResult:
     def as_row(self) -> Dict:
         return {
             "block": self.block, "status": self.status, "tries": self.tries,
-            "wns_ns": self.wns_ns, "tns_ns": self.tns_ns,
+            "wns_ns": self.wns_ns, "hold_ps": self.hold_ps, "tns_ns": self.tns_ns,
             "drc_violations": self.drc_violations, "area": self.area,
             "power": self.power, "utilization": self.utilization,
             "log_path": self.log_path, "note": self.note, "llm_calls": self.llm_calls,
@@ -614,8 +621,10 @@ class JANUSAutonomousAgent:
             rc = self._run_make(block)
             report = self.analyzer.analyze_file(self._block_log(block), block, stage="flow")
 
-            # absorb whatever metrics ORFS actually reported (may be None)
+            # absorb whatever metrics ORFS actually reported (may be None).
+            # wns_ns/hold_ps/tns_ns are ASAP7 picoseconds; worst-slack, -ve = viol.
             res.wns_ns = report.wns_ns
+            res.hold_ps = report.hold_ps
             res.tns_ns = report.tns_ns
             res.drc_violations = report.drc_violations
             res.area = report.area
@@ -837,7 +846,7 @@ class JANUSAutonomousAgent:
     def _snapshot(self, block: str) -> None:
         r = self.results[block]
         self.ckpt.set_block(block, status=r.status, tries=r.tries,
-                            wns_ns=r.wns_ns, drc=r.drc_violations,
+                            wns_ns=r.wns_ns, hold_ps=r.hold_ps, drc=r.drc_violations,
                             note=r.note, log=r.log_path)
 
     # ----- git commit of an applied LLM fix ----------------------------------
