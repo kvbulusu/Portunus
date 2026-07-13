@@ -99,6 +99,8 @@ from dependency_manager import DEFAULT_GRAPH as _DEP_GRAPH               # noqa:
 from checkpoint import Checkpoint                                        # noqa: E402
 from reporter import Reporter                                           # noqa: E402
 from timing_classifier import classify_routed_odb, render as tc_render   # noqa: E402
+from incremental_opt import (run_eco_pass, decide_timing, decide_drc,     # noqa: E402
+                             adopt_odb, discard_odb, ECOResult)
 
 # rich is optional — degrade gracefully to plain prints if it's missing.
 try:
@@ -525,6 +527,106 @@ class JANUSAutonomousAgent:
         res.timing_detail = tc_render(ct)
         self.ui.info(f"{block}: classified timing —\n{res.timing_detail}")
 
+    def _orfs_lib_env(self, block: str) -> Dict[str, str]:
+        """Best-effort discovery of the liberty + SDC the ECO Tcl needs to
+        re-time a saved .odb. If we can't find them the Tcl's timing queries
+        return nothing -> ECO ok=False -> we keep the original (safe)."""
+        env: Dict[str, str] = {}
+        sdc = os.path.join(self.design_root, block, "constraint.sdc")
+        if os.path.isfile(sdc):
+            env["SDC_FILE"] = sdc
+        libs: List[str] = []
+        if self.orfs:
+            for pat in ("flow/platforms/asap7/lib/*.lib",
+                        "flow/platforms/asap7/lib/*.lib.gz"):
+                libs += sorted(glob.glob(os.path.join(self.orfs, pat)))
+        # hardened child-block .lib abstracts + SRAM libs also matter for the top
+        libs += sorted(glob.glob(os.path.join(self.sram_out_dir, "*.lib")))
+        if libs:
+            env["LIB_FILES"] = " ".join(libs)
+        return env
+
+    def _openroad_bin(self) -> str:
+        cand = os.path.join(self.orfs, "tools", "install", "OpenROAD",
+                            "bin", "openroad") if self.orfs else ""
+        return cand if cand and os.path.isfile(cand) else "openroad"
+
+    def _post_route_opt(self, block: str) -> None:
+        """Adaptive post-route ECO: try to close residual timing (hold first —
+        it is functionally critical), then optionally clean a handful of DRCs.
+        DISCARDS any ECO that degrades timing; the canonical .odb is only
+        replaced when the ECO strictly improves it. Best-effort and fully
+        reversible — never flips a passing block to FAILED."""
+        if getattr(self.args, "no_post_route_opt", False):
+            return
+        res = self.results[block]
+        setup = res.wns_ns          # authoritative setup WNS (ps) from _classify_timing
+        hold = res.hold_ps          # authoritative hold WS (ps)
+        drc = res.drc_violations
+        has_setup_viol = setup is not None and setup < 0.0
+        has_hold_viol = hold is not None and hold < 0.0
+        timing_closed = (setup is not None and setup >= 0.0
+                         and hold is not None and hold >= 0.0)
+        # nothing to do: closed timing and no DRCs
+        if not (has_setup_viol or has_hold_viol) and not (
+                timing_closed and drc and drc > 0):
+            return
+        odb = self._find_routed_odb(block)
+        if not odb:
+            self.ui.debug(f"{block}: no routed .odb — skipping post-route ECO")
+            return
+        orb = self._openroad_bin()
+        env = self._orfs_lib_env(block)
+        tmpdir = os.path.dirname(odb)
+
+        # ---- Stage 1: timing ECO (only if there is a timing violation) ------
+        if has_setup_viol or has_hold_viol:
+            crit = "HOLD (functionally critical)" if has_hold_viol else "setup"
+            self.ui.step(f"{block}: residual {crit} violation — running post-route "
+                         f"timing ECO (hold repaired first)")
+            eco = run_eco_pass(odb, mode="timing", openroad_bin=orb,
+                               extra_env=env, tmpdir=tmpdir)
+            verdict, why = decide_timing(before_setup=setup, before_hold=hold, after=eco)
+            if verdict == "adopt":
+                if adopt_odb(eco.out_odb, odb):
+                    self.ui.good(f"{block}: post-route ECO ADOPTED — {why}")
+                    res.note += "  +eco(timing)"
+                    self._classify_timing(block)   # refresh displayed metrics
+                    # refresh locals for the DRC stage below
+                    setup, hold, drc = res.wns_ns, res.hold_ps, res.drc_violations
+                    timing_closed = (setup is not None and setup >= 0.0
+                                     and hold is not None and hold >= 0.0)
+                else:
+                    discard_odb(eco.out_odb)
+                    self.ui.warn(f"{block}: ECO adopt failed to swap .odb — kept original")
+            else:
+                discard_odb(eco.out_odb)
+                self.ui.warn(f"{block}: post-route ECO DISCARDED — {why}")
+
+        # ---- Stage 2: DRC-only cleanup (only if timing is closed) -----------
+        if timing_closed and drc and 0 < drc:
+            # dry gate first: is a DRC ECO even worth attempting? (uses an empty
+            # ECOResult purely to evaluate the skip conditions on the *before*.)
+            probe, why0 = decide_drc(timing_closed, drc, ECOResult(),
+                                     handful=self.args.drc_handful)
+            if probe == "skip":
+                if "congestion" in why0:
+                    self.ui.warn(f"{block}: {drc} DRCs — {why0}")
+                return
+            self.ui.step(f"{block}: timing closed, {drc} DRC(s) remain — DRC-only ECO")
+            eco = run_eco_pass(odb, mode="drc", openroad_bin=orb,
+                               extra_env=env, tmpdir=tmpdir)
+            verdict, why = decide_drc(timing_closed, drc, eco,
+                                      handful=self.args.drc_handful,
+                                      pre_setup=setup, pre_hold=hold)
+            if verdict == "adopt" and adopt_odb(eco.out_odb, odb):
+                self.ui.good(f"{block}: DRC ECO ADOPTED — {why}")
+                res.note += "  +eco(drc)"
+                self._classify_timing(block)
+            else:
+                discard_odb(eco.out_odb)
+                self.ui.warn(f"{block}: DRC ECO DISCARDED — {why}")
+
     # ----- map a raw ORFS output line to a human-readable flow stage ---------
     # ORFS emits markers like "Running synth_odb.tcl, stage 1_synth" and step
     # banners; we translate those into a coarse stage label so the heartbeat can
@@ -688,6 +790,12 @@ class JANUSAutonomousAgent:
                 # hold column (no longer 'n/a') and prints the violating-endpoint
                 # breakdown by path class (reg2reg / in2reg / reg2mem / ...).
                 self._classify_timing(block)
+                # Adaptive post-route ECO: close residual timing (hold first)
+                # and/or clean a handful of DRCs — discarding any ECO that
+                # degrades the result (the canonical .odb is only swapped on a
+                # strict improvement). Runs BEFORE abstract so the abstract is
+                # emitted from the adopted database.
+                self._post_route_opt(block)
                 # Emit the block's .lef/.lib abstract so janus_soc_top can
                 # consume it as a hard macro (hierarchical bottom-up assembly).
                 self._run_abstract(block)
@@ -1372,6 +1480,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip generating each block's .lef/.lib abstract after "
                         "it hardens (default: generate them for hierarchical "
                         "top-level assembly)")
+    p.add_argument("--no-post-route-opt", action="store_true",
+                   help="disable the adaptive post-route ECO pass. By default, "
+                        "when a hardened block still has a setup/hold violation "
+                        "the agent runs an incremental repair (hold first — it "
+                        "is functionally critical), adopts it ONLY if timing "
+                        "strictly improves, and otherwise discards it. If timing "
+                        "is closed but a handful of DRCs remain it runs a "
+                        "DRC-only cleanup under the same keep/revert policy.")
+    p.add_argument("--drc-handful", type=int, default=20,
+                   help="max residual DRC count the post-route DRC-only ECO will "
+                        "attempt to clean (default 20). Above this the failure is "
+                        "treated as global congestion needing a floorplan/route "
+                        "strategy change, not an ECO.")
     p.add_argument("--llm-interval", type=float, default=3.0,
                    help="min seconds between LLM calls (rate limit, default 3)")
     p.add_argument("--llm-retries", type=int, default=3,
