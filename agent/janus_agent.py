@@ -98,6 +98,7 @@ from reasoning_engine import reason_with_reports                         # noqa:
 from dependency_manager import DEFAULT_GRAPH as _DEP_GRAPH               # noqa: E402
 from checkpoint import Checkpoint                                        # noqa: E402
 from reporter import Reporter                                           # noqa: E402
+from timing_classifier import classify_routed_odb, render as tc_render   # noqa: E402
 
 # rich is optional — degrade gracefully to plain prints if it's missing.
 try:
@@ -210,6 +211,7 @@ class BlockResult:
     log_path: str = ""
     note: str = ""
     llm_calls: int = 0
+    timing_detail: str = ""             # rendered classified-timing breakdown
 
     def as_row(self) -> Dict:
         return {
@@ -477,6 +479,52 @@ class JANUSAutonomousAgent:
         hits = sorted(glob.glob(pat))
         return hits[0] if hits else None
 
+    def _find_routed_odb(self, block: str) -> Optional[str]:
+        """Locate the final routed .odb for a block (prefer 6_final, then route)."""
+        if not self.orfs:
+            return None
+        base = os.path.join(self.orfs, "flow", "results", "asap7", "janus",
+                            block, "base")
+        for name in ("6_final.odb", "5_route.odb", "5_2_route.odb"):
+            p = os.path.join(base, name)
+            if os.path.exists(p):
+                return p
+        # last resort: highest-numbered odb in the dir
+        hits = sorted(glob.glob(os.path.join(base, "*.odb")))
+        return hits[-1] if hits else None
+
+    def _classify_timing(self, block: str) -> None:
+        """Run the read-only classified-timing probe on the routed .odb and
+        attach the breakdown (authoritative setup WNS + hold WS + violating
+        endpoint counts by path class) to the block result. Best-effort: if
+        openroad or the .odb is unavailable it leaves prior metrics untouched.
+        """
+        if getattr(self.args, "no_physical", False):
+            return
+        odb = self._find_routed_odb(block)
+        if not odb:
+            self.ui.debug(f"{block}: no routed .odb found — skipping timing detail")
+            return
+        openroad = os.path.join(self.orfs, "tools", "install", "OpenROAD",
+                                "bin", "openroad")
+        if not os.path.isfile(openroad):
+            openroad = "openroad"          # fall back to PATH
+        ct = classify_routed_odb(odb, openroad_bin=openroad)
+        if not ct.ok:
+            self.ui.debug(f"{block}: classified timing unavailable — {ct.error}")
+            return
+        res = self.results[block]
+        # Prefer these authoritative slacks over the stdout-scraped ones; this
+        # is where hold stops being 'n/a'.
+        if ct.setup_wns is not None:
+            res.wns_ns = ct.setup_wns
+        if ct.setup_tns is not None:
+            res.tns_ns = ct.setup_tns
+        if ct.hold_wns is not None:
+            res.hold_ps = ct.hold_wns
+        res.timing_detail = tc_render(ct)
+        self.ui.info(f"{block}: classified timing —\n{res.timing_detail}")
+
     # ----- map a raw ORFS output line to a human-readable flow stage ---------
     # ORFS emits markers like "Running synth_odb.tcl, stage 1_synth" and step
     # banners; we translate those into a coarse stage label so the heartbeat can
@@ -636,6 +684,10 @@ class JANUSAutonomousAgent:
                 res.status = "DONE"
                 res.note = report.headline()
                 self.ui.good(f"{block}: PASS — {report.headline()}")
+                # Authoritative, read-only re-time on the routed .odb: fills the
+                # hold column (no longer 'n/a') and prints the violating-endpoint
+                # breakdown by path class (reg2reg / in2reg / reg2mem / ...).
+                self._classify_timing(block)
                 # Emit the block's .lef/.lib abstract so janus_soc_top can
                 # consume it as a hard macro (hierarchical bottom-up assembly).
                 self._run_abstract(block)
