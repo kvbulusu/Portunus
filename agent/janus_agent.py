@@ -724,6 +724,12 @@ class JANUSAutonomousAgent:
 
         with open(log_path, "ab", buffering=0) as logf:
             header = f"\n===== {block} : {' '.join(cmd)} @ {datetime.now()} =====\n"
+            # Stamp git provenance at the top of every block log so any log
+            # shared for triage is self-identifying (branch, HEAD sha+subject,
+            # uncommitted tracked edits) — no reliance on branch names or
+            # remembering "what was I running".
+            if self.git.available():
+                header += self.git.provenance() + "\n"
             logf.write(header.encode())
             # bufsize=0 (unbuffered) avoids the "line buffering isn't supported
             # in binary mode" RuntimeWarning that bufsize=1 raised on every run.
@@ -1391,6 +1397,19 @@ class JANUSAutonomousAgent:
                        f"  git      : {git_state}\n"
                        f"  abstracts: {'skipped (--no-abstract)' if self.args.no_abstract else 'generate .lef/.lib after each block'}\n"
                        f"  mode     : {'INTERACTIVE (shell prompts)' if self.interactive else 'autonomous'}"))
+
+        # Persist a run manifest so the exact source state this run executed
+        # against is recoverable from the run-dir alone (shared alongside logs).
+        try:
+            manifest = os.path.join(self.run_dir, "manifest.txt")
+            with open(manifest, "w") as mf:
+                mf.write(f"JANUS run manifest — {datetime.now()}\n")
+                mf.write(f"run dir : {self.run_dir}\n")
+                mf.write(f"blocks  : {', '.join(self.dep.graph)}\n\n")
+                if self.git.available():
+                    mf.write(self.git.provenance() + "\n")
+        except OSError:
+            pass
 
     # ----- finalize / report -------------------------------------------------
     def _finalize(self, elapsed: float) -> None:

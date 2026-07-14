@@ -82,6 +82,44 @@ class GitOps:
         rc, out = self._git("rev-parse", "--abbrev-ref", "HEAD")
         return out.strip() if rc == 0 else "(unknown)"
 
+    def head_sha(self, short: bool = True) -> str:
+        args = ("rev-parse", "--short", "HEAD") if short else ("rev-parse", "HEAD")
+        rc, out = self._git(*args)
+        return out.strip() if rc == 0 else "(unknown)"
+
+    def head_subject(self) -> str:
+        rc, out = self._git("log", "-1", "--pretty=%s")
+        return out.strip() if rc == 0 else "(unknown)"
+
+    def dirty_files(self) -> List[str]:
+        """Tracked files with staged/unstaged modifications (excludes untracked
+        artifacts). Empty list => working tree clean w.r.t. tracked sources."""
+        rc, out = self._git("status", "--porcelain", "--untracked-files=no")
+        if rc != 0:
+            return []
+        return [ln[3:].strip() for ln in out.splitlines() if ln.strip()]
+
+    def provenance(self) -> str:
+        """One-block, human-readable record of EXACTLY what source state a run
+        was executed against. Stamped into every per-block log and the run
+        manifest so any log shared for triage is self-identifying — no reliance
+        on branch names or out-of-band memory of 'what was I running'."""
+        if not self.available():
+            return "GIT PROVENANCE: (not a git work tree)"
+        dirty = self.dirty_files()
+        lines = [
+            "----- GIT PROVENANCE -------------------------------------------------",
+            f"  branch      : {self.current_branch()}",
+            f"  HEAD        : {self.head_sha(short=True)}  {self.head_subject()}",
+            f"  tracked src : {'CLEAN' if not dirty else str(len(dirty)) + ' file(s) MODIFIED (uncommitted):'}",
+        ]
+        for f in dirty[:20]:
+            lines.append(f"                  - {f}")
+        if len(dirty) > 20:
+            lines.append(f"                  ... (+{len(dirty) - 20} more)")
+        lines.append("----------------------------------------------------------------------")
+        return "\n".join(lines)
+
     def _identity_ok(self) -> bool:
         rc_n, _ = self._git("config", "user.name")
         rc_e, _ = self._git("config", "user.email")
