@@ -43,7 +43,13 @@ DEFAULT_GRAPH: Dict[str, Set[str]] = {
     "noc":           set(),
     "ampo":          {"security"},
     "agent_domain":  {"security", "noc"},
-    "user_domain":   {"security", "noc"},
+    # user_core = ONE hardened CVA6+Ara core (ara_integration_wrapper). It is a
+    # physical sub-block of the user cluster: user_cluster_top instantiates it 2x
+    # and consumes its .lef/.lib abstract as a hard macro. Hardening the 2-core
+    # cluster flat OOMs synth AND APR, so we build the core first, then the
+    # cluster blackboxes it. user_core itself only needs the logical deps.
+    "user_core":     {"security", "noc"},
+    "user_domain":   {"security", "noc", "user_core"},
     "janus_soc_top": {"security", "noc", "ampo", "agent_domain", "user_domain"},
 }
 
