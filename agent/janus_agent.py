@@ -378,6 +378,24 @@ class JANUSAutonomousAgent:
         cmd = ["make", f"DESIGN_CONFIG={self._config_path(block)}"]
         if self.args.num_cores:
             cmd.append(f"NUM_CORES={self.args.num_cores}")
+        # ORFS variable-precedence workaround (verified against agent/user logs):
+        # SYNTH_MOCK_LARGE_MEMORIES / SYNTH_MEMORY_MAX_BITS set via `export` in a
+        # block's config.mk do NOT reach synth.tcl. In user_domain (4).log the
+        # mock guard `if {$::env(SYNTH_MOCK_LARGE_MEMORIES)}` (synth.tcl:147) kept
+        # evaluating FALSE (env value 0 = ORFS default winning), so the vendored
+        # CVA6 multiport behavioral memories fell through to MEMORY_MAP and blew
+        # the OPT_MUXTREE loop to 19.6 GB -> OOM (make Error 247) after ~48 min.
+        # GNU-make command-line assignments carry the HIGHEST precedence and are
+        # force-exported to the Yosys child env, which is exactly how ORFS's own
+        # microwatt reference design turns the mock on (`make ...
+        # SYNTH_MOCK_LARGE_MEMORIES=1`). Scoped to user_domain only: it is the
+        # sole block with large un-mapped behavioral memories; every other block
+        # binds its RAMs to fakeram macros and must NOT be mocked.
+        force_vars = {
+            "user_domain": ["SYNTH_MOCK_LARGE_MEMORIES=1",
+                            "SYNTH_MEMORY_MAX_BITS=4096"],
+        }
+        cmd += force_vars.get(block, [])
         return cmd
 
     # ----- repo SOURCE config / sdc for a block ------------------------------
