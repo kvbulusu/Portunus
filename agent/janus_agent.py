@@ -403,6 +403,20 @@ class JANUSAutonomousAgent:
         # path — exactly what the working microwatt reference uses). Flattening
         # before the mock exposes ALL memories (incl. the buried cache ones) as
         # top-level $mem_v2 so they cross the 4096-bit gate and get mocked.
+        #
+        # UPDATE (bottom-up hierarchy pivot): the CVA6/Ara caches no longer enter
+        # the user_domain synthesis at all — they are bound to fakeram macros and
+        # hardened inside the separate `user_core` block (ara_integration_wrapper),
+        # which user_domain consumes as a blackbox macro. So user_domain's mock
+        # now only shrinks the ONE remaining large behavioral memory, the NPU-L
+        # 2RW byte-enabled scratchpad (FakeRAM is 1RW/no-mask, so it can't be
+        # macro-bound yet). The force below is unchanged (mock on + flat) because
+        # the flat mock is still the mechanism that catches that scratchpad, but
+        # its blast radius is now tiny. user_core is DELIBERATELY absent from
+        # force_vars: its caches are REAL macros (explicitly instantiated via the
+        # tc_sram funnel), so it must run WITHOUT the mock to stay functionally
+        # faithful. Any other block binds its RAMs to fakeram and must NOT be
+        # mocked either.
         force_vars = {
             "user_domain": ["SYNTH_MOCK_LARGE_MEMORIES=1",
                             "SYNTH_MEMORY_MAX_BITS=4096",
