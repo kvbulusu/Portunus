@@ -391,9 +391,22 @@ class JANUSAutonomousAgent:
         # SYNTH_MOCK_LARGE_MEMORIES=1`). Scoped to user_domain only: it is the
         # sole block with large un-mapped behavioral memories; every other block
         # binds its RAMs to fakeram macros and must NOT be mocked.
+        # SYNTH_HIERARCHICAL=0 is REQUIRED for the mock to catch the big CVA6
+        # cache memories. Proven in user_domain (5).log: with hierarchical=1 +
+        # keep_hierarchy the mock DID fire (it printed "Memory ... has
+        # dimensions" for the small proc_rom do_switch ROMs) but only saw
+        # top-level $mem_v2 cells — the large wt_dcache_mem / tc_sram_wrapper
+        # memories were locked inside kept submodules, invisible to the mock's
+        # `select -list t:$mem_v2`, so none were shrunk and the final
+        # `synth -run fine:` memory_map'd them into the 19.6 GB OOM. ORFS's mock
+        # has no hierarchy-awareness (it is written/validated for the FLAT synth
+        # path — exactly what the working microwatt reference uses). Flattening
+        # before the mock exposes ALL memories (incl. the buried cache ones) as
+        # top-level $mem_v2 so they cross the 4096-bit gate and get mocked.
         force_vars = {
             "user_domain": ["SYNTH_MOCK_LARGE_MEMORIES=1",
-                            "SYNTH_MEMORY_MAX_BITS=4096"],
+                            "SYNTH_MEMORY_MAX_BITS=4096",
+                            "SYNTH_HIERARCHICAL=0"],
         }
         cmd += force_vars.get(block, [])
         return cmd
