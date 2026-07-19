@@ -412,15 +412,28 @@ class JANUSAutonomousAgent:
         # 2RW byte-enabled scratchpad (FakeRAM is 1RW/no-mask, so it can't be
         # macro-bound yet). The force below is unchanged (mock on + flat) because
         # the flat mock is still the mechanism that catches that scratchpad, but
-        # its blast radius is now tiny. user_core is DELIBERATELY absent from
-        # force_vars: its caches are REAL macros (explicitly instantiated via the
-        # tc_sram funnel), so it must run WITHOUT the mock to stay functionally
-        # faithful. Any other block binds its RAMs to fakeram and must NOT be
-        # mocked either.
+        # its blast radius is now tiny. user_core is NEVER mocked: its caches are
+        # REAL macros (explicitly instantiated via the tc_sram funnel), so it
+        # must run WITHOUT the mock to stay functionally faithful. Any other
+        # block binds its RAMs to fakeram and must NOT be mocked either.
+        #
+        # user_core DOES need one forced knob, though: SYNTH_MEMORY_MAX_BITS.
+        # (user_core.log 2026-07-18) ara_integration_wrapper leaves ~385 small
+        # multiport structures as flops; the largest is a single 128x83 = 10624b
+        # CVA6/Ara commit/LSU-class queue with no 1RW/no-mask FakeRAM target, so
+        # it MUST synthesize as flops. ORFS's default 4096-bit inferred-memory
+        # gate hard-FAILs on it (yosys synth check, ~1h48m in). Since ORFS does
+        # NOT honor a config.mk export for this knob (same precedence issue as
+        # the mock above -- synth.tcl reads $::env and sees ORFS's default), the
+        # raise MUST come from the make command line. 16384 (2^14) clears 10624b
+        # with headroom yet still trips if a real cache DATA way (>=32768b) ever
+        # fell through to inference, so the guard stays meaningful. NO mock and
+        # NO SYNTH_HIERARCHICAL override for user_core -- only the gate is raised.
         force_vars = {
             "user_domain": ["SYNTH_MOCK_LARGE_MEMORIES=1",
                             "SYNTH_MEMORY_MAX_BITS=4096",
                             "SYNTH_HIERARCHICAL=0"],
+            "user_core":   ["SYNTH_MEMORY_MAX_BITS=16384"],
         }
         cmd += force_vars.get(block, [])
         return cmd
