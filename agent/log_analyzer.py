@@ -117,9 +117,27 @@ _TRIAGE_RULES = [
     (re.compile(r"\b(Killed|Out of memory|Cannot allocate memory|std::bad_alloc|"
                 r"bad_alloc|MemoryError)\b"), "env-oom",
      "The process was killed, most likely out of memory. This 20GB-RAM WSL2 "
-     "setup can OOM on large blocks (user_domain CVA6+Ara). Lower parallelism, "
-     "increase the WSL2 memory limit in .wslconfig, or reduce design params "
-     "(e.g. SCRATCH_KB). Not fixable by editing RTL syntax."),
+     "setup can OOM on large blocks (CVA6+Ara). For SYNTH OOM, lower parallelism "
+     "or mock large behavioral memories. For DETAIL-ROUTE OOM on user_core "
+     "(~1M instances, ~19GB routing DB), lowering parallelism barely helps (the "
+     "routing DB dominates and grows through DRT iterations) -- raise the WSL2 "
+     "memory limit to >=32GB in .wslconfig (host RAM permitting) or route the "
+     "block on a larger machine. Not fixable by editing RTL syntax."),
+    # OpenROAD/TritonRoute do not always print a text 'Killed' banner when the
+    # box OOMs -- OpenROAD prints its normal end-of-run 'Peak memory' banner and
+    # then the process exits non-zero, which make reports as a bare 'Error 247'.
+    # (Seen in user_domain synth @19.6GB and user_core detail-route @19.53GB, both
+    # against the ~20GB WSL2 ceiling.) Match that exit code so the same env-oom
+    # guidance fires instead of the run failing silently / going to the LLM.
+    (re.compile(r"\bError 247\b"), "env-oom",
+     "make exited with code 247, which in this flow has consistently meant the "
+     "OS killed a tool for running out of memory on the ~20GB WSL2 box (OpenROAD "
+     "prints its 'Peak memory' banner near ~19-20GB and then exits, so there is "
+     "no 'Killed' text to match). For user_core detail routing (~1M instances) "
+     "the ~19GB routing DB cannot fit -- raise the WSL2 memory limit to >=32GB "
+     "in .wslconfig (host RAM permitting) or route the block on a larger machine. "
+     "Reducing --num-cores saves only the small per-worker overhead and will "
+     "very likely OOM again in a later DRT iteration. Not an RTL/config bug."),
     # --- yosys-slang plugin not loaded --------------------------------------
     (re.compile(r"(slang\.so|yosys-slang).*(not found|cannot|No such|failed to load)", re.I),
      "env-slang-plugin",
