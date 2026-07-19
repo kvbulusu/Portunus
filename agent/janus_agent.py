@@ -97,6 +97,7 @@ from reasoning_engine import reason as reason_failure                    # noqa:
 from reasoning_engine import reason_with_reports                         # noqa: E402
 from dependency_manager import DEFAULT_GRAPH as _DEP_GRAPH               # noqa: E402
 from checkpoint import Checkpoint                                        # noqa: E402
+from flow_state import FlowState                                        # noqa: E402
 from reporter import Reporter                                           # noqa: E402
 from timing_classifier import classify_routed_odb, render as tc_render   # noqa: E402
 from incremental_opt import (run_eco_pass, decide_timing, decide_drc,     # noqa: E402
@@ -271,6 +272,26 @@ class JANUSAutonomousAgent:
         self.ckpt.load()
         self.reporter = Reporter(self.run_dir)
 
+        # --- GLOBAL flow-state manifest (outside all run-dirs / blocks) ------
+        # A single JSON at <asic_flow>/.janus_state/janus_flow_state.json that
+        # SURVIVES across timestamped --run-dir invocations. This is what makes
+        # --resume actually resume: the per-run checkpoint.json lives INSIDE
+        # run_dir, so a fresh --run-dir loads an EMPTY checkpoint and re-runs
+        # everything from scratch. The manifest instead tracks, per block, the
+        # stages completed, per-stage QoR, final completion status, and every
+        # run/log/report dir ever used (for cleanup). It also drives STAGE-level
+        # (not just block-level) resume through a *semantic* config diff.
+        # Every manifest call is best-effort (try/except): a manifest bug must
+        # NEVER crash or alter a real ORFS run.
+        self.manifest: Optional[FlowState] = None
+        try:
+            mpath = (getattr(args, "manifest", None)
+                     or FlowState.default_path(_ROOT))
+            self.manifest = FlowState(mpath).load()
+        except Exception as e:                       # pragma: no cover
+            self.ui.warn(f"flow-state manifest unavailable ({e}); "
+                         "continuing without it")
+
         # repo SOURCE configs (asic_flow/configs) — used to mirror LLM fixes back
         # so they survive a scripts/03 re-stamp and can be committed.
         self.configs_dir = os.path.join(_ROOT, "configs")
@@ -333,6 +354,31 @@ class JANUSAutonomousAgent:
         cands += glob.glob(os.path.join(self.flow_dir, "reports", "*", f"*{block}*", "base"))
         for d in cands:
             if os.path.isdir(d) and glob.glob(os.path.join(d, "*_*.rpt")):
+                return d
+        return None
+
+    # ----- ORFS results (.odb) directory for a block -------------------------
+    def _results_dir(self, block: str) -> Optional[str]:
+        """Locate the ORFS *results* dir for a block (holds N_*.odb).
+
+        ORFS writes stage databases under flow/results/<platform>/<design>/base.
+        The DESIGN_NICKNAME the user runs with is the bare block name
+        (confirmed by the log: results/asap7/user_core/base/5_2_route.odb) —
+        NOT 'janus/<block>' as _find_routed_odb historically assumed. We glob a
+        few known layouts and return the first that actually contains an .odb,
+        so the manifest scan never depends on that latent path bug.
+        """
+        if not self.flow_dir:
+            return None
+        cands = [
+            os.path.join(self.flow_dir, "results", "asap7", block, "base"),
+            os.path.join(self.flow_dir, "results", "asap7", f"janus_{block}", "base"),
+            os.path.join(self.flow_dir, "results", "asap7", "janus", block, "base"),
+        ]
+        cands += glob.glob(os.path.join(self.flow_dir, "results", "*",
+                                        f"*{block}*", "base"))
+        for d in cands:
+            if os.path.isdir(d) and glob.glob(os.path.join(d, "*.odb")):
                 return d
         return None
 
@@ -1085,6 +1131,77 @@ class JANUSAutonomousAgent:
         self.ckpt.set_block(block, status=r.status, tries=r.tries,
                             wns_ns=r.wns_ns, hold_ps=r.hold_ps, drc=r.drc_violations,
                             note=r.note, log=r.log_path)
+        self._manifest_snapshot(block)
+
+    def _manifest_snapshot(self, block: str) -> None:
+        """Update the GLOBAL flow-state manifest from what actually landed on
+        disk for this block: which stage .odbs exist (+ fingerprints), the
+        semantic config/sdc snapshot, top-level QoR, and this run's
+        log/run/report dirs. Best-effort — a manifest failure never touches the
+        real flow result."""
+        if self.manifest is None:
+            return
+        try:
+            r = self.results[block]
+            results_dir = self._results_dir(block)
+            top_qor = {
+                "wns_ns": r.wns_ns, "hold_ps": r.hold_ps, "tns_ns": r.tns_ns,
+                "drc": r.drc_violations, "area": r.area, "power": r.power,
+                "util": r.utilization, "status": r.status, "note": r.note,
+            }
+            self.manifest.update_block_from_scan(
+                block,
+                results_dir or "",
+                config_path=self._config_path(block),
+                sdc_path=os.path.join(self.design_root, block, "constraint.sdc"),
+                top_qor=top_qor,
+                final_done=(r.status == "DONE"),
+            )
+            reached = self.manifest.last_completed_stage(block)
+            self.manifest.record_run(
+                block,
+                run_dir=self.run_dir,
+                log=r.log_path or self._block_log(block),
+                reports_dir=self._reports_dir(block),
+                result=r.status,
+                reached_stage=reached,
+            )
+        except Exception as e:                       # pragma: no cover
+            self.ui.debug(f"{block}: manifest snapshot skipped — {e}")
+
+    def _plan_stage_resume(self, block: str) -> None:
+        """On --resume, if the manifest has partial stages for ``block``,
+        compute + apply a stage-level resume plan (semantic config/sdc diff):
+        keep valid stages (touch their .odb so a re-stamp can't force a redo),
+        remove the invalidated ones. The block still runs, but ORFS make now
+        skips the reused stages instead of restarting from synthesis.
+        Best-effort — never blocks the run."""
+        if self.manifest is None:
+            return
+        try:
+            results_dir = self._results_dir(block)
+            if not results_dir:
+                self.ui.info(f"{block}: resume — no prior results on disk; "
+                             "full run from synthesis")
+                return
+            cfg = self._config_path(block)
+            sdc = os.path.join(self.design_root, block, "constraint.sdc")
+            plan = self.manifest.resume_plan(block, results_dir,
+                                             config_path=cfg, sdc_path=sdc)
+            summary = self.manifest.apply_resume_plan(plan, config_path=cfg)
+            if plan.full_rebuild:
+                self.ui.info(f"{block}: resume — full rebuild from synthesis "
+                             f"({plan.reason})")
+            else:
+                self.ui.info(
+                    f"{block}: resume — reuse [{', '.join(plan.reuse) or 'none'}], "
+                    f"rerun from {plan.rerun_from or 'finish'} "
+                    f"(touched {len(summary.get('touched', []))}, "
+                    f"removed {len(summary.get('removed', []))}). {plan.reason}")
+            for err in summary.get("errors", []):
+                self.ui.warn(f"{block}: resume fs action failed — {err}")
+        except Exception as e:                       # pragma: no cover
+            self.ui.debug(f"{block}: stage-resume planning skipped — {e}")
 
     # ----- git commit of an applied LLM fix ----------------------------------
     def _commit_fixes(self, block: str, attempt: int, llm_res, applied) -> None:
@@ -1259,14 +1376,28 @@ class JANUSAutonomousAgent:
                 self.ui.info(f"  ({b}) cd {self.flow_dir} && " + " ".join(self._make_cmd(b)))
             return 0
 
-        # honor --resume: mark already-DONE blocks
+        # honor --resume: consult the GLOBAL manifest (survives a fresh
+        # --run-dir), fall back to the per-run checkpoint. A block that is fully
+        # DONE is skipped; a block with partial stages is STAGE-resumed — we
+        # keep the stages a semantic config/sdc diff says are still valid
+        # (touching their .odb so a scripts/03 re-stamp can't force a redo) and
+        # remove the invalidated ones, so ORFS make picks up mid-flow instead of
+        # restarting from synthesis.
         if self.args.resume:
             for b in list(self.dep.graph):
-                if self.ckpt.is_done(b):
+                done = self.ckpt.is_done(b)
+                if not done and self.manifest is not None:
+                    try:
+                        done = self.manifest.is_done(b)
+                    except Exception:
+                        done = self.ckpt.is_done(b)
+                if done:
                     self.dep.mark(b, Status.DONE)
                     self.results[b].status = "DONE"
                     self.results[b].note = "resumed (already DONE)"
                     self.ui.info(f"{b}: skipped (resume — already DONE)")
+                    continue
+                self._plan_stage_resume(b)
 
         start = time.time()
         try:
@@ -1531,7 +1662,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run-dir", default=None,
                    help="override the run/log/report directory")
     p.add_argument("--resume", action="store_true",
-                   help="skip blocks already marked DONE in the checkpoint")
+                   help="resume using the GLOBAL flow-state manifest (survives a "
+                        "fresh --run-dir): skip DONE blocks, and STAGE-resume "
+                        "partial ones (reuse valid stages via a semantic config "
+                        "diff, redo only what changed) instead of restarting "
+                        "from synthesis")
+    p.add_argument("--manifest", default=None, metavar="PATH",
+                   help="path to the global flow-state manifest JSON "
+                        "(default: <asic_flow>/.janus_state/janus_flow_state.json, "
+                        "or $JANUS_MANIFEST). It lives OUTSIDE every run-dir so "
+                        "stage/QoR/cleanup state persists across runs.")
+    p.add_argument("--status", action="store_true",
+                   help="print the flow-state manifest (per-block stages done, "
+                        "per-stage/final QoR, all run/log/report dirs, and "
+                        "run-dirs safe to delete), then exit. Use with --blocks "
+                        "to filter.")
+    p.add_argument("--gc", action="store_true",
+                   help="delete run-dirs the manifest marks as superseded "
+                        "(every block in them has a newer run) and exit. "
+                        "Prompts unless combined with --yes.")
+    p.add_argument("--gc-dry-run", action="store_true",
+                   help="list the run-dirs --gc would delete, then exit "
+                        "(never removes anything).")
+    p.add_argument("--yes", action="store_true",
+                   help="answer 'yes' to the --gc deletion prompt (non-interactive).")
     p.add_argument("--dry-run", action="store_true",
                    help="print the make commands but do not run anything")
     p.add_argument("--estimate", action="store_true",
@@ -1604,6 +1758,53 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _manifest_only_cli(args: argparse.Namespace) -> Optional[int]:
+    """Handle the manifest-only sub-commands (--status / --gc / --gc-dry-run)
+    WITHOUT constructing the full agent (which needs ORFS_DIR etc). Returns an
+    exit code if it handled the invocation, else None."""
+    if not (args.status or args.gc or args.gc_dry_run):
+        return None
+    mpath = args.manifest or FlowState.default_path(_ROOT)
+    fs = FlowState(mpath).load()
+    if args.status:
+        print(fs.render_status(args.blocks or None))
+        return 0
+    # --gc / --gc-dry-run
+    cands = fs.gc_candidates()
+    if not cands:
+        print(f"flow-state manifest: {mpath}\n"
+              "cleanup: no superseded run-dirs to delete.")
+        return 0
+    print(f"flow-state manifest: {mpath}")
+    print(f"{len(cands)} run-dir(s) superseded and safe to delete:")
+    for c in cands:
+        print(f"   {c['run_dir']}  (blocks: {', '.join(c['blocks'])})")
+    if args.gc_dry_run:
+        print("\n(dry run — nothing removed)")
+        return 0
+    if not args.yes:
+        try:
+            ans = input("\ndelete these run-dirs? [y/N] ").strip().lower()
+        except EOFError:
+            ans = "n"
+        if ans not in ("y", "yes"):
+            print("aborted — nothing removed.")
+            return 0
+    import shutil
+    removed = 0
+    for c in cands:
+        rd = c["run_dir"]
+        try:
+            if rd and os.path.isdir(rd):
+                shutil.rmtree(rd)
+                removed += 1
+                print(f"   removed {rd}")
+        except OSError as e:
+            print(f"   FAILED to remove {rd}: {e}", file=sys.stderr)
+    print(f"done — removed {removed}/{len(cands)} run-dir(s).")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     if args.blocks:
@@ -1612,6 +1813,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"error: unknown block(s): {', '.join(bad)}\n"
                   f"valid: {', '.join(DEFAULT_GRAPH)}", file=sys.stderr)
             return 2
+    rc = _manifest_only_cli(args)
+    if rc is not None:
+        return rc
     agent = JANUSAutonomousAgent(args)
     return agent.run()
 
