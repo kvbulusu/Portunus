@@ -43,12 +43,26 @@ DEFAULT_GRAPH: Dict[str, Set[str]] = {
     "noc":           set(),
     "ampo":          {"security"},
     "agent_domain":  {"security", "noc"},
+    # ---- CVA6+Ara core partition macros (L0.5 sub-level) --------------------
+    # The flat CVA6+Ara core (ara_integration_wrapper, ~1.00M instances)
+    # OOM-killed DETAIL ROUTING at 27.3 GB even on a 28 GB machine (Error 247,
+    # user_core (2).log). Per docs/USER_DOMAIN_HIERARCHICAL_METHODOLOGY.md the
+    # documented contingency is a MINIMAL 2-way split: harden the CVA6 scalar
+    # host and the Ara vector unit as SEPARATE macros, then let
+    # ara_integration_wrapper (built with -D JANUS_PARTITIONED) consume both as
+    # .lef/.lib/.gds blackboxes. This drops the largest single route job from
+    # ~1.00M to the Ara partition (~620K). These two are leaves in the same
+    # sense as any hardened block — they only need the logical fabric deps.
+    "user_core_cva6": {"security", "noc"},
+    "user_core_ara":  {"security", "noc"},
     # user_core = ONE hardened CVA6+Ara core (ara_integration_wrapper). It is a
     # physical sub-block of the user cluster: user_cluster_top instantiates it 2x
     # and consumes its .lef/.lib abstract as a hard macro. Hardening the 2-core
     # cluster flat OOMs synth AND APR, so we build the core first, then the
-    # cluster blackboxes it. user_core itself only needs the logical deps.
-    "user_core":     {"security", "noc"},
+    # cluster blackboxes it. Post-split, user_core is an ASSEMBLY of its two
+    # partition macros (glue + AXI adapt), so it now depends on them being
+    # hardened first.
+    "user_core":     {"security", "noc", "user_core_cva6", "user_core_ara"},
     "user_domain":   {"security", "noc", "user_core"},
     "janus_soc_top": {"security", "noc", "ampo", "agent_domain", "user_domain"},
 }
@@ -153,7 +167,20 @@ if __name__ == "__main__":
     assert "ampo" in dm.ready()              # security done -> ampo ready
     assert "agent_domain" not in dm.ready()  # still needs noc
     dm.mark("noc", Status.DONE)
-    assert set(dm.ready()) >= {"ampo", "agent_domain", "user_domain"}
+    # security + noc done: the two core partitions + ampo + agent_domain are
+    # ready. user_core is NOT (needs its partition macros first); user_domain is
+    # NOT (needs user_core).
+    assert set(dm.ready()) >= {"ampo", "agent_domain",
+                               "user_core_cva6", "user_core_ara"}, dm.ready()
+    assert "user_core" not in dm.ready()     # needs both partition macros
+    assert "user_domain" not in dm.ready()   # needs user_core
+    dm.mark("user_core_cva6", Status.DONE)
+    assert "user_core" not in dm.ready()     # still needs user_core_ara
+    dm.mark("user_core_ara", Status.DONE)
+    assert "user_core" in dm.ready(), dm.ready()   # both partitions done
+    dm.mark("user_core", Status.DONE)
+    assert "user_domain" in dm.ready()       # user_core done -> cluster ready
+    # a failed partition macro must block the whole upward chain
     dm.mark("user_domain", Status.FAILED)
     assert dm.status["janus_soc_top"] == Status.BLOCKED  # dependent aborted
     print("dependency_manager self-test OK:", dm.summary())

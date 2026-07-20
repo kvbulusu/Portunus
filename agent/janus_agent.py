@@ -475,11 +475,25 @@ class JANUSAutonomousAgent:
         # with headroom yet still trips if a real cache DATA way (>=32768b) ever
         # fell through to inference, so the guard stays meaningful. NO mock and
         # NO SYNTH_HIERARCHICAL override for user_core -- only the gate is raised.
+        #
+        # PARTITION MACROS (user_core_cva6 / user_core_ara): the flat CVA6+Ara
+        # core OOM-killed DETAIL ROUTING at 27.3 GB (user_core (2).log), so
+        # user_core is now split into two hardened partition macros consumed by
+        # ara_integration_wrapper under -D JANUS_PARTITIONED. Each partition is
+        # built flat (its config does NOT set JANUS_PARTITIONED) and inherits the
+        # same SYNTH_MEMORY_MAX_BITS gate as user_core. The 128x83=10624b
+        # commit/LSU-class flop queue is CVA6-side, so it lands in user_core_cva6;
+        # user_core_ara carries the raise defensively (identical, meaningful gate
+        # -- trips only if a wide Ara VRF way >=32768b ever fell through to
+        # behavioral inference). NEITHER partition is ever mocked (both bind their
+        # caches/VRF to real fakeram macros via the tc_sram funnel).
         force_vars = {
             "user_domain": ["SYNTH_MOCK_LARGE_MEMORIES=1",
                             "SYNTH_MEMORY_MAX_BITS=4096",
                             "SYNTH_HIERARCHICAL=0"],
-            "user_core":   ["SYNTH_MEMORY_MAX_BITS=16384"],
+            "user_core":      ["SYNTH_MEMORY_MAX_BITS=16384"],
+            "user_core_cva6": ["SYNTH_MEMORY_MAX_BITS=16384"],
+            "user_core_ara":  ["SYNTH_MEMORY_MAX_BITS=16384"],
         }
         cmd += force_vars.get(block, [])
         return cmd
