@@ -41,6 +41,7 @@ Pure stdlib. No network. Safe to import anywhere.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
@@ -67,6 +68,7 @@ class Layer:
     PLACE = "PLACE"                # placement density/padding/legalization
     CTS = "CTS"                    # clock tree options (buffers, skew, wire RC)
     ROUTE = "ROUTE"               # routing layers, congestion, antenna, DRC
+    SIGNOFF = "SIGNOFF"            # post-route signoff: LVS, DRC-geometry, IR/EM
     UNKNOWN = "UNKNOWN"
 
     # The earliest flow stage a change in this layer invalidates. Used to
@@ -79,6 +81,7 @@ class Layer:
         PLACE: "3_place",
         CTS: "4_cts",
         ROUTE: "5_route",
+        SIGNOFF: "5_route",       # LVS/DRC-geom/antenna/IR fixes re-run route→final
         TOOL_WORKAROUND: "1_synth",  # unknown; assume the failing stage onward
         ENV: "1_synth",
         UNKNOWN: "1_synth",
@@ -138,6 +141,15 @@ class Signature:
     tool_bug: bool = False         # is this usually a tool defect, not design?
     reversible: bool = True        # can the fix be trivially rolled back?
     deterministic: bool = False    # True => a dedicated analyzer can auto-fix
+    # May a cross-stage timing TRAJECTORY reinterpret (override) this failure to
+    # an earlier layer?  TRUE only for failures that can legitimately be a
+    # *downstream symptom* of a pre-placement timing/area hole — i.e. routing
+    # congestion/abort, CTS skew, and raw "timing not met". FALSE for HARD
+    # STRUCTURAL failures (PDN channel repair, macro-fit, legalization, LVS,
+    # DRC geometry, OOM, tool crash): those are self-explanatory at their own
+    # layer and a WNS curve must NOT be allowed to relabel them (this is the
+    # exact bug that produced the false "ROOT CAUSE: RTL" on cva6 PDN-0179).
+    trajectory_override_ok: bool = False
 
 
 # Ordered most-specific first. Every entry was chosen from real ORFS / Yosys /
@@ -202,11 +214,30 @@ _SIGNATURES: List[Signature] = [
               "requested core utilization leaves no room for standard cells",
               "lower CORE_UTILIZATION *only if* the gate count is legitimate; otherwise fix the RTL that inflated area",
               0.55),
-    Signature("pdn_ir_drop",
-              re.compile(r"IR drop|PDN.*(error|fail)|power grid", re.I),
+    # PDN-0179 is a PLACEMENT problem masquerading as a PDN problem: pdngen
+    # cannot strap/repair channels because macros were scattered, leaving
+    # sub-strap-pitch slivers. The deterministic remedy is a MACRO_PLACEMENT_TCL
+    # that packs the macros into compact abutted tiles — NOT relaxing the PDN and
+    # NOT an RTL edit. This is the exact failure the JANUS cva6 run hit, and the
+    # old `PDN.*(error|fail)` pattern did NOT match "PDN-0179 Unable to repair
+    # all channels", so it fell through to the LLM and was mis-blamed on RTL.
+    Signature("pdn_repair_channels",
+              re.compile(r"PDN-0179|Unable to repair all channels|cannot (repair|create) .*channel|unconnected PDN", re.I),
               "2_floorplan", Layer.FLOORPLAN,
-              "power delivery network / IR-drop problem",
-              "adjust PDN straps/pitch in the floorplan; not an RTL issue",
+              "pdngen cannot strap/repair power channels — macros are scattered, leaving sub-strap-pitch slivers (a MACRO PLACEMENT problem surfacing as a PDN error)",
+              "add a deterministic MACRO_PLACEMENT_TCL that packs the macro arrays into compact abutted tiles so straps land on legal channels; do NOT relax the PDN or touch RTL",
+              0.85, deterministic=True),
+    Signature("pdn_grid_error",
+              re.compile(r"\bPDN-\d+\b|power grid.*(error|fail)|pdngen.*(error|fail)|missing PDN connection", re.I),
+              "2_floorplan", Layer.FLOORPLAN,
+              "power-delivery-network build error (strap/via/ring generation)",
+              "adjust PDN strap width/pitch/layers or macro power-pin alignment in the floorplan; not an RTL issue",
+              0.6),
+    Signature("ir_drop",
+              re.compile(r"IR[- ]?drop|static IR|voltage drop.*exceed|PSM-\d+|EM violation|electromigration", re.I),
+              "2_floorplan", Layer.SIGNOFF,
+              "IR-drop / electromigration signoff violation on the power grid",
+              "strengthen straps/rings, add decap, or spread current-hungry macros; a floorplan/PDN change, not RTL",
               0.6),
     # ---- 3_place ----------------------------------------------------------
     Signature("place_no_legal",
@@ -228,25 +259,70 @@ _SIGNATURES: List[Signature] = [
               "clock tree synthesis couldn't meet skew/latency",
               "adjust CTS buffer list / max skew / clustering; check the clock SDC",
               0.55),
-    # ---- 5_route ----------------------------------------------------------
-    Signature("route_congestion",
-              re.compile(r"Routing congestion|DRT-.*(congest|fail)|cannot route|unrouted", re.I),
-              "5_route", Layer.ROUTE,
-              "detailed routing failed on congestion",
-              "add/upgrade routing layers, or go back and lower placement density",
-              0.55),
-    Signature("antenna_drc",
-              re.compile(r"antenna violation|DRC.*violation|max slew|min area", re.I),
-              "5_route", Layer.ROUTE,
-              "post-route DRC / antenna violations",
-              "insert diodes / adjust layer rules; usually a route-stage fix",
+    # ---- resizer / repair (post-place or post-route) ---------------------
+    Signature("resizer_repair_fail",
+              re.compile(r"RSZ-\d+|Unable to repair|repair_design failed|no gate .*to (buffer|resize)|insufficient .*sites", re.I),
+              "3_place", Layer.PLACE,
+              "resizer can't legalize buffering/resizing — not enough placement sites or a cell missing from the library",
+              "open density/padding so the resizer has sites; if a cell is missing it is an ENV/library issue, not RTL",
               0.5),
+    # ---- 5_route : SEPARATE tool crashes from real congestion -------------
+    # DRT crash guards (SIGABRT/Signal-11) are TOOL BUGS, not design faults —
+    # these are exactly the vibe-ic FIX_STATUS.md patches (DRT-0073/0155/0218).
+    # They must NOT be mistaken for congestion (which is a real PLACE/ROUTE fix).
+    Signature("drt_tool_crash",
+              re.compile(r"DRT-0073|DRT-0155|DRT-0218|TritonRoute.*(abort|signal|terminate)|drt.*std::(terminate|bad)", re.I),
+              "5_route", Layer.TOOL_WORKAROUND,
+              "detailed router crashed internally (SIGABRT/Signal-11) — a tool defect, not the design",
+              "pin a known-good OpenROAD / apply the upstream DRT crash-guard patch; do NOT edit RTL or relax constraints",
+              0.7, tool_bug=True),
+    Signature("route_oom",
+              re.compile(r"DRT.*(out of memory|bad_alloc)|route.*Killed|detailed route.*memory", re.I),
+              "5_route", Layer.ENV,
+              "detailed route exceeded host RAM (a CAPACITY ceiling, not a tool bug or RTL bug)",
+              "reduce DRT worker/thread count for this block, raise host memory, or PARTITION the block into hardened macros (the structural fix)",
+              0.7),
+    Signature("route_congestion",
+              re.compile(r"Routing congestion|DRT-\d+|detailed routing failed|cannot route|unrouted net|GRT-\d+.*overflow", re.I),
+              "5_route", Layer.ROUTE,
+              "detailed/global routing failed (congestion or a generic routing-stage error) — symptomatic, may be downstream of a real upstream cause",
+              "add/upgrade routing layers or go back and lower placement density / spread macros; if timing was already broken pre-place, fix the upstream cause instead",
+              0.55),
+    Signature("antenna_violation",
+              re.compile(r"antenna violation|ANT-\d+|max antenna ratio", re.I),
+              "5_route", Layer.ROUTE,
+              "post-route antenna-ratio violations",
+              "insert diodes / adjust layer assignment; a route-stage fix, not RTL",
+              0.6),
+    # ---- signoff : DRC-geometry and LVS are their OWN layer ---------------
+    Signature("drc_geometry",
+              re.compile(r"DRC.*violation|min area|min spacing|min width|short(s)?\b|non-default rule|DRC-\d+", re.I),
+              "6_final", Layer.SIGNOFF,
+              "geometric DRC violations at signoff (spacing/width/area/shorts)",
+              "fix via routing/ECO or NDR; if pervasive, revisit track/pitch. A signoff-stage fix, not RTL",
+              0.5),
+    Signature("lvs_mismatch",
+              re.compile(r"LVS.*(mismatch|fail|error)|layout.*schematic.*mismatch|netlist.*not equivalent|unmatched (net|device)", re.I),
+              "6_final", Layer.SIGNOFF,
+              "LVS layout-vs-schematic mismatch (connectivity/device count differs from netlist)",
+              "trace the mismatched net/device: usually a power/ground or blackbox-pin binding issue in the flow, NOT an RTL logic bug — check macro LEF pins and PDN connectivity first",
+              0.55),
     # ---- timing (can surface at several stages) --------------------------
+    # Split hold from setup, and make the remedy layer depend on WHERE the path
+    # lives: a genuinely too-deep reg2reg cloud is architectural (SYNTH_OPT
+    # retime, or RTL only if retime can't absorb it); an over-tight clock/IO
+    # budget is SDC. Never auto-blame RTL from a WNS number alone.
+    Signature("hold_violation",
+              re.compile(r"hold violation|WHS\s*[:=]?\s*-|worst hold slack.*-|min.*timing.*not met", re.I),
+              "4_cts", Layer.CTS,
+              "hold-time violation (usually CTS/route balancing, not the design)",
+              "fix with hold-buffer insertion / CTS balancing; almost never an RTL change",
+              0.55),
     Signature("timing_not_met",
-              re.compile(r"WNS\s*[:=]?\s*-|worst negative slack.*-|timing.*not met|setup violation", re.I),
+              re.compile(r"WNS\s*[:=]?\s*-|worst negative slack.*-|timing.*not met|setup violation|large negative slack", re.I),
               "6_final", Layer.SDC,
-              "negative slack — setup timing not met",
-              "decide: unrealistic SDC (relax/clean constraints) vs. needs SYNTH_OPT (retime/effort) vs. CTS; NOT an RTL bug unless the path is architecturally too long",
+              "negative setup slack — decide SDC vs SYNTH_OPT vs architectural",
+              "decide: unrealistic SDC (relax/clean constraints) vs SYNTH_OPT (retime/effort) vs a genuinely too-deep reg2reg cloud (pipeline in RTL). Confirm WHICH before editing; never auto-blame RTL from a WNS number alone",
               0.4),
 ]
 
@@ -414,10 +490,11 @@ class FusedReview:
     base: ReasoningResult                 # signature-based (log-only) reasoning
     evidence: object = None               # stage_timing_analyzer.StageEvidence
     root_cause: object = None             # stage_timing_analyzer.RootCause
-    root_layer: str = Layer.UNKNOWN       # final agreed layer (evidence wins)
+    root_layer: str = Layer.UNKNOWN       # final agreed layer (anchored on the failing-stage fact)
     can_auto: bool = False
     needs_llm: bool = True
     briefing: str = ""
+    provenance: str = ""                   # deciding source + exact line + short hash (audit trail)
 
     def fix_allowed(self, fix_layer: str) -> Tuple[bool, str]:
         """Guardrail entry point used by the fail loop before applying any fix."""
@@ -427,6 +504,19 @@ class FusedReview:
         return _sta.verdict_on_fix(self.evidence, fix_layer)
 
 
+def _provenance(source: str, layer: str, signature: str, deciding_line: str) -> str:
+    """Deterministic audit trail: WHO decided the layer, on WHICH exact line.
+
+    The short SHA-1 lets a human (or a later run) confirm the verdict was pinned
+    to a specific, real log/report line and was not hallucinated. Determinism is
+    guaranteed: same input line -> same hash, no clock/random/network.
+    """
+    line = (deciding_line or "").strip()
+    h = hashlib.sha1(line.encode("utf-8", "replace")).hexdigest()[:8] if line else "--------"
+    return (f"  PROVENANCE: decided_by={source} layer={layer} signature={signature} "
+            f"line[{h}]: {line[:160]}")
+
+
 def reason_with_reports(error_lines: List[str],
                         tail: str,
                         block: str,
@@ -434,22 +524,37 @@ def reason_with_reports(error_lines: List[str],
                         report_dir: Optional[str] = None,
                         synth_stat_path: Optional[str] = None,
                         stage_hint: Optional[str] = None) -> FusedReview:
-    """Adaptive, evidence-first review.
+    """Adaptive review anchored on the FAILING-STAGE FACT, not the WNS trajectory.
 
-    1. Run the log-signature `reason()` (fast, always).
-    2. If a report directory is available, build the cross-stage evidence pack
-       and its deterministic root cause. The EVIDENCE-derived layer OVERRIDES the
-       log-signature layer when they disagree, because the trajectory is a
-       stronger signal than a single failing-stage excerpt (this is precisely
-       what stops the "route" mis-classification the security run hit).
-    3. Emit a combined briefing so, if the LLM is consulted, it sees the same
-       evidence a human lead would — and the guardrail (fix_allowed) can veto a
-       symptom fix.
+    1. Run the log-signature `reason()` (fast, always). A matched signature is a
+       DIRECT observation of what the tool reported at the make-step that failed
+       (PDN-0179 cannot repair channels, a DRT crash, an LVS mismatch, a macro
+       that does not fit). That is a hard fact.
+    2. If a report directory is available, build the cross-stage evidence pack and
+       its deterministic root cause. The WNS trajectory it derives is an
+       INFERENCE about where timing degraded — useful, but weaker than a direct
+       observation of the failing step.
+    3. GATE (this is the fix for the false "ROOT CAUSE: RTL [0.90]" that cva6
+       PDN-0179 hit): a confident, non-timing failing-stage signature ANCHORS the
+       verdict. The trajectory may override the layer ONLY when the log signal is
+       itself absent, timing-only (SDC), UNKNOWN, or low-confidence — i.e. only
+       when there is no hard failing-stage fact to anchor on. This stops the
+       agent from blaming RTL for a placement/PDN/route/LVS failure just because
+       the WNS trajectory looked bad.
+    4. Emit a combined briefing plus a PROVENANCE line (deciding source + exact
+       line + short hash) so the verdict is auditable and the guardrail
+       (fix_allowed) can still veto a symptom fix.
     """
     base = reason(error_lines, tail, block, dep_graph, stage_hint)
-    fused = FusedReview(base=base, root_layer=base.top.layer if base.top else Layer.UNKNOWN,
+    base_top = base.top
+    fused = FusedReview(base=base, root_layer=base_top.layer if base_top else Layer.UNKNOWN,
                         can_auto=base.can_auto, needs_llm=base.needs_llm,
                         briefing=base.briefing)
+    # Provenance for the log-only path (used unless the report evidence changes it).
+    if base_top is not None:
+        fused.provenance = _provenance(
+            "log_signature", base_top.layer, base_top.signature,
+            base_top.evidence[0] if base_top.evidence else "")
     if not report_dir:
         return fused
 
@@ -465,24 +570,63 @@ def reason_with_reports(error_lines: List[str],
     rc = sta.classify_root_cause(ev)
     fused.evidence, fused.root_cause = ev, rc
 
-    # Evidence wins on the LAYER decision when it is confident.
-    if rc.confidence >= 0.7 and rc.layer not in ("UNKNOWN",):
-        disagree = (base.top is not None and base.top.layer != rc.layer)
+    # ---- GATE: anchor on the failing-stage FACT, not the WNS trajectory. ----
+    # A matched log signature can be one of two things:
+    #   * a HARD fact — a deterministic or high-confidence signature that names
+    #     the actual mechanism (PDN-0179 cannot repair channels, a DRT crash, an
+    #     OOM kill, a macro that does not fit). This is a direct observation of
+    #     the root cause and must ANCHOR the verdict.
+    #   * a SYMPTOM — a low-confidence, non-deterministic signature that only says
+    #     WHERE it failed, not WHY (generic "routing congestion", "cannot
+    #     legalize"). A design that was already doomed pre-placement (a real RTL
+    #     area/timing explosion) will limp downstream and finally trip such a
+    #     symptom; here the cross-stage trajectory is the stronger signal and is
+    #     allowed to override the layer.
+    # The discriminator is therefore the STRENGTH of the log signature (its
+    # determinism / confidence), NOT merely which layer it names. A timing-only
+    # (SDC) or UNKNOWN signature is never a hard anchor.
+    log_is_hard = (base_top is not None
+                   and base_top.layer not in (Layer.SDC, Layer.UNKNOWN)
+                   and (base_top.deterministic or base_top.confidence >= 0.7))
+    evidence_confident = (rc.confidence >= 0.7 and rc.layer not in ("UNKNOWN",))
+
+    if log_is_hard:
+        # The failing-stage signature ANCHORS the verdict. Trajectory is
+        # secondary context only — it never overrides a hard failing-stage fact.
+        fused.root_layer = base_top.layer
+        fused.can_auto = base.can_auto
+        fused.needs_llm = base.needs_llm
+        note = ""
+        if evidence_confident and rc.layer != base_top.layer:
+            note = (f"\n  NOTE: the WNS trajectory points at {rc.layer}, but the "
+                    f"failing-stage signature '{base_top.signature}' is a DIRECT "
+                    f"observation of the make-step that failed and ANCHORS the "
+                    f"verdict at {base_top.layer}. The trajectory is secondary "
+                    f"context, NOT the root-cause layer — this is exactly what "
+                    f"stops RTL being blamed for a placement/PDN/route/LVS failure.")
+        fused.briefing = (base.briefing + "\n\n" + sta.evidence_briefing(ev, rc) + note)
+        fused.provenance = _provenance(
+            "log_signature(anchor)", base_top.layer, base_top.signature,
+            base_top.evidence[0] if base_top.evidence else "")
+    elif evidence_confident:
+        # No hard failing-stage fact (log signal absent/weak/timing-only) — the
+        # cross-stage trajectory is now the strongest signal, so it decides.
+        disagree = (base_top is not None and base_top.layer != rc.layer)
         fused.root_layer = rc.layer
-        # A confident, structural root cause (pre-place timing hole, area
-        # explosion) is auto-actionable at the RTL/SDC layer and does NOT need
-        # the LLM to re-derive it — but it is NOT auto-*applied* (RTL edits are
-        # high blast-radius); the agent surfaces it for review.
         fused.can_auto = False
         fused.needs_llm = disagree or rc.layer in (Layer.RTL, Layer.SDC)
         note = ""
         if disagree:
-            note = (f"\n  NOTE: log-only signature suggested "
-                    f"{base.top.layer}, but the cross-stage EVIDENCE overrides it "
-                    f"to {rc.layer} (trajectory beats a single failing-stage excerpt).")
-        fused.briefing = (sta.evidence_briefing(ev, rc)
-                          + "\n\n" + base.briefing + note)
+            note = (f"\n  NOTE: no confident failing-stage signature; the "
+                    f"cross-stage EVIDENCE selects {rc.layer} (the weak log "
+                    f"signature had suggested {base_top.layer}).")
+        fused.briefing = (sta.evidence_briefing(ev, rc) + "\n\n" + base.briefing + note)
+        fused.provenance = _provenance(
+            "cross_stage_evidence", rc.layer, "wns_trajectory",
+            f"rc.confidence={rc.confidence:.2f} layer={rc.layer}")
     else:
+        # Neither a hard log fact nor confident evidence — keep the log verdict,
+        # surface both trajectories, and lean on the LLM.
         fused.briefing = sta.evidence_briefing(ev, rc) + "\n\n" + base.briefing
     return fused
 
@@ -527,4 +671,61 @@ if __name__ == "__main__":
     assert downstream_stages(Layer.ROUTE) == ["5_route", "6_final"]
     assert downstream_stages(Layer.RTL)[0] == "1_synth"
     print("blast radius OK")
+
+    # 7) PDN-0179 is classified as a FLOORPLAN (macro-placement) fix by the LOG
+    #    signature alone — NOT RTL. This is the catalogue half of the fix for the
+    #    false "ROOT CAUSE: RTL [0.90]" the cva6 run produced.
+    r = reason(["[ERROR PDN-0179] Unable to repair all channels."], "",
+               "user_core_cva6", dep)
+    assert r.top.layer == Layer.FLOORPLAN, r.top
+    assert r.top.signature == "pdn_repair_channels", r.top.signature
+    assert r.top.downstream[0] == "2_floorplan", r.top.downstream
+    print("pdn-0179 log-signature:", r.top.signature, "->", r.top.layer)
+
+    # 8) GATE ANCHORING (the core fix): a hard failing-stage fact (PDN-0179) must
+    #    WIN over a confident RTL trajectory. We inject a fake stage_timing_analyzer
+    #    that dishonestly reports a high-confidence RTL root cause and confirm the
+    #    fused verdict still anchors on FLOORPLAN — never RTL.
+    import sys as _sys, types as _types
+    _fake = _types.ModuleType("stage_timing_analyzer")
+
+    class _Synth:  # noqa: E306
+        top_module = "cva6"
+
+    class _Ev:  # noqa: E306
+        trajectory = [("3_place", -0.05), ("5_route", -0.40)]
+        synth = _Synth()
+
+    class _RC:  # noqa: E306
+        layer = Layer.RTL
+        confidence = 0.90
+
+    _fake.analyze = lambda report_dir, synth_stat_path=None: _Ev()
+    _fake.classify_root_cause = lambda ev: _RC()
+    _fake.evidence_briefing = lambda ev, rc: "[fake evidence: WNS worsened toward route]"
+    _fake.verdict_on_fix = lambda ev, layer: (True, "ok")
+    _sys.modules["stage_timing_analyzer"] = _fake
+    try:
+        fr = reason_with_reports(["[ERROR PDN-0179] Unable to repair all channels."],
+                                 "", "user_core_cva6", dep,
+                                 report_dir="/tmp/ignored")
+    finally:
+        del _sys.modules["stage_timing_analyzer"]
+    assert fr.root_layer == Layer.FLOORPLAN, ("gate leaked to " + str(fr.root_layer))
+    assert "PROVENANCE" in fr.provenance and "pdn_repair_channels" in fr.provenance, fr.provenance
+    assert "ANCHORS" in fr.briefing, "expected anchoring note in briefing"
+    print("gate-anchor:", fr.root_layer, "|", fr.provenance.split("line[")[0].strip())
+
+    # 9) GATE FALLBACK: when the log signal is timing-only (weak SDC), the
+    #    confident cross-stage trajectory IS allowed to decide the layer.
+    _sys.modules["stage_timing_analyzer"] = _fake
+    try:
+        fr2 = reason_with_reports(["WNS = -0.145  worst negative slack -0.145"],
+                                  "", "user_domain", dep, report_dir="/tmp/ignored")
+    finally:
+        del _sys.modules["stage_timing_analyzer"]
+    assert fr2.root_layer == Layer.RTL, ("fallback should defer to evidence, got "
+                                         + str(fr2.root_layer))
+    print("gate-fallback (weak log defers to evidence):", fr2.root_layer)
+
     print("reasoning_engine self-test OK")
