@@ -494,6 +494,10 @@ class JANUSAutonomousAgent:
             "user_core":      ["SYNTH_MEMORY_MAX_BITS=16384"],
             "user_core_cva6": ["SYNTH_MEMORY_MAX_BITS=16384"],
             "user_core_ara":  ["SYNTH_MEMORY_MAX_BITS=16384"],
+            # L0.25 lane sub-macro: same defensive gate as the Ara macro. The
+            # lane VRF banks are 8 words deep (< asic_tc_sram MIN_MACRO_DEPTH=32)
+            # so they infer flops, but keep the gate identical for determinism.
+            "user_core_ara_lane": ["SYNTH_MEMORY_MAX_BITS=16384"],
         }
         cmd += force_vars.get(block, [])
         return cmd
