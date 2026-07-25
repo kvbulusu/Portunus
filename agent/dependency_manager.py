@@ -55,6 +55,16 @@ DEFAULT_GRAPH: Dict[str, Set[str]] = {
     # sense as any hardened block — they only need the logical fabric deps.
     "user_core_cva6": {"security", "noc"},
     "user_core_ara":  {"security", "noc"},
+    # ---- Ara LANE sub-partition macro (L0.25, OPTIONAL earned-by-data) ------
+    # If user_core_ara (~620K inst) still OOMs detail route, the documented next
+    # split is lane-level: harden ONE `lane` here and let ara.sv reuse it 4x. It
+    # is an independent leaf (logical fabric deps only). It is NOT a hard
+    # dependency of user_core_ara: user_core_ara consumes this macro ONLY when
+    # built with JANUS_ARA_LANE_MACRO=1 (which sets -D JANUS_PARTITIONED_LANE);
+    # by default user_core_ara builds with real flat lanes. So we keep this a
+    # sibling node the orchestrator can build on demand (--blocks
+    # user_core_ara_lane) without forcing it into the default critical path.
+    "user_core_ara_lane": {"security", "noc"},
     # user_core = ONE hardened CVA6+Ara core (ara_integration_wrapper). It is a
     # physical sub-block of the user cluster: user_cluster_top instantiates it 2x
     # and consumes its .lef/.lib abstract as a hard macro. Hardening the 2-core
