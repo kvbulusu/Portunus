@@ -493,7 +493,21 @@ class JANUSAutonomousAgent:
                             "SYNTH_HIERARCHICAL=0"],
             "user_core":      ["SYNTH_MEMORY_MAX_BITS=16384"],
             "user_core_cva6": ["SYNTH_MEMORY_MAX_BITS=16384"],
-            "user_core_ara":  ["SYNTH_MEMORY_MAX_BITS=16384"],
+            # user_core_ara: JANUS_ARA_LANE_MACRO=1 is FORCED here, not left to a
+            # sourced shell env, because a missing flag silently reverts ara.sv
+            # to elaborating all 4 lanes FLAT (~620K inst) and OOM-kills detail
+            # route at ~23 GB -- exactly the 8.5h wasted run in
+            # 5_2_route.log (Error 247, peak 22,917,556 KB). With the flag,
+            # ara.sv (rtl/external/ara/src/ara.sv:370, `ifdef
+            # JANUS_PARTITIONED_LANE) instantiates the pre-hardened
+            # user_core_ara_lane blackbox 4x instead, so the lane is routed ONCE.
+            # The lane macro is guaranteed built first (dependency_manager.py
+            # makes user_core_ara_lane a hard dep of user_core_ara). Command-line
+            # assignment (highest GNU-make precedence) so config.mk's
+            # `ifeq ($(JANUS_ARA_LANE_MACRO),1)` block reliably fires and its
+            # ADDITIONAL_LEFS/LIBS/GDS pick up the lane abstract.
+            "user_core_ara":  ["SYNTH_MEMORY_MAX_BITS=16384",
+                                "JANUS_ARA_LANE_MACRO=1"],
             # L0.25 lane sub-macro: same defensive gate as the Ara macro. The
             # lane VRF banks are 8 words deep (< asic_tc_sram MIN_MACRO_DEPTH=32)
             # so they infer flops, but keep the gate identical for determinism.
@@ -607,28 +621,43 @@ class JANUSAutonomousAgent:
                          f"(GDS is still valid; see {os.path.basename(log_path)}). "
                          "Top-level integration will need this .lef/.lib.")
 
+    def _abstract_base_dirs(self, block: str) -> List[str]:
+        """Candidate results/<...>/base dirs for a block, bare block name FIRST.
+
+        ORFS writes to results/asap7/<DESIGN_NICKNAME>/base and DESIGN_NICKNAME is
+        the bare block name (confirmed by 1_synth.log write_db paths) — NOT
+        'janus/<block>'. We keep the legacy janus/<block> layout as a fallback so
+        old result trees still resolve, mirroring _results_dir().
+        """
+        if not self.orfs:
+            return []
+        root = os.path.join(self.orfs, "flow", "results", "asap7")
+        return [
+            os.path.join(root, block, "base"),
+            os.path.join(root, f"janus_{block}", "base"),
+            os.path.join(root, "janus", block, "base"),
+        ]
+
     def _find_abstract(self, block: str, ext: str) -> Optional[str]:
         """Locate a freshly generated abstract file (.lef/.lib) for a block."""
-        if not self.orfs:
-            return None
-        pat = os.path.join(self.orfs, "flow", "results", "asap7", "janus",
-                           block, "base", f"*{ext}")
-        hits = sorted(glob.glob(pat))
-        return hits[0] if hits else None
+        for base in self._abstract_base_dirs(block):
+            hits = sorted(glob.glob(os.path.join(base, f"*{ext}")))
+            if hits:
+                return hits[0]
+        return None
 
     def _find_routed_odb(self, block: str) -> Optional[str]:
         """Locate the final routed .odb for a block (prefer 6_final, then route)."""
-        if not self.orfs:
-            return None
-        base = os.path.join(self.orfs, "flow", "results", "asap7", "janus",
-                            block, "base")
-        for name in ("6_final.odb", "5_route.odb", "5_2_route.odb"):
-            p = os.path.join(base, name)
-            if os.path.exists(p):
-                return p
-        # last resort: highest-numbered odb in the dir
-        hits = sorted(glob.glob(os.path.join(base, "*.odb")))
-        return hits[-1] if hits else None
+        for base in self._abstract_base_dirs(block):
+            for name in ("6_final.odb", "5_route.odb", "5_2_route.odb"):
+                p = os.path.join(base, name)
+                if os.path.exists(p):
+                    return p
+            # last resort: highest-numbered odb in the dir
+            hits = sorted(glob.glob(os.path.join(base, "*.odb")))
+            if hits:
+                return hits[-1]
+        return None
 
     def _classify_timing(self, block: str) -> None:
         """Run the read-only classified-timing probe on the routed .odb and

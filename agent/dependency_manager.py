@@ -175,13 +175,17 @@ if __name__ == "__main__":
     assert "ampo" in dm.ready()              # security done -> ampo ready
     assert "agent_domain" not in dm.ready()  # still needs noc
     dm.mark("noc", Status.DONE)
-    # security + noc done: the two core partitions + ampo + agent_domain are
-    # ready. user_core is NOT (needs its partition macros first); user_domain is
-    # NOT (needs user_core).
+    # security + noc done: ampo, agent_domain, user_core_cva6 and the Ara LANE
+    # macro are ready. user_core_ara is NOT (it now hard-depends on the lane
+    # macro — the OOM fix); user_core is NOT (needs its partition macros first);
+    # user_domain is NOT (needs user_core).
     assert set(dm.ready()) >= {"ampo", "agent_domain",
-                               "user_core_cva6", "user_core_ara"}, dm.ready()
-    assert "user_core" not in dm.ready()     # needs both partition macros
-    assert "user_domain" not in dm.ready()   # needs user_core
+                               "user_core_cva6", "user_core_ara_lane"}, dm.ready()
+    assert "user_core_ara" not in dm.ready()  # needs user_core_ara_lane first
+    assert "user_core" not in dm.ready()      # needs both partition macros
+    assert "user_domain" not in dm.ready()    # needs user_core
+    dm.mark("user_core_ara_lane", Status.DONE)
+    assert "user_core_ara" in dm.ready(), dm.ready()  # lane macro done -> ara ready
     dm.mark("user_core_cva6", Status.DONE)
     assert "user_core" not in dm.ready()     # still needs user_core_ara
     dm.mark("user_core_ara", Status.DONE)
