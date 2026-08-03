@@ -303,6 +303,11 @@ class JANUSAutonomousAgent:
         self.sram_setup_script = os.path.join(_ROOT, "scripts", "04_setup_srams.sh")
         self.sram_out_dir = (os.environ.get("ASAP7_SRAM_DIR")
                              or os.path.join(_ROOT, "srams", "asap7"))
+        # One-shot guard: before hardening any block we auto-repair fakeram LEFs
+        # that still carry the FakeRAM2.0 blanket M4 (pin-layer) OBS which blocks
+        # the macro power grid (PDN-0232 -> PDN-0233 on user_core_cva6). See
+        # _ensure_fakeram_obs_fixed(). Set True once it has run this session.
+        self._fakeram_obs_checked = False
         # branches a committed fix should be published to (keeps mirror branches
         # like main + v5.1_integration in lock-step). Empty => current branch.
         sync = list(getattr(args, "git_sync_branches", None) or [])
@@ -1158,7 +1163,69 @@ class JANUSAutonomousAgent:
         return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
 
     # ----- run one make and capture the log ---------------------------------
+    def _ensure_fakeram_obs_fixed(self) -> None:
+        """Pre-flight self-enforcing guard against the fakeram M4-OBS gotcha.
+
+        FakeRAM2.0 emits a full-macro blanket OBS covering M1-M4; the M4 sub-
+        block sits on top of the macro's own M4 VDD/VSS pins, so pdngen cannot
+        drop the M4->M5 vias the ASAP7 CORE_macro_grid_1 strategy needs. Result:
+        55x [WARNING PDN-0232] "... does not contain any shapes or vias" then
+        [ERROR PDN-0233] "Failed to generate full power grid" on user_core_cva6
+        (the only block that instantiates fakeram cache tiles directly).
+
+        The committed LEFs in srams/asap7 are already stripped (M1-M3 OBS only),
+        and 04_setup_srams.sh step 5b re-strips after every regeneration. But a
+        run that consumed a STALE LEF (partial pull / regen without the strip)
+        silently reverts to the M4 OBS and the PDN failure recurs. This guard
+        makes the fix impossible to bypass: right before hardening the first
+        block it scans every consumed fakeram LEF and, if any still carries an
+        M4 OBS sub-block, strips it in place using the same deterministic,
+        idempotent scripts/fix_fakeram_obs.py. Loud WARN so the stale artifact
+        is visible. Never raises — a guard must not be able to break the flow.
+        """
+        if self._fakeram_obs_checked:
+            return
+        self._fakeram_obs_checked = True
+        try:
+            lefs = sorted(glob.glob(os.path.join(self.sram_out_dir, "*.lef")))
+            if not lefs:
+                return
+            # Import the shared stripper (single source of truth) from scripts/.
+            scripts_dir = os.path.join(_ROOT, "scripts")
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+            try:
+                from fix_fakeram_obs import fix_lef  # type: ignore
+            except Exception as e:  # noqa
+                self.ui.warn(f"fakeram OBS guard: cannot load fix_fakeram_obs "
+                             f"({e}); skipping pre-flight check")
+                return
+            repaired = []
+            for lef in lefs:
+                try:
+                    changed, _msg = fix_lef(lef)
+                    if changed:
+                        repaired.append(os.path.basename(lef))
+                except Exception as e:  # noqa
+                    self.ui.warn(f"fakeram OBS guard: {os.path.basename(lef)}: "
+                                 f"{e}")
+            if repaired:
+                self.ui.warn(
+                    "fakeram OBS guard: STALE M4 pin-layer OBS auto-stripped "
+                    "from %d LEF(s) in %s before hardening — %s. This would "
+                    "otherwise recur as PDN-0232/PDN-0233 on user_core_cva6. "
+                    "Consumed LEFs were out of date; re-run "
+                    "04_setup_srams.sh (or pull cleanly) to keep the source "
+                    "artifacts in sync." % (
+                        len(repaired), self.sram_out_dir, ", ".join(repaired))
+                )
+        except Exception as e:  # noqa — a guard must never break the flow
+            self.ui.warn(f"fakeram OBS guard: skipped ({e})")
+
     def _run_make(self, block: str) -> int:
+        # Self-enforcing pre-flight: repair any stale fakeram LEF that still
+        # blocks the macro power grid, so PDN-0233 cannot silently recur.
+        self._ensure_fakeram_obs_fixed()
         log_path = self._block_log(block)
         cmd = self._make_cmd(block)
         self.ui.debug(f"{block}: cwd={self.flow_dir} cmd={' '.join(cmd)}")
