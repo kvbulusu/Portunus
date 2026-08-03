@@ -68,8 +68,10 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -791,6 +793,228 @@ class JANUSAutonomousAgent:
                 discard_odb(eco.out_odb)
                 self.ui.warn(f"{block}: DRC ECO DISCARDED — {why}")
 
+    # ----- ORFS logs directory for a block -----------------------------------
+    def _logs_dir(self, block: str) -> Optional[str]:
+        """Locate the ORFS *logs* dir for a block (holds N_*.log per substage).
+
+        Same layout uncertainty as _results_dir/_reports_dir: ORFS writes under
+        flow/logs/<platform>/<design>/base and DESIGN_NICKNAME is usually the
+        bare block name. Return the first candidate that actually holds logs.
+        """
+        if not self.flow_dir:
+            return None
+        cands = [
+            os.path.join(self.flow_dir, "logs", "asap7", block, "base"),
+            os.path.join(self.flow_dir, "logs", "asap7", f"janus_{block}", "base"),
+        ]
+        cands += glob.glob(os.path.join(self.flow_dir, "logs", "*",
+                                        f"*{block}*", "base"))
+        for d in cands:
+            if os.path.isdir(d) and glob.glob(os.path.join(d, "*.log")):
+                return d
+        return None
+
+    # ----- golden archive of a converged block -------------------------------
+    # Heavy design binaries: kept ON DISK in the golden snapshot (so it is a
+    # complete restorable copy) but git-ignored by default so the shared repo
+    # is not bloated with hundreds of MB per converged block. --golden-include
+    # -heavy commits them too.
+    _GOLDEN_HEAVY_EXT = (".gds", ".gds.gz", ".odb", ".def", ".spef", ".spef.gz")
+
+    def _golden_converged(self, res: "BlockResult") -> "tuple[bool, str]":
+        """Deterministic convergence gate for golden archiving.
+
+        Golden-worthy == the block completed AND timing is met (or within the
+        operator-set uncertainty margin) AND residual DRC is within the same
+        'handful' bound the post-route ECO uses. Margins default to 0 (strict:
+        timing must actually be met) so the gate NEVER silently masks a real
+        violation — the operator must OPT IN to a margin via
+        --golden-wns-margin-ps / --golden-hold-margin-ps, and whatever the
+        gate decides, the TRUE QoR is always recorded verbatim in the manifest.
+        Returns (ok, human_reason).
+        """
+        wns_m = float(getattr(self.args, "golden_wns_margin_ps", 0.0) or 0.0)
+        hold_m = float(getattr(self.args, "golden_hold_margin_ps", 0.0) or 0.0)
+        handful = int(getattr(self.args, "drc_handful", 20))
+        setup, hold, drc = res.wns_ns, res.hold_ps, res.drc_violations
+        # timing: unknown slack is NOT treated as converged (honest — we only
+        # archive golden when we can prove closure within the stated margin).
+        if setup is None:
+            return False, "setup WNS unknown — not archiving golden"
+        if setup < -wns_m:
+            return False, (f"setup WNS {setup:.1f}ps < -{wns_m:.1f}ps margin "
+                           "— not converged")
+        if hold is not None and hold < -hold_m:
+            return False, (f"hold WS {hold:.1f}ps < -{hold_m:.1f}ps margin "
+                           "— not converged")
+        if drc is not None and drc > handful:
+            return False, (f"{drc} DRC > handful ({handful}) — not golden "
+                           "(treat as congestion, not an ECO/archive)")
+        margin_txt = (f"(within margins setup≤{wns_m:.0f}ps hold≤{hold_m:.0f}ps)"
+                      if (wns_m or hold_m) else "(strict: timing met)")
+        return True, (f"converged {margin_txt}: setup={setup:.1f}ps "
+                      f"hold={hold if hold is None else round(hold,1)}ps "
+                      f"drc={drc if drc is not None else 'n/a'}")
+
+    def _archive_golden(self, block: str, res: Optional["BlockResult"] = None) -> None:
+        """Snapshot a CONVERGED block's logs/reports/final outputs into the
+        in-repo golden area and git-commit it (surgically — only the golden
+        subtree). Heavy binaries are copied to disk but git-ignored unless
+        --golden-include-heavy. Never raises into the flow: any failure is
+        logged and the block stays DONE."""
+        if getattr(self.args, "no_golden", False):
+            return
+        if res is None:
+            res = self.results.get(block) if hasattr(self.results, "get") else None
+        if res is None:
+            return
+        ok, why = self._golden_converged(res)
+        if not ok:
+            self.ui.info(f"    {block}: golden archive SKIPPED — {why}")
+            return
+        self.ui.good(f"{block}: {why} — archiving golden")
+
+        try:
+            golden_root = getattr(self.args, "golden_dir", None) or os.path.join(
+                _ROOT, "golden")
+            dest = os.path.join(golden_root, "asap7", block)
+            # deterministic: the golden area holds the LATEST converged snapshot
+            # for a block (overwrite), so `golden/asap7/<block>` is always the
+            # current sign-off copy. History is preserved by git commits.
+            if os.path.isdir(dest):
+                shutil.rmtree(dest)
+            os.makedirs(dest, exist_ok=True)
+
+            include_heavy = bool(getattr(self.args, "golden_include_heavy", False))
+            copied: List[str] = []
+
+            def _copy_into(src_dir: Optional[str], subdir: str,
+                           only_text: bool) -> None:
+                if not src_dir or not os.path.isdir(src_dir):
+                    return
+                out = os.path.join(dest, subdir)
+                os.makedirs(out, exist_ok=True)
+                for name in sorted(os.listdir(src_dir)):
+                    sp = os.path.join(src_dir, name)
+                    if not os.path.isfile(sp):
+                        continue
+                    is_heavy = name.lower().endswith(self._GOLDEN_HEAVY_EXT)
+                    if only_text and is_heavy and not include_heavy:
+                        # copy heavy final outputs to disk only when asked; the
+                        # .gitignore keeps them out of git regardless.
+                        continue
+                    shutil.copy2(sp, os.path.join(out, name))
+                    copied.append(os.path.join(subdir, name))
+
+            # (1) ORFS per-substage logs + reports (text; the audit trail).
+            _copy_into(self._logs_dir(block), "logs", only_text=False)
+            _copy_into(self._reports_dir(block), "reports", only_text=False)
+            # (2) the agent's UNIFIED block log (one file, whole run).
+            ublog = self._block_log(block)
+            if os.path.isfile(ublog):
+                shutil.copy2(ublog, os.path.join(dest, "logs",
+                                                 f"{block}_unified.log"))
+                copied.append(f"logs/{block}_unified.log")
+            # (3) final design outputs (6_final.*). Text (.v/.sdc) always;
+            #     heavy (.gds/.def/.spef/.odb) to disk, git only with the flag.
+            rdir = self._results_dir(block)
+            if rdir:
+                out = os.path.join(dest, "final")
+                os.makedirs(out, exist_ok=True)
+                for sp in sorted(glob.glob(os.path.join(rdir, "6_final.*"))):
+                    name = os.path.basename(sp)
+                    is_heavy = name.lower().endswith(self._GOLDEN_HEAVY_EXT)
+                    if is_heavy and not include_heavy:
+                        # still snapshot to disk for a complete restorable copy
+                        shutil.copy2(sp, os.path.join(out, name))
+                        continue
+                    shutil.copy2(sp, os.path.join(out, name))
+                    copied.append(f"final/{name}")
+
+            # (4) machine-readable QoR + human MANIFEST with FULL provenance.
+            metrics = res.as_row()
+            metrics["converged_reason"] = why
+            metrics["timestamp"] = datetime.now().isoformat(timespec="seconds")
+            metrics["git_sha"] = self.git.head_sha(short=False) if self.git.available() else None
+            metrics["git_branch"] = self.git.current_branch() if self.git.available() else None
+            metrics["make_cmd"] = " ".join(self._make_cmd(block))
+            with open(os.path.join(dest, "metrics.json"), "w") as f:
+                json.dump(metrics, f, indent=2, sort_keys=True)
+            self._write_golden_manifest(dest, block, res, why, metrics)
+
+            # (5) a per-golden-root .gitignore so heavy binaries never enter git
+            #     unless the operator committed them on purpose (--golden-include
+            #     -heavy writes NO ignore, letting them be staged).
+            gi = os.path.join(golden_root, ".gitignore")
+            if not include_heavy and not os.path.isfile(gi):
+                os.makedirs(golden_root, exist_ok=True)
+                with open(gi, "w") as f:
+                    f.write("# Heavy PD binaries are snapshotted to disk but kept "
+                            "OUT of git to protect repo size.\n"
+                            "# Re-run with --golden-include-heavy to version them.\n")
+                    for ext in ("*.gds", "*.gds.gz", "*.odb", "*.def",
+                                "*.spef", "*.spef.gz"):
+                        f.write(ext + "\n")
+
+            self.ui.good(f"{block}: golden snapshot → {dest} "
+                         f"({len(copied)} tracked file(s))")
+
+            # (6) commit the golden subtree SURGICALLY (GitOps stages only these
+            #     paths; .gitignore keeps heavy binaries out). Push only if the
+            #     operator already enabled push/sync — mirrors fix-commit policy.
+            if not getattr(self.args, "no_git_commit", False) and self.git.available():
+                msg = (f"golden({block}): archive converged sign-off snapshot\n\n"
+                       f"{why}\nsource: {metrics['git_branch']} "
+                       f"{(metrics['git_sha'] or '')[:12]}\n"
+                       f"make: {metrics['make_cmd']}")
+                commit_paths = [gi, dest] if os.path.isfile(gi) else [dest]
+                cok, cmsg = self.git.commit_paths(commit_paths, msg)
+                if cok:
+                    self.ui.good(f"{block}: golden committed — {cmsg}")
+                    pok, pmsg = self.git.push()
+                    if pok:
+                        self.ui.good(f"{block}: golden {pmsg}")
+                    else:
+                        self.ui.info(f"    {block}: golden not pushed — {pmsg}")
+                else:
+                    self.ui.info(f"    {block}: golden commit skipped — {cmsg}")
+        except (OSError, ValueError, shutil.Error) as exc:
+            self.ui.warn(f"{block}: golden archive failed (block stays DONE): {exc}")
+
+    def _write_golden_manifest(self, dest: str, block: str, res: "BlockResult",
+                               why: str, metrics: Dict) -> None:
+        """Human-readable sign-off record next to the machine metrics."""
+        def _fmt(v, unit=""):
+            return "n/a" if v is None else f"{v}{unit}"
+        lines = [
+            "=" * 70,
+            f"JANUS GOLDEN SIGN-OFF SNAPSHOT — {block}",
+            "=" * 70,
+            f"  timestamp   : {metrics['timestamp']}",
+            f"  git branch  : {_fmt(metrics.get('git_branch'))}",
+            f"  git HEAD     : {_fmt(metrics.get('git_sha'))}",
+            f"  make cmd    : {metrics['make_cmd']}",
+            f"  status      : {res.status}   (tries={res.tries})",
+            f"  convergence : {why}",
+            "-" * 70,
+            "  QoR (as archived — TRUE measured values, never masked):",
+            f"    setup WNS : {_fmt(res.wns_ns, ' ps')}",
+            f"    hold  WS  : {_fmt(res.hold_ps, ' ps')}",
+            f"    setup TNS : {_fmt(res.tns_ns, ' ps')}",
+            f"    DRC       : {_fmt(res.drc_violations)}",
+            f"    area      : {_fmt(res.area)}",
+            f"    power     : {_fmt(res.power)}",
+            f"    util      : {_fmt(res.utilization)}",
+            "=" * 70,
+            "Contents: logs/ (ORFS per-substage + <block>_unified.log),",
+            "  reports/ (ORFS stage reports), final/ (6_final.* outputs),",
+            "  metrics.json (machine-readable QoR + provenance).",
+            "Heavy binaries (.gds/.def/.spef/.odb) are on disk here but",
+            "git-ignored unless the run used --golden-include-heavy.",
+        ]
+        with open(os.path.join(dest, "MANIFEST.txt"), "w") as f:
+            f.write("\n".join(lines) + "\n")
+
     # ----- map a raw ORFS output line to a human-readable flow stage ---------
     # ORFS emits markers like "Running synth_odb.tcl, stage 1_synth" and step
     # banners; we translate those into a coarse stage label so the heartbeat can
@@ -904,6 +1128,23 @@ class JANUSAutonomousAgent:
                             state["stage"] = stg
                             el = self._fmt_elapsed(time.time() - t_start)
                             self.ui.step(f"{block}: → {stg}  (elapsed {el})")
+                            # Stamp a MAJOR-STAGE banner INTO the unified block
+                            # log itself (not just the console). This is what
+                            # makes runs/<ts>/<block>.log a single, navigable
+                            # log for the whole run: one greppable separator per
+                            # major stage (1_synth, 2_floorplan, 3_place, 4_cts,
+                            # 5_route, 6_final) instead of ORFS's dozen tiny
+                            # per-substage files (2_1/2_2/2_3/2_4...). ORFS still
+                            # writes its own per-substage logs under flow/logs/;
+                            # this banner just lets you read/split ONE file by
+                            # `grep -n 'MAJOR STAGE'` or awk on the marker.
+                            banner = (
+                                f"\n{'#' * 78}\n"
+                                f"########## MAJOR STAGE: {stg}"
+                                f"   (block={block}, elapsed {el})\n"
+                                f"{'#' * 78}\n"
+                            )
+                            logf.write(banner.encode())
                     if self.args.verbose:
                         self.ui.debug(f"{block}| {line}")
                 proc.stdout.close()
@@ -969,6 +1210,12 @@ class JANUSAutonomousAgent:
                 # Emit the block's .lef/.lib abstract so janus_soc_top can
                 # consume it as a hard macro (hierarchical bottom-up assembly).
                 self._run_abstract(block)
+                # Sign-off snapshot: if this block converged (timing met within
+                # the configured margins AND DRC within a handful), copy its
+                # logs/reports/final outputs + a QoR manifest into the golden
+                # area and commit surgically. Never flips the block off DONE
+                # (fully wrapped in try/except inside).
+                self._archive_golden(block, res)
                 return res
 
             # --- failed -----------------------------------------------------
@@ -1792,6 +2039,36 @@ def build_parser() -> argparse.ArgumentParser:
                         "attempt to clean (default 20). Above this the failure is "
                         "treated as global congestion needing a floorplan/route "
                         "strategy change, not an ECO.")
+    # ----- golden sign-off archiving --------------------------------------
+    p.add_argument("--no-golden", action="store_true",
+                   help="disable golden archiving. By DEFAULT, when a block "
+                        "hardens AND converges (timing met within the golden "
+                        "margins below AND DRC within --drc-handful), the agent "
+                        "snapshots its logs/reports/final outputs + a QoR "
+                        "manifest into the in-repo golden area and commits it "
+                        "surgically (push only if --git-push/--git-sync-branches "
+                        "are on).")
+    p.add_argument("--golden-dir", default=None,
+                   help="root of the golden sign-off area (default "
+                        "asic_flow/golden). Snapshots go to "
+                        "<golden-dir>/asap7/<block>/ and OVERWRITE the previous "
+                        "snapshot for that block — git history preserves versions.")
+    p.add_argument("--golden-wns-margin-ps", type=float, default=0.0,
+                   help="setup-WNS uncertainty margin (ps) tolerated when "
+                        "deciding a block is golden-converged. Default 0 = "
+                        "strict (setup timing must actually be met). Raising it "
+                        "lets you archive results 'within the uncertainty "
+                        "margin'; the TRUE WNS is always recorded in the "
+                        "manifest — the margin never masks or rewrites it.")
+    p.add_argument("--golden-hold-margin-ps", type=float, default=0.0,
+                   help="hold-slack uncertainty margin (ps) for the golden gate "
+                        "(default 0 = strict). Same non-masking guarantee as "
+                        "--golden-wns-margin-ps.")
+    p.add_argument("--golden-include-heavy", action="store_true",
+                   help="also VERSION heavy PD binaries (.gds/.def/.spef/.odb) "
+                        "in the golden commit. By default they are copied to "
+                        "disk (complete restorable snapshot) but git-ignored to "
+                        "protect repo size.")
     p.add_argument("--llm-interval", type=float, default=3.0,
                    help="min seconds between LLM calls (rate limit, default 3)")
     p.add_argument("--llm-retries", type=int, default=3,
