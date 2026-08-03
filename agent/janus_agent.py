@@ -856,6 +856,90 @@ class JANUSAutonomousAgent:
                       f"hold={hold if hold is None else round(hold,1)}ps "
                       f"drc={drc if drc is not None else 'n/a'}")
 
+    def _signoff_dir(self, block: str) -> str:
+        """Per-run sign-off output dir for a block (SPEF / LVS reports)."""
+        return os.path.join(self.run_dir, "signoff", block)
+
+    def _run_signoff(self, block: str) -> None:
+        """Run the ASAP7 sign-off extraction (OpenRCX -> SPEF) — and LVS once its
+        collateral lands — on the block's routed .odb. Runs on EVERY completed
+        block by default (staff-engineer discipline); skipped only with
+        --no-signoff. Best-effort and fully defensive: a missing tool, missing
+        asset, or any failure is logged and NEVER flips the block off DONE.
+
+        RCX is real and available (the staged ASAP7 OpenRCX model produces a
+        sign-off SPEF distinct from — and higher fidelity than — the flow's
+        built-in 6_final.spef estimate). LVS assets are absent, so an --stage
+        that includes LVS gracefully reports 'missing' and continues. Nothing is
+        ever fabricated: run_signoff.py refuses (non-zero) rather than invent a
+        result, and we treat that refusal as an informational skip."""
+        if getattr(self.args, "no_signoff", False):
+            return
+        if getattr(self.args, "no_physical", False):
+            return
+        driver = os.path.join(_ROOT, "signoff", "asap7", "run_signoff.py")
+        if not os.path.isfile(driver):
+            self.ui.debug(f"{block}: signoff driver not found ({driver}) — skipping")
+            return
+        odb = self._find_routed_odb(block)
+        if not odb:
+            self.ui.debug(f"{block}: no routed .odb — skipping signoff")
+            return
+        stage = getattr(self.args, "signoff_stage", "rcx") or "rcx"
+        timeout = int(getattr(self.args, "signoff_timeout", 1800) or 1800)
+        out_dir = self._signoff_dir(block)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            self.ui.warn(f"{block}: cannot create signoff out dir: {e}")
+            return
+
+        cmd = [sys.executable, driver, "--odb", odb, "--out", out_dir,
+               "--stage", stage, "--corner", "nom"]
+        # Make the ORFS-built openroad reachable on PATH for the extractor Tcl.
+        env = dict(os.environ)
+        orbin = self._openroad_bin()
+        if os.path.isabs(orbin) and os.path.isfile(orbin):
+            env["PATH"] = os.path.dirname(orbin) + os.pathsep + env.get("PATH", "")
+        self.ui.step(f"{block}: sign-off (stage={stage}) on "
+                     f"{os.path.basename(odb)}")
+        log_path = self._block_log(block)
+        try:
+            with open(log_path, "ab", buffering=0) as logf:
+                logf.write(f"\n===== {block} : signoff {' '.join(cmd)} "
+                           f"@ {datetime.now()} =====\n".encode())
+                proc = subprocess.run(cmd, cwd=os.path.dirname(driver), env=env,
+                                      stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, timeout=timeout)
+                logf.write(proc.stdout or b"")
+        except subprocess.TimeoutExpired:
+            self.ui.warn(f"{block}: signoff timed out after {timeout}s "
+                         "(block stays DONE)")
+            return
+        except (OSError, subprocess.SubprocessError) as e:
+            self.ui.warn(f"{block}: signoff could not run: {e} (block stays DONE)")
+            return
+
+        out = (proc.stdout or b"").decode("utf-8", "replace")
+        spefs = sorted(glob.glob(os.path.join(out_dir, "*.spef"))
+                       + glob.glob(os.path.join(out_dir, "*.spef.gz")))
+        low = out.lower()
+        skip_markers = ("missing", "not ready", "skipped", "not available")
+        if proc.returncode == 0 and spefs:
+            self.results[block].note += "  +signoff-rcx"
+            self.ui.good(f"{block}: sign-off RCX OK — SPEF "
+                         f"{os.path.basename(spefs[0])} "
+                         "(PD-UNVALIDATED: extraction wired, not re-timed here)")
+        elif any(m in low for m in skip_markers):
+            # Asset(s) absent (LVS collateral) or the extractor tool not on PATH:
+            # an honest, expected graceful skip — never a fabricated result.
+            self.ui.info(f"    {block}: sign-off skipped — asset/tool absent "
+                         f"(see {os.path.basename(log_path)}; e.g. LVS collateral "
+                         "is a follow-up)")
+        else:
+            self.ui.warn(f"{block}: sign-off rc={proc.returncode} "
+                         f"(block stays DONE; see {os.path.basename(log_path)})")
+
     def _archive_golden(self, block: str, res: Optional["BlockResult"] = None) -> None:
         """Snapshot a CONVERGED block's logs/reports/final outputs into the
         in-repo golden area and git-commit it (surgically — only the golden
@@ -930,6 +1014,11 @@ class JANUSAutonomousAgent:
                         continue
                     shutil.copy2(sp, os.path.join(out, name))
                     copied.append(f"final/{name}")
+
+            # (3b) sign-off outputs (RCX SPEF / LVS reports) for this run. Text
+            #      reports are tracked; the SPEF is heavy (in _GOLDEN_HEAVY_EXT)
+            #      so it lands on disk but is git-ignored unless include_heavy.
+            _copy_into(self._signoff_dir(block), "signoff", only_text=True)
 
             # (4) machine-readable QoR + human MANIFEST with FULL provenance.
             metrics = res.as_row()
@@ -1008,6 +1097,7 @@ class JANUSAutonomousAgent:
             "=" * 70,
             "Contents: logs/ (ORFS per-substage + <block>_unified.log),",
             "  reports/ (ORFS stage reports), final/ (6_final.* outputs),",
+            "  signoff/ (OpenRCX SPEF / LVS reports, when produced),",
             "  metrics.json (machine-readable QoR + provenance).",
             "Heavy binaries (.gds/.def/.spef/.odb) are on disk here but",
             "git-ignored unless the run used --golden-include-heavy.",
@@ -1210,6 +1300,14 @@ class JANUSAutonomousAgent:
                 # Emit the block's .lef/.lib abstract so janus_soc_top can
                 # consume it as a hard macro (hierarchical bottom-up assembly).
                 self._run_abstract(block)
+                # Sign-off parasitic extraction (and, when its collateral lands,
+                # LVS) on the routed .odb: runs the real ASAP7 OpenRCX model to
+                # emit a signoff SPEF distinct from the flow's built-in estimate.
+                # Runs on EVERY completed block by default (staff-engineer
+                # discipline); disable with --no-signoff. Never flips the block
+                # off DONE (fully wrapped in try/except inside). Runs BEFORE the
+                # golden snapshot so its outputs are captured into golden/.
+                self._run_signoff(block)
                 # Sign-off snapshot: if this block converged (timing met within
                 # the configured margins AND DRC within a handful), copy its
                 # logs/reports/final outputs + a QoR manifest into the golden
@@ -2069,6 +2167,25 @@ def build_parser() -> argparse.ArgumentParser:
                         "in the golden commit. By default they are copied to "
                         "disk (complete restorable snapshot) but git-ignored to "
                         "protect repo size.")
+    # ----- sign-off (parasitic extraction / LVS) --------------------------
+    p.add_argument("--no-signoff", action="store_true",
+                   help="disable sign-off on completed blocks. By DEFAULT, every "
+                        "block that reaches DONE gets a sign-off pass on its "
+                        "routed .odb (staff-engineer discipline). Its outputs are "
+                        "captured into the golden snapshot.")
+    p.add_argument("--signoff-stage", choices=["rcx", "lvs", "both"],
+                   default="rcx",
+                   help="sign-off stage(s) to run (default rcx). 'rcx' is REAL "
+                        "and available now: it runs the staged ASAP7 OpenRCX "
+                        "model to write a sign-off SPEF distinct from — and "
+                        "higher fidelity than — the flow's built-in 6_final.spef "
+                        "estimate. 'lvs'/'both' also attempt device-LVS, which "
+                        "GRACEFULLY SKIPS until its collateral (golden CDL, "
+                        "BSIM-CMG models, KLayout FinFET runset) + engine are "
+                        "staged — it never fabricates a result.")
+    p.add_argument("--signoff-timeout", type=int, default=1800,
+                   help="per-block sign-off wall-clock budget in seconds "
+                        "(default 1800). On timeout the block stays DONE.")
     p.add_argument("--llm-interval", type=float, default=3.0,
                    help="min seconds between LLM calls (rate limit, default 3)")
     p.add_argument("--llm-retries", type=int, default=3,
