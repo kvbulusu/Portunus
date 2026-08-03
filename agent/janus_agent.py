@@ -104,6 +104,11 @@ from reporter import Reporter                                           # noqa: 
 from timing_classifier import classify_routed_odb, render as tc_render   # noqa: E402
 from incremental_opt import (run_eco_pass, decide_timing, decide_drc,     # noqa: E402
                              adopt_odb, discard_odb, ECOResult)
+try:
+    from dashboard import Dashboard, DashboardState  # noqa: E402
+    _HAS_DASHBOARD = True
+except Exception:  # pragma: no cover — dashboard is optional
+    _HAS_DASHBOARD = False
 
 # rich is optional — degrade gracefully to plain prints if it's missing.
 try:
@@ -330,6 +335,48 @@ class JANUSAutonomousAgent:
             b: BlockResult(block=b) for b in self.dep.graph
         }
         self._results_lock = threading.Lock()
+
+        # --- optional web dashboard (browsable live/standalone run view) -----
+        # Zero-dep HTTP server (see dashboard.py). Off unless --dashboard. The
+        # DashboardState is a pure mirror the agent pushes into; it also writes
+        # run_dir/dashboard_state.json so a finished run can be reopened with
+        # `python3 dashboard.py --run-dir <run_dir>`.
+        self.dashboard = None
+        self.dash_state = None
+        if getattr(args, "dashboard", False) and _HAS_DASHBOARD:
+            try:
+                self.dash_state = DashboardState(self.run_dir)
+                self.dash_state.set_meta(
+                    blocks=list(self.dep.graph),
+                    git_head=(self.git.head_sha()[:9] + " " + self.git.current_branch()
+                              if self.git.available() else ""),
+                    started=datetime.now().isoformat(timespec="seconds"),
+                )
+                extra_roots = []
+                if self.flow_dir:
+                    extra_roots += [os.path.join(self.flow_dir, "results"),
+                                    os.path.join(self.flow_dir, "reports"),
+                                    os.path.join(self.flow_dir, "logs")]
+                if self.sram_out_dir:
+                    extra_roots.append(self.sram_out_dir)
+                self.dashboard = Dashboard(
+                    self.run_dir, port=int(getattr(args, "dashboard_port", 8080)),
+                    state=self.dash_state, extra_roots=extra_roots)
+            except Exception as e:  # never let the dashboard break a run
+                self.ui.warn(f"dashboard init failed ({e}); continuing headless")
+                self.dashboard = None
+        elif getattr(args, "dashboard", False) and not _HAS_DASHBOARD:
+            self.ui.warn("dashboard requested but dashboard.py unavailable; "
+                         "continuing headless")
+
+    def _dash_update(self, block: str, **kw) -> None:
+        """Best-effort push of one block's live state to the dashboard."""
+        if self.dash_state is None:
+            return
+        try:
+            self.dash_state.update_block(block, **kw)
+        except Exception:
+            pass
 
     # ----- DESIGN_CONFIG path for a block -----------------------------------
     def _config_path(self, block: str) -> str:
@@ -1222,6 +1269,44 @@ class JANUSAutonomousAgent:
         except Exception as e:  # noqa — a guard must never break the flow
             self.ui.warn(f"fakeram OBS guard: skipped ({e})")
 
+    def _render_live_panel(self, block, state, state_lock, t_start, log_path):
+        """Build the in-place rich renderable for a serial-TTY live run.
+
+        Called by rich.Live's auto-refresh, so it must be cheap and read the
+        shared `state` under its lock. Shows block · status (with a stall hint
+        when the tool has gone quiet) · stage N/6 with a text progress bar ·
+        time-in-stage · elapsed · log-line count · log path.
+        """
+        from rich.panel import Panel
+        from rich.table import Table
+        with state_lock:
+            stg = state["stage"]
+            n = state["lines"]
+            prev = state["prev_lines"]
+            stage_at = state["stage_at"]
+        el = self._fmt_elapsed(time.time() - t_start)
+        idx = int(stg[0]) if stg[:1].isdigit() else 0
+        total = 6
+        filled = max(0, min(total, idx))
+        bar = "█" * filled + "░" * (total - filled)
+        stage_el = self._fmt_elapsed(time.time() - stage_at)
+        stalled = (n == prev) and n > 0
+        t = Table.grid(padding=(0, 2))
+        t.add_column(justify="right", style="cyan")
+        t.add_column()
+        t.add_row("block", f"[bold]{block}[/bold]")
+        t.add_row("status",
+                  "[yellow]running — waiting on tool (no new output)[/yellow]"
+                  if stalled else "[green]running[/green]")
+        t.add_row("stage", f"{stg}    [{bar}] {filled}/{total}")
+        t.add_row("in stage", stage_el)
+        t.add_row("elapsed", el)
+        t.add_row("log lines", str(n))
+        t.add_row("log", log_path)
+        return Panel(t, title=f"JANUS · live · {block}",
+                     border_style="yellow" if stalled else "cyan",
+                     expand=False)
+
     def _run_make(self, block: str) -> int:
         # Self-enforcing pre-flight: repair any stale fakeram LEF that still
         # blocks the macro power grid, so PDN-0233 cannot silently recur.
@@ -1230,29 +1315,83 @@ class JANUSAutonomousAgent:
         cmd = self._make_cmd(block)
         self.ui.debug(f"{block}: cwd={self.flow_dir} cmd={' '.join(cmd)}")
 
-        # Shared state updated by the reader loop, read by the heartbeat thread.
+        # Shared state updated by the reader loop; read by the heartbeat thread,
+        # the optional in-place live console panel, and the web dashboard.
         t_start = time.time()
-        state = {"stage": "starting", "lines": 0, "last_msg": ""}
+        state = {"stage": "starting", "lines": 0, "last_msg": "",
+                 "stage_at": t_start, "prev_lines": 0}
         state_lock = threading.Lock()
         hb_stop = threading.Event()
 
         interval = max(5.0, float(getattr(self.args, "heartbeat", 30.0)))
 
+        # In-place live status panel: only for a SERIAL run on a real TTY with
+        # rich present and not --verbose (verbose streams raw ORFS output, which
+        # would fight the panel). Parallel runs launch several _run_make threads
+        # that cannot share one rich.Live, so they fall back to the throttled
+        # one-line updates. The web dashboard (if any) is fed in every mode — it
+        # is independent of the console.
+        use_live = bool(
+            _RICH and self.ui.console is not None and sys.stdout.isatty()
+            and int(getattr(self.args, "parallel", 1)) <= 1
+            and not self.args.verbose
+        )
+
+        def _push_dash(status: str) -> None:
+            if self.dash_state is None:
+                return
+            with state_lock:
+                stg, n = state["stage"], state["lines"]
+            self._dash_update(
+                block, status=status, stage=stg,
+                elapsed=round(time.time() - t_start, 1), lines=n,
+                log_path=log_path,
+                results_dir=self._results_dir(block),
+                reports_dir=self._reports_dir(block),
+                sram_dir=self.sram_out_dir,
+            )
+
         def _heartbeat() -> None:
-            # Periodically reassure the user the block is alive and show where it
-            # is. Fires even when ORFS is silent for minutes (e.g. detailed_route),
-            # because it runs independently of the (blocking) stdout reader.
-            while not hb_stop.wait(interval):
-                with state_lock:
-                    stg, n = state["stage"], state["lines"]
-                el = self._fmt_elapsed(time.time() - t_start)
-                self.ui.info(
-                    f"    … {block}: running — stage={stg}  elapsed={el}  "
-                    f"({n} log lines)  log: {os.path.basename(log_path)}"
-                )
+            # Throttled one-liner + dashboard feed. Fires even when ORFS is
+            # silent for minutes (e.g. detailed_route) because it runs
+            # independently of the blocking stdout reader. Under `use_live` the
+            # rich panel owns the terminal, so this only feeds the dashboard
+            # (at a slightly faster cadence) and prints nothing.
+            wait_for = min(interval, 5.0) if use_live else interval
+            while not hb_stop.wait(wait_for):
+                if not use_live:
+                    with state_lock:
+                        stg, n, prev = (state["stage"], state["lines"],
+                                        state["prev_lines"])
+                        state["prev_lines"] = n
+                    el = self._fmt_elapsed(time.time() - t_start)
+                    hint = "  [no new output — still working]" if n == prev else ""
+                    self.ui.info(
+                        f"    … {block}: running — stage={stg}  elapsed={el}  "
+                        f"({n} log lines){hint}  log: {os.path.basename(log_path)}"
+                    )
+                _push_dash("RUNNING")
 
         hb = threading.Thread(target=_heartbeat, name=f"hb-{block}", daemon=True)
         hb.start()
+
+        # Optional in-place live panel (auto-refreshing; reads shared state).
+        _live = None
+        if use_live:
+            try:
+                from rich.live import Live
+                _agent = self
+
+                class _LivePanel:
+                    def __rich__(self_p):
+                        return _agent._render_live_panel(
+                            block, state, state_lock, t_start, log_path)
+
+                _live = Live(_LivePanel(), console=self.ui.console,
+                             refresh_per_second=4, transient=False)
+                _live.start()
+            except Exception:  # never let the pretty console break a run
+                _live = None
 
         with open(log_path, "ab", buffering=0) as logf:
             header = f"\n===== {block} : {' '.join(cmd)} @ {datetime.now()} =====\n"
@@ -1279,12 +1418,19 @@ class JANUSAutonomousAgent:
                     # Update shared progress state; announce stage transitions
                     # immediately so the user sees synth→floorplan→place→cts→route.
                     stg = self._detect_stage(line)
+                    transitioned = False
                     with state_lock:
                         state["lines"] += 1
                         if stg and stg != state["stage"]:
                             state["stage"] = stg
+                            state["stage_at"] = time.time()
+                            transitioned = True
                             el = self._fmt_elapsed(time.time() - t_start)
-                            self.ui.step(f"{block}: → {stg}  (elapsed {el})")
+                            # Under the in-place live panel we do NOT print a
+                            # scrolling step line (the panel shows the current
+                            # stage); otherwise announce the transition inline.
+                            if not use_live:
+                                self.ui.step(f"{block}: → {stg}  (elapsed {el})")
                             # Stamp a MAJOR-STAGE banner INTO the unified block
                             # log itself (not just the console). This is what
                             # makes runs/<ts>/<block>.log a single, navigable
@@ -1302,6 +1448,8 @@ class JANUSAutonomousAgent:
                                 f"{'#' * 78}\n"
                             )
                             logf.write(banner.encode())
+                    if transitioned:
+                        _push_dash("RUNNING")
                     if self.args.verbose:
                         self.ui.debug(f"{block}| {line}")
                 proc.stdout.close()
@@ -1309,6 +1457,11 @@ class JANUSAutonomousAgent:
                 proc.wait()
                 hb_stop.set()
                 hb.join(timeout=2.0)
+                if _live is not None:
+                    try:
+                        _live.stop()
+                    except Exception:
+                        pass
         el = self._fmt_elapsed(time.time() - t_start)
         self.ui.info(f"    {block}: make exited rc={proc.returncode} after {el}")
         return proc.returncode
@@ -1824,6 +1977,15 @@ class JANUSAutonomousAgent:
     # ----- main entry --------------------------------------------------------
     def run(self) -> int:
         self._preflight()
+        if self.dashboard is not None:
+            try:
+                url = self.dashboard.start()
+                self.ui.good(f"◈ dashboard live at {url}  "
+                             f"(open in a browser; per-block logs, reports, "
+                             f"results & floorplan snapshot are all clickable)")
+            except Exception as e:
+                self.ui.warn(f"dashboard could not start ({e}); continuing headless")
+                self.dashboard = None
         if self.args.estimate:
             self._print_plan()
             self._print_estimate()
@@ -1900,6 +2062,19 @@ class JANUSAutonomousAgent:
             res.note = f"agent exception: {e}"[:160]
             self.ui.err(f"{block}: agent exception: {e}")
         status = Status.DONE if res.status == "DONE" else Status.FAILED
+        # Push the settled QoR to the dashboard (final status + measured slacks,
+        # DRC, area, util, tries) and the artifact dirs so its detail view / the
+        # floorplan snapshot resolve. Best-effort; never blocks the run.
+        self._dash_update(
+            block, status=res.status, tries=res.tries,
+            wns_ns=res.wns_ns, hold_ps=res.hold_ps, tns_ns=res.tns_ns,
+            drc_violations=res.drc_violations, area=res.area,
+            power=res.power, utilization=res.utilization,
+            note=res.note, log_path=res.log_path or self._block_log(block),
+            results_dir=self._results_dir(block),
+            reports_dir=self._reports_dir(block),
+            sram_dir=self.sram_out_dir,
+        )
         with self._results_lock:
             self.dep.mark(block, status)
             self._snapshot(block)
@@ -2077,6 +2252,22 @@ class JANUSAutonomousAgent:
         paths = self.reporter.write_all(rows, usage, meta)
         self.ui.table(rows)
         done = sum(1 for r in self.results.values() if r.status == "DONE")
+        # stamp final run meta into the dashboard so a post-run browse is exact
+        if self.dash_state is not None:
+            try:
+                self.dash_state.set_meta(
+                    finished=datetime.now().isoformat(timespec="seconds"),
+                    done=done, total=len(rows),
+                    elapsed_sec=round(elapsed, 1))
+            except Exception:
+                pass
+        dash_line = ""
+        if self.dashboard is not None:
+            try:
+                dash_line = (f"  dashboard   : http://localhost:{self.dashboard.port}/"
+                             "  (still live — browse logs/reports/results/floorplan)\n")
+            except Exception:
+                dash_line = ""
         self.ui.panel(
             "Run complete",
             (f"  blocks DONE : {done}/{len(rows)}\n"
@@ -2084,6 +2275,7 @@ class JANUSAutonomousAgent:
              f"  LLM calls   : {usage.get('llm_calls', 0)}  "
              f"(~{usage.get('approx_tokens', 0)} tokens, ESTIMATE)\n"
              f"  report      : {paths['html']}\n"
+             f"{dash_line}"
              f"  checkpoint  : {self.ckpt.path}\n\n"
              "  Reminder: numbers above are ORFS output for this run (or n/a).\n"
              "  No metric here is a guaranteed/verified silicon result."))
@@ -2092,6 +2284,30 @@ class JANUSAutonomousAgent:
 # ---------------------------------------------------------------------------- #
 # CLI
 # ---------------------------------------------------------------------------- #
+# Consolidated --skip token -> the args.<attr> boolean it forces True.
+# Each token is the ergonomic name; the attr is the existing --no-* switch
+# so all downstream code stays unchanged.
+_SKIP_MAP = {
+    "sram":           "no_sram_regen",
+    "abstract":       "no_abstract",
+    "physical":       "no_physical",
+    "post-route-opt": "no_post_route_opt",
+    "golden":         "no_golden",
+    "signoff":        "no_signoff",
+    "llm":            "no_llm",
+    "git-commit":     "no_git_commit",
+}
+
+
+def _apply_skips(args: argparse.Namespace) -> None:
+    """Fold the consolidated --skip tokens into the individual --no-* booleans
+    (OR-ing, so an explicit --no-* still wins). Idempotent."""
+    for tok in (getattr(args, "skip", None) or []):
+        attr = _SKIP_MAP.get(tok)
+        if attr is not None:
+            setattr(args, attr, True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="janus_agent",
@@ -2260,9 +2476,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--verbose", "-v", action="store_true",
                    help="stream ORFS output and debug detail to the console")
     p.add_argument("--heartbeat", type=float, default=30.0,
-                   help="seconds between 'still running' progress lines per "
+                   help="seconds between 'still running' progress updates per "
                         "block (default 30; min 5). Lets you see a long block "
-                        "is alive without --verbose.")
+                        "is alive without --verbose. When stdout is a TTY the "
+                        "agent renders an in-place live status panel/table "
+                        "(no scroll spam); piped output falls back to one "
+                        "throttled line per interval.")
+
+    # ----- live web dashboard --------------------------------------------
+    dash = p.add_argument_group(
+        "live dashboard",
+        "an EDA-style browsable web dashboard: live per-block status, "
+        "click a block to see its real log / reports / results (with their "
+        "on-disk paths) and a scale floorplan snapshot of the implemented "
+        "design. Zero external deps; safe to leave running to browse a "
+        "finished run.")
+    dash.add_argument("--dashboard", action="store_true",
+                      help="start the live web dashboard for this run and print "
+                           "its URL. Also usable standalone on any finished "
+                           "run: python3 dashboard.py --run-dir <run> "
+                           "--flow-dir <orfs>/flow")
+    dash.add_argument("--dashboard-port", type=int, default=8080,
+                      help="port for the dashboard (default 8080; 0 = let the "
+                           "OS pick a free port, printed at startup)")
+
+    # ----- consolidated stage toggles ------------------------------------
+    #   One repeatable flag that folds the individual --no-* switches below
+    #   into a single ergonomic interface. The --no-* flags remain fully
+    #   supported (and documented above) as explicit aliases; --skip is just
+    #   the consolidated form, e.g.  --skip sram abstract signoff
+    p.add_argument("--skip", nargs="+", default=None, metavar="STAGE",
+                   choices=sorted(_SKIP_MAP.keys()),
+                   help="consolidated stage-disable switch (repeatable). "
+                        f"choices: {', '.join(sorted(_SKIP_MAP.keys()))}. "
+                        "Each maps to the matching --no-* flag, e.g. "
+                        "`--skip sram abstract signoff` == "
+                        "`--no-sram-regen --no-abstract --no-signoff`. "
+                        "Both forms may be combined; effects are OR-ed.")
     return p
 
 
@@ -2315,6 +2565,7 @@ def _manifest_only_cli(args: argparse.Namespace) -> Optional[int]:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    _apply_skips(args)
     if args.blocks:
         bad = [b for b in args.blocks if b not in DEFAULT_GRAPH]
         if bad:
