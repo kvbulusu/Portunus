@@ -1269,6 +1269,61 @@ class JANUSAutonomousAgent:
         except Exception as e:  # noqa — a guard must never break the flow
             self.ui.warn(f"fakeram OBS guard: skipped ({e})")
 
+    def _ensure_lane_abstract_obs_fixed(self, block: str) -> None:
+        """Pre-flight guard against the lane-abstract M6-OBS gotcha (ara only).
+
+        ORFS generates every block's abstract with
+            write_abstract_lef -bloat_occupied_layers   (generate_abstract.tcl)
+        which bloats EVERY occupied layer into a full-macro OBS rectangle. The
+        hardened user_core_ara_lane places its VDD/VSS power pins on its top
+        layer M6, so the bloated M6 OBS blankets the M6 power pins. When
+        user_core_ara then consumes the lane .lef and its macro-PDN strategy
+        (ara_grid_strategy.tcl) tries to drop the ElementGrid {M5 M6} via onto
+        those pins, the blanket M6 OBS blocks it -> 4x [WARNING PDN-0232] (one
+        per lane) then [ERROR PDN-0233] at 2_4_floorplan_pdn (see
+        user_core_ara (2).log / 2_4_floorplan_pdn (7).log).
+
+        This is the exact analogue of the fakeram M4-OBS gotcha, and the remedy
+        is identical: an abstract must NOT obstruct its own power-pin layer.
+        Right before hardening user_core_ara (by which point its hard dependency
+        user_core_ara_lane has already produced its abstract), scan the lane
+        .lef and strip the OBS on whichever layer carries the VDD/VSS pins, using
+        the shared, deterministic, idempotent scripts/fix_abstract_obs.py. Only
+        fires for user_core_ara; a no-op if the lane .lef is absent (flat build)
+        or already stripped. Never raises — a guard must not break the flow.
+        """
+        if block != "user_core_ara":
+            return
+        try:
+            lef = self._find_abstract("user_core_ara_lane", ".lef")
+            if not lef or not os.path.isfile(lef):
+                return  # flat ara build (no lane macro) or not yet generated
+            scripts_dir = os.path.join(_ROOT, "scripts")
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+            try:
+                from fix_abstract_obs import fix_lef  # type: ignore
+            except Exception as e:  # noqa
+                self.ui.warn(f"lane-abstract OBS guard: cannot load "
+                             f"fix_abstract_obs ({e}); skipping pre-flight check")
+                return
+            try:
+                changed, msg = fix_lef(lef)
+            except Exception as e:  # noqa
+                self.ui.warn(f"lane-abstract OBS guard: {os.path.basename(lef)}: "
+                             f"{e}")
+                return
+            if changed:
+                self.ui.warn(
+                    "lane-abstract OBS guard: power-pin-layer OBS auto-stripped "
+                    "from %s before hardening user_core_ara — %s. The bloated "
+                    "abstract OBS would otherwise blanket the lane's M6 power "
+                    "pins and recur as PDN-0232/PDN-0233." % (
+                        os.path.basename(lef), msg)
+                )
+        except Exception as e:  # noqa — a guard must never break the flow
+            self.ui.warn(f"lane-abstract OBS guard: skipped ({e})")
+
     def _render_live_panel(self, block, state, state_lock, t_start, log_path):
         """Build the in-place rich renderable for a serial-TTY live run.
 
@@ -1311,6 +1366,9 @@ class JANUSAutonomousAgent:
         # Self-enforcing pre-flight: repair any stale fakeram LEF that still
         # blocks the macro power grid, so PDN-0233 cannot silently recur.
         self._ensure_fakeram_obs_fixed()
+        # And strip the bloated power-pin-layer OBS from the lane abstract before
+        # user_core_ara consumes it (same PDN-0232/0233 class, on M6).
+        self._ensure_lane_abstract_obs_fixed(block)
         log_path = self._block_log(block)
         cmd = self._make_cmd(block)
         self.ui.debug(f"{block}: cwd={self.flow_dir} cmd={' '.join(cmd)}")
