@@ -566,8 +566,9 @@ async function tick(){
   html+=`<div class="bar"><i style="width:${frac}%"></i></div>`;
   html+=`<div class="grid">
    <span class="k">WNS(ps)</span><b>${num(b.wns_ns)}</b><span class="k">hold(ps)</span><b>${num(b.hold_ps)}</b>
-   <span class="k">DRC</span><b>${num(b.drc_violations)}</b><span class="k">util</span><b>${num(b.utilization)}</b>
-   <span class="k">area</span><b>${num(b.area)}</b><span class="k">tries</span><b>${num(b.tries)}</b></div>`;
+   <span class="k">TNS(ps)</span><b>${num(b.tns_ns)}</b><span class="k">DRC</span><b>${num(b.drc_violations)}</b>
+   <span class="k">util</span><b>${num(b.utilization)}</b><span class="k">area</span><b>${num(b.area)}</b>
+   <span class="k">tries</span><b>${num(b.tries)}</b><span class="k"></span><b></b></div>`;
   if(b.note) html+=`<div class="path">note: ${esc(b.note)}</div>`;
   html+=`<div class="links">
     <a onclick="open_('${n}','log')">▤ log</a>
