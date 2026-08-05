@@ -1400,6 +1400,9 @@ class JANUSAutonomousAgent:
                 return
             with state_lock:
                 stg, n = state["stage"], state["lines"]
+            # Merge live BlockResult metrics (WNS/util/area from last completed
+            # stage, or final metrics if DONE/FAILED) so the dashboard shows them.
+            metrics = self.results[block].as_row()
             self._dash_update(
                 block, status=status, stage=stg,
                 elapsed=round(time.time() - t_start, 1), lines=n,
@@ -1407,6 +1410,7 @@ class JANUSAutonomousAgent:
                 results_dir=self._results_dir(block),
                 reports_dir=self._reports_dir(block),
                 sram_dir=self.sram_out_dir,
+                **metrics,  # wns_ns, tns_ns, hold_ps, utilization, area, drc_violations
             )
 
         def _heartbeat() -> None:
