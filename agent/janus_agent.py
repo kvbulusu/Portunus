@@ -360,7 +360,9 @@ class JANUSAutonomousAgent:
                 if self.sram_out_dir:
                     extra_roots.append(self.sram_out_dir)
                 self.dashboard = Dashboard(
-                    self.run_dir, port=int(getattr(args, "dashboard_port", 8080)),
+                    self.run_dir,
+                    port=int(getattr(args, "dashboard_port", 8080)),
+                    host=getattr(args, "dashboard_host", "0.0.0.0"),
                     state=self.dash_state, extra_roots=extra_roots)
             except Exception as e:  # never let the dashboard break a run
                 self.ui.warn(f"dashboard init failed ({e}); continuing headless")
@@ -2565,6 +2567,10 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--dashboard-port", type=int, default=8080,
                       help="port for the dashboard (default 8080; 0 = let the "
                            "OS pick a free port, printed at startup)")
+    dash.add_argument("--dashboard-host", type=str, default="0.0.0.0",
+                      help="host/IP to bind the dashboard server (default 0.0.0.0 "
+                           "= all interfaces/LAN-reachable; use 127.0.0.1 for "
+                           "localhost-only)")
 
     # ----- consolidated stage toggles ------------------------------------
     #   One repeatable flag that folds the individual --no-* switches below
