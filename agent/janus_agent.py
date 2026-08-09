@@ -562,8 +562,16 @@ class JANUSAutonomousAgent:
             # assignment (highest GNU-make precedence) so config.mk's
             # `ifeq ($(JANUS_ARA_LANE_MACRO),1)` block reliably fires and its
             # ADDITIONAL_LEFS/LIBS/GDS pick up the lane abstract.
+            # JANUS_ARA_LANE_MACRO defaults to 1 (lane-macro mode) because on a
+            # memory-starved box flat Ara (~620K inst) OOM-kills detail route at
+            # ~23 GB (5_2_route.log Error 247, peak 22,917,556 KB). BUT this is
+            # now honored from the environment so a large-RAM box (e.g. 61 GB EC2)
+            # can opt into FLAT Ara with `export JANUS_ARA_LANE_MACRO=0`, which
+            # sidesteps the lane-abstract PDN saga entirely (no lane macros -> no
+            # lane ElementGrid -> no PDN-0232). Command-line assignment still wins
+            # over config.mk; we simply pass through whatever the env selected.
             "user_core_ara":  ["SYNTH_MEMORY_MAX_BITS=16384",
-                                "JANUS_ARA_LANE_MACRO=1"],
+                                f"JANUS_ARA_LANE_MACRO={os.environ.get('JANUS_ARA_LANE_MACRO', '1')}"],
             # L0.25 lane sub-macro: same defensive gate as the Ara macro. The
             # lane VRF banks are 8 words deep (< asic_tc_sram MIN_MACRO_DEPTH=32)
             # so they infer flops, but keep the gate identical for determinism.
