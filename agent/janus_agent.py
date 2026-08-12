@@ -480,6 +480,61 @@ class JANUSAutonomousAgent:
         cmd = ["make", f"DESIGN_CONFIG={self._config_path(block)}"]
         if self.args.num_cores:
             cmd.append(f"NUM_CORES={self.args.num_cores}")
+
+        # ---- GLOBAL setup-signoff corner: WORST (slow) -----------------------
+        # Design owner policy (2026-08-12): every step from synthesis through
+        # route optimizes against the SLOW / WORST corner for SETUP. ASAP7 ships
+        # three corners (platforms/asap7/config.mk):
+        #     BC = FF / 0.77 V / 25 C   (fast  - optimistic, the platform DEFAULT
+        #                                via `CORNER ?= BC`)
+        #     TC = TT / 0.70 V / 0 C    (typical)
+        #     WC = SS / 0.63 V / 100 C  (slow  - the setup-pessimistic corner)
+        # The stock flow closes SETUP on BC, which is optimistic and hides real
+        # setup violations. Forcing CORNER=WC makes synth (ABC target lib), place,
+        # CTS and route repair_timing all read the SS/0.63V/100C .lib, so the WNS
+        # the flow reports is the true worst-case setup number. Command-line
+        # assignment (highest GNU-make precedence) overrides the platform's
+        # `CORNER ?= BC` and every block config.mk. The multi-Vt OTHER_VT foreach
+        # and the MBFF _MBFF_LIB_CORNER map both key off CORNER, so they will pull
+        # the matching SS libs automatically (WC -> SS).
+        # >>> PD-UNTESTED / VALIDATE ON-BOX <<<  Single-corner WC covers SETUP.
+        # HOLD must still be signed off at the FAST (BC) corner -- either a
+        # dedicated BC hold pass or a true multi-corner run (CORNERS="slow fast"
+        # with SLOW_/FAST_LIB_FILES wired) on the resized box. Single WC keeps
+        # peak DRAM down (one lib set) which matters given the OOM history.
+        cmd.append("CORNER=WC")
+
+        # ---- enable scan flops in the cell library (DFT) ---------------------
+        # The ASAP7 platform FORBIDS the scan flops by default:
+        #     platforms/asap7/config.mk:24  DONT_USE_CELLS  = *x1p*_ASAP7* *xp*_ASAP7*
+        #     platforms/asap7/config.mk:25  DONT_USE_CELLS += SDF* ICG*
+        # The `SDF*` pattern is exactly the scan D-flip-flops (SDFHx*/SDFLx* in
+        # asap7sc7p5t_SEQ_*_nldm), so with the stock list scan_replace (dft_scan.tcl)
+        # would find NO scan cells to swap in and DFT would be a silent no-op.
+        # We rebuild the list WITHOUT SDF* (keeping the *x1p*/*xp* congestion
+        # excludes and ICG*, which we are not using). The platform assigns
+        # DONT_USE_CELLS with a plain `=` (not `?=`) and is read AFTER the block
+        # config.mk, so a config.mk export would be clobbered -- the override MUST
+        # come from the make command line (command-line assignment also suppresses
+        # the platform's subsequent `+= SDF* ICG*`). Passed as ONE argv element:
+        # subprocess runs make with no shell, so the embedded spaces are a single
+        # value, not separate arguments. Gated by JANUS_DFT_SCAN (default on); set
+        # JANUS_DFT_SCAN=0 to fall back to the stock (no-scan) cell list.
+        if os.environ.get("JANUS_DFT_SCAN", "1") != "0":
+            cmd.append("DONT_USE_CELLS=*x1p*_ASAP7* *xp*_ASAP7* ICG*")
+
+        # ---- OPTIONAL: cap detailed-route iterations -------------------------
+        # TritonRoute's default DETAILED_ROUTE_END_ITERATION is 64. When set,
+        # DRT stops after N optimization iterations even if DRC violations
+        # remain, which BOUNDS runtime/cost on a run that is grinding many
+        # iterations for a shrinking (or stuck) violation count. HONEST CAVEAT:
+        # capping does NOT help convergence -- it just stops early with whatever
+        # violations are left, so the route may be left DRC-DIRTY. Use it to
+        # bound cost on exploratory runs, not for a signoff route. Off by
+        # default (tool default 64 applies); set JANUS_DRT_MAX_ITER=<N> to cap.
+        _drt_iter = os.environ.get("JANUS_DRT_MAX_ITER", "").strip()
+        if _drt_iter:
+            cmd.append(f"DETAILED_ROUTE_END_ITERATION={_drt_iter}")
         # ORFS variable-precedence workaround (verified against agent/user logs):
         # SYNTH_MOCK_LARGE_MEMORIES / SYNTH_MEMORY_MAX_BITS set via `export` in a
         # block's config.mk do NOT reach synth.tcl. In user_domain (4).log the
