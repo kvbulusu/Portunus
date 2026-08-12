@@ -497,12 +497,41 @@ class JANUSAutonomousAgent:
         # `CORNER ?= BC` and every block config.mk. The multi-Vt OTHER_VT foreach
         # and the MBFF _MBFF_LIB_CORNER map both key off CORNER, so they will pull
         # the matching SS libs automatically (WC -> SS).
-        # >>> PD-UNTESTED / VALIDATE ON-BOX <<<  Single-corner WC covers SETUP.
-        # HOLD must still be signed off at the FAST (BC) corner -- either a
-        # dedicated BC hold pass or a true multi-corner run (CORNERS="slow fast"
-        # with SLOW_/FAST_LIB_FILES wired) on the resized box. Single WC keeps
-        # peak DRAM down (one lib set) which matters given the OOM history.
+        # Keeping CORNER=WC ALSO matters for SYNTHESIS, which is inherently
+        # single-corner: yosys maps flops from DFF_LIB_FILE = $(CORNER)_NLDM_
+        # DFF_LIB_FILE and ABC targets the $(CORNER) libs. CORNER=WC therefore
+        # makes synth itself optimize/flop-map against the SLOW (SS) corner,
+        # while P&R + STA go full multi-corner (below). So synthesis is
+        # pessimistic-on-slow and signoff spans both corners.
         cmd.append("CORNER=WC")
+
+        # ---- MULTI-CORNER setup+hold signoff (SS + FF) -----------------------
+        # Design owner (2026-08-12): "we need a multi-corner run given we are on
+        # EC2" (the resized ~128 GB box can afford the extra lib sets). ORFS
+        # multi-corner (scripts/read_liberty.tcl): when CORNERS is set, it calls
+        # `define_corners {*}$CORNERS` and reads per-corner `<CORNER>_LIB_FILES`.
+        # OpenSTA then analyzes SETUP as the worst *max* path across all corners
+        # and HOLD as the worst *min* path across all corners automatically -- no
+        # per-corner labels needed. We wire the two dominant corners:
+        #     slow -> SS/0.63V/100C  ($(WC_NLDM_LIB_FILES)) : closes SETUP
+        #     fast -> FF/0.77V/25C   ($(BC_NLDM_LIB_FILES)) : closes HOLD
+        # (TT/typ intentionally omitted to hold peak DRAM to 2 corners x 3 VT
+        # instead of 3 x 3; add "typ" + TYP_LIB_FILES=$(TC_NLDM_LIB_FILES) if you
+        # want it.) The *_NLDM_LIB_FILES already include every enabled VT flavor
+        # (the platform's OTHER_VT foreach appends LVT/SLVT to each corner list),
+        # so multi-Vt is preserved per corner. The $(...) are passed literally in
+        # argv (subprocess = no shell), and GNU make recursively expands them in
+        # the ASAP7 platform context at env-export time (verified), where the
+        # WC_/BC_NLDM_LIB_FILES are fully populated. This mirrors the stock
+        # ihp-sg13g2 multi-corner design (CORNERS = slow fast + *_LIB_FILES).
+        # >>> PD-UNTESTED / VALIDATE ON-BOX <<<  Multi-corner ~doubles STA/P&R
+        # liberty memory vs single-corner; it is meant for the resized box. Set
+        # JANUS_MULTICORNER=0 to fall back to single-corner CORNER=WC (setup
+        # only; hold then needs a separate BC pass) on a memory-starved box.
+        if os.environ.get("JANUS_MULTICORNER", "1") != "0":
+            cmd += ["CORNERS=slow fast",
+                    "SLOW_LIB_FILES=$(WC_NLDM_LIB_FILES)",
+                    "FAST_LIB_FILES=$(BC_NLDM_LIB_FILES)"]
 
         # ---- enable scan flops in the cell library (DFT) ---------------------
         # The ASAP7 platform FORBIDS the scan flops by default:
