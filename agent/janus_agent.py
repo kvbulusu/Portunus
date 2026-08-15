@@ -662,6 +662,42 @@ class JANUSAutonomousAgent:
             "user_core_ara_lane": ["SYNTH_MEMORY_MAX_BITS=16384"],
         }
         cmd += force_vars.get(block, [])
+
+        # ---- per-stage DEBUG DUMP hooks (timing rpts / netlists / images) ----
+        # Wire the JANUS per-stage debug dumps unless --no-debug-dump. ORFS
+        # sources an optional user Tcl at the end of each step via the
+        # POST_<STEP>_TCL env-var mechanism (flow/scripts/util.tcl::
+        # source_step_tcl -> source_env_var_if_exists). We pass the wrapper
+        # paths as make command-line assignments (highest GNU-make precedence,
+        # force-exported to the openroad recipe env -- same channel used for
+        # CORNER/CORNERS above), so ORFS sources them with the design fully
+        # loaded (liberty+LEF+ODB+SDC, STA live). Each hook body is catch-
+        # guarded (asic_flow/scripts/hooks/janus_stage_dump.tcl) so a dump bug
+        # can NEVER fail the step / abort the run. See hooks/README.md.
+        # >>> PD-UNTESTED <<< authored from ORFS scripts on disk; the sandbox
+        # has no openroad binary / ASAP7 DB. First on-box run is first exercise.
+        if not getattr(self.args, "no_debug_dump", False):
+            hooks_dir = os.path.join(_ROOT, "scripts", "hooks")
+            step_wrappers = {
+                "POST_FLOORPLAN_TCL":    "post_floorplan.tcl",
+                "POST_MACRO_PLACE_TCL":  "post_macro_place.tcl",
+                "POST_GLOBAL_PLACE_TCL": "post_global_place.tcl",
+                "POST_RESIZE_TCL":       "post_resize.tcl",
+                "POST_DETAIL_PLACE_TCL": "post_detail_place.tcl",
+                "POST_CTS_TCL":          "post_cts.tcl",
+                "POST_GLOBAL_ROUTE_TCL": "post_global_route.tcl",
+                "POST_DETAIL_ROUTE_TCL": "post_detail_route.tcl",
+            }
+            for env_var, fname in step_wrappers.items():
+                cmd.append(f"{env_var}={os.path.join(hooks_dir, fname)}")
+            # class toggles read by the dispatcher (default on inside the Tcl)
+            cmd.append("JANUS_DUMP_REPORTS=1")
+            cmd.append("JANUS_DUMP_NETLISTS=1")
+            cmd.append(
+                "JANUS_DUMP_IMAGES="
+                + ("0" if getattr(self.args, "no_debug_images", False) else "1")
+            )
+
         return cmd
 
     # ----- repo SOURCE config / sdc for a block ------------------------------
@@ -2575,6 +2611,21 @@ def build_parser() -> argparse.ArgumentParser:
                         "strictly improves, and otherwise discards it. If timing "
                         "is closed but a handful of DRCs remain it runs a "
                         "DRC-only cleanup under the same keep/revert policy.")
+    p.add_argument("--no-debug-dump", action="store_true",
+                   help="disable the per-stage debug dumps. By default the "
+                        "agent wires POST_<STEP>_TCL hooks (asic_flow/scripts/"
+                        "hooks/) that, at the end of floorplan / macro-place / "
+                        "place / resize / CTS / route, emit per-stage timing "
+                        "reports (top-100 reg2reg, reg2out, in2reg for both "
+                        "setup(max) and hold(min)), stage netlists (.v/.def) "
+                        "and layout / clock-tree .webp images. Every hook is "
+                        "catch-guarded so it can never abort the flow. This "
+                        "flag suppresses the hook wiring entirely.")
+    p.add_argument("--no-debug-images", action="store_true",
+                   help="keep the per-stage timing reports and netlists but "
+                        "skip the .webp layout / clock-tree images (sets "
+                        "JANUS_DUMP_IMAGES=0). Images need a GUI-compiled "
+                        "openroad; on a non-GUI build they are skipped anyway.")
     p.add_argument("--drc-handful", type=int, default=20,
                    help="max residual DRC count the post-route DRC-only ECO will "
                         "attempt to clean (default 20). Above this the failure is "
