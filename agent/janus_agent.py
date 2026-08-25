@@ -712,6 +712,80 @@ class JANUSAutonomousAgent:
         p = os.path.join(self.configs_dir, "constraints", f"{block}.sdc")
         return p if os.path.isfile(p) else None
 
+    # ----- stamp-freshness guard (prevents silent STOCK builds) --------------
+    def _verify_stamp_fresh(self, block: str) -> Optional[str]:
+        """Return an error string if the STAMPED ORFS config for `block` is out
+        of sync with the repo SOURCE config, else None.
+
+        WHY THIS EXISTS: `make DESIGN_CONFIG=<stamped>/config.mk` reads a COPY
+        that scripts/03_setup_janus_configs.sh stamps from asic_flow/configs.
+        agent.py does NOT auto-restamp, so if you `git pull` (or edit a source
+        config / *_local.mk) and forget to re-run scripts/03, make silently uses
+        the OLD stamped copy. Two real bugs hit exactly this: (1) scripts/03 not
+        copying *_local.mk, and (2) config.mk's -include sitting below the
+        VERILOG_DEFINES block. In BOTH cases the run built STOCK (no JANUS lever
+        defines) while every surface signal looked fine. This guard makes that
+        class of failure loud and CHEAP (abort before the multi-minute synth)
+        instead of silent and expensive (a full ~$50/3h run that was stock).
+
+        Checks, per block:
+          * source configs/<blk>.mk must be byte-identical to the stamped
+            <design_root>/<blk>/config.mk  (catches stale config.mk / ordering).
+          * if source configs/<blk>_local.mk exists, the stamped
+            <blk>_local.mk must exist and be byte-identical (catches missing or
+            stale lever overrides).
+          * if source <blk>_local.mk is ABSENT but a stamped one lingers, that
+            is stale too (would apply levers the user removed).
+        """
+        src_cfg = self._repo_config_path(block)
+        if not src_cfg:
+            return None  # block has no repo source config -> nothing to compare
+        stamped_cfg = self._config_path(block)
+        if not os.path.isfile(stamped_cfg):
+            return None  # never stamped yet -> scripts/03 will create it; not our case
+
+        def _same(a: str, b: str) -> bool:
+            try:
+                with open(a, "rb") as fa, open(b, "rb") as fb:
+                    return fa.read() == fb.read()
+            except OSError:
+                return False
+
+        problems: List[str] = []
+        if not _same(src_cfg, stamped_cfg):
+            problems.append(
+                f"  config.mk DIFFERS: source {src_cfg}\n"
+                f"                 vs stamped {stamped_cfg}")
+
+        stamped_dir = os.path.dirname(stamped_cfg)
+        src_local = os.path.join(self.configs_dir, f"{block}_local.mk")
+        stamped_local = os.path.join(stamped_dir, f"{block}_local.mk")
+        if os.path.isfile(src_local):
+            if not os.path.isfile(stamped_local):
+                problems.append(
+                    f"  {block}_local.mk MISSING from stamped dir: {stamped_local}\n"
+                    f"     (source overrides at {src_local} are NOT reaching make -> STOCK build)")
+            elif not _same(src_local, stamped_local):
+                problems.append(
+                    f"  {block}_local.mk DIFFERS: source {src_local}\n"
+                    f"                       vs stamped {stamped_local}")
+        elif os.path.isfile(stamped_local):
+            problems.append(
+                f"  STALE {block}_local.mk in stamped dir (no source): {stamped_local}\n"
+                f"     (a previous run's lever overrides would still apply)")
+
+        if not problems:
+            return None
+        return (
+            "STAMP OUT OF SYNC — the ORFS stamped config does not match the repo "
+            "source, so this run would build with the WRONG (likely STOCK) JANUS "
+            "levers.\n" + "\n".join(problems) +
+            "\n\nFIX: re-stamp before running:\n"
+            "    bash asic_flow/scripts/03_setup_janus_configs.sh\n"
+            "then re-launch. (agent.py does NOT auto-restamp. Override this guard "
+            "with --skip-stamp-check only if you know the stamp is intentionally "
+            "different.)")
+
     # ----- interactive shell prompt (no-op unless --interactive on a TTY) ----
     def _ask(self, question: str, choices: str, default: str) -> str:
         """Ask the user a one-key question on the shell. Returns `default`
@@ -1500,6 +1574,22 @@ class JANUSAutonomousAgent:
         # user_core_ara consumes it (same PDN-0232/0233 class, on M6).
         self._ensure_lane_abstract_obs_fixed(block)
         log_path = self._block_log(block)
+        # Stamp-freshness gate: abort a STOCK-by-accident run BEFORE synth burns
+        # time/$. Skippable with --skip-stamp-check for deliberate stamp edits.
+        if not getattr(self.args, "skip_stamp_check", False):
+            stale = self._verify_stamp_fresh(block)
+            if stale:
+                banner = (
+                    f"\n{'!' * 78}\n"
+                    f"########## ABORT (pre-flight): {block} — {stale}\n"
+                    f"{'!' * 78}\n")
+                try:
+                    with open(log_path, "ab") as _lf:
+                        _lf.write(banner.encode())
+                except OSError:
+                    pass
+                self.ui.error(f"{block}: {stale}")
+                return 90  # nonzero -> treated as a build failure, no make run
         cmd = self._make_cmd(block)
         self.ui.debug(f"{block}: cwd={self.flow_dir} cmd={' '.join(cmd)}")
 
@@ -2557,6 +2647,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "(never removes anything).")
     p.add_argument("--yes", action="store_true",
                    help="answer 'yes' to the --gc deletion prompt (non-interactive).")
+    p.add_argument("--skip-stamp-check", action="store_true",
+                   help="bypass the pre-flight stamp-freshness guard that aborts "
+                        "a run when the ORFS stamped config.mk/<blk>_local.mk "
+                        "differ from the repo source (i.e. scripts/03 was not "
+                        "re-run after a config edit/pull). Only use when the "
+                        "stamp is intentionally different from source.")
     p.add_argument("--dry-run", action="store_true",
                    help="print the make commands but do not run anything")
     p.add_argument("--estimate", action="store_true",
