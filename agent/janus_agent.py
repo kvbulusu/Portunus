@@ -1407,6 +1407,57 @@ class JANUSAutonomousAgent:
                 return label if label is not None else f"{m.group(1)}"
         return None
 
+    # Keyword -> canonical major-stage number (1..6). Used to draw the N/6
+    # progress bar. ORFS emits many fine-grained sub-step labels (and the
+    # `Running <name>.tcl` fallback yields bare script names such as "resize",
+    # "repair_timing", "fillcell") that do NOT start with a stage digit — the
+    # old code did `int(stg[0])` and silently fell back to 0, which is why an
+    # in-flight place/resize showed "0/6". This maps every known sub-step to
+    # the major stage it belongs to. Order matters: earliest stage a keyword
+    # can appear in wins (monotonic tracking in the reader loop prevents a
+    # multi-stage step like "repair_timing" from ever pulling the bar
+    # backwards once a later numbered stage has been seen).
+    _STAGE_KEYWORDS = [
+        (1, ("1_synth", "synth", "yosys", "slang", "abc", "techmap")),
+        (2, ("2_floorplan", "floorplan", "tapcell", "pdn", "macro_place",
+             "ioplace", "io_place", "pin_place")),
+        (3, ("3_place", "global_place", "gpl", "detailed_place", "dpl",
+             "resize", "resizer", "repair_design", "repair_timing", "repair",
+             "buffer", "place")),
+        (4, ("4_cts", "cts", "clock_tree", "clock")),
+        (5, ("5_route", "global_route", "grt", "detailed_route", "drt",
+             "route", "fillcell", "antenna", "fill")),
+        (6, ("6_final", "6_report", "final", "finish", "signoff", "report",
+             "ir_drop", "drc", "density", "abstract", "gds")),
+    ]
+
+    @classmethod
+    def _stage_major_index(cls, label: str) -> int:
+        """Map any stage label (numbered OR bare sub-step name) to 1..6.
+
+        Returns 0 only when nothing matches (e.g. 'starting'). This is a FLOOR:
+        the reader loop keeps the running max so the bar never regresses.
+        """
+        if not label:
+            return 0
+        s = str(label).strip().lower()
+        if s[:1].isdigit():
+            try:
+                n = int(s.split("_", 1)[0])
+                if 1 <= n <= 6:
+                    return n
+            except ValueError:
+                pass
+        # CTS first: 'clock_tree_synthesis' contains 'synth' and would
+        # otherwise mis-map to stage 1.
+        if "clock" in s or "cts" in s:
+            return 4
+        for idx, keys in cls._STAGE_KEYWORDS:
+            for k in keys:
+                if k in s:
+                    return idx
+        return 0
+
     @staticmethod
     def _fmt_elapsed(seconds: float) -> str:
         m, s = divmod(int(seconds), 60)
@@ -1543,8 +1594,12 @@ class JANUSAutonomousAgent:
             n = state["lines"]
             prev = state["prev_lines"]
             stage_at = state["stage_at"]
+            idx = state.get("stage_idx", 0)
         el = self._fmt_elapsed(time.time() - t_start)
-        idx = int(stg[0]) if stg[:1].isdigit() else 0
+        # Robust major-stage index: prefer the monotonic value tracked by the
+        # reader loop; fall back to a fresh lookup so the bar is still correct
+        # even before the first transition has been recorded.
+        idx = max(idx, self._stage_major_index(stg))
         total = 6
         filled = max(0, min(total, idx))
         bar = "█" * filled + "░" * (total - filled)
@@ -1597,7 +1652,7 @@ class JANUSAutonomousAgent:
         # the optional in-place live console panel, and the web dashboard.
         t_start = time.time()
         state = {"stage": "starting", "lines": 0, "last_msg": "",
-                 "stage_at": t_start, "prev_lines": 0}
+                 "stage_at": t_start, "prev_lines": 0, "stage_idx": 0}
         state_lock = threading.Lock()
         hb_stop = threading.Event()
 
@@ -1710,6 +1765,14 @@ class JANUSAutonomousAgent:
                         if stg and stg != state["stage"]:
                             state["stage"] = stg
                             state["stage_at"] = time.time()
+                            # Track the canonical major-stage number as a
+                            # monotonic max so the N/6 bar reflects real
+                            # progress and never regresses on a sub-step (e.g.
+                            # "resize" / "repair_timing") that lacks a digit
+                            # prefix. Fixes the "0/6" display bug.
+                            state["stage_idx"] = max(
+                                state["stage_idx"],
+                                self._stage_major_index(stg))
                             transitioned = True
                             el = self._fmt_elapsed(time.time() - t_start)
                             # Under the in-place live panel we do NOT print a

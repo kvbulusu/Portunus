@@ -43,8 +43,28 @@ from urllib.parse import urlparse, parse_qs
 STAGES = ["1_synth", "2_floorplan", "3_place", "4_cts", "5_route", "6_final"]
 
 
+# Sub-step keyword -> 0-based major-stage index. Mirrors
+# JanusAgent._STAGE_KEYWORDS. ORFS emits fine-grained labels ("resize",
+# "repair_timing", "fillcell", "global_place") that do NOT start with a stage
+# digit; without this map they matched nothing and the bar rendered empty.
+_STAGE_KEYWORDS = [
+    (0, ("1_synth", "synth", "yosys", "slang", "abc", "techmap")),
+    (1, ("2_floorplan", "floorplan", "tapcell", "pdn", "macro_place",
+         "ioplace", "io_place", "pin_place")),
+    (2, ("3_place", "global_place", "gpl", "detailed_place", "dpl",
+         "resize", "resizer", "repair_design", "repair_timing", "repair",
+         "buffer", "place")),
+    (3, ("4_cts", "cts", "clock_tree", "clock")),
+    (4, ("5_route", "global_route", "grt", "detailed_route", "drt",
+         "route", "fillcell", "antenna", "fill")),
+    (5, ("6_final", "6_report", "final", "finish", "signoff", "report",
+         "ir_drop", "drc", "density", "abstract", "gds")),
+]
+
+
 def canon_stage_index(stage_label: str) -> int:
-    """Map a verbose stage label (e.g. '3_place (global)') to 0..len(STAGES)-1.
+    """Map a verbose stage label (e.g. '3_place (global)', 'resize') to
+    0..len(STAGES)-1.
 
     Returns -1 when nothing matches (e.g. 'starting'). Used to draw the N/M
     progress bar without the agent having to pass an index.
@@ -52,10 +72,23 @@ def canon_stage_index(stage_label: str) -> int:
     if not stage_label:
         return -1
     s = str(stage_label).strip().lower()
-    for i, st in enumerate(STAGES):
-        # match on the leading '<n>_<name>' token
-        if s.startswith(st) or st.split("_", 1)[1] in s:
-            return i
+    # leading '<n>_<name>' digit token is authoritative
+    if s[:1].isdigit():
+        try:
+            n = int(s.split("_", 1)[0])
+            if 1 <= n <= 6:
+                return n - 1
+        except ValueError:
+            pass
+    # CTS first: 'clock_tree_synthesis' contains the substring 'synth' and
+    # would otherwise mis-map to 1_synth.
+    if "clock" in s or "cts" in s:
+        return 3
+    # sub-step keyword fallback (resize / repair / gpl / drt / ...)
+    for idx, keys in _STAGE_KEYWORDS:
+        for k in keys:
+            if k in s:
+                return idx
     return -1
 
 
