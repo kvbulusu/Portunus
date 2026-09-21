@@ -550,7 +550,16 @@ class JANUSAutonomousAgent:
         # value, not separate arguments. Gated by JANUS_DFT_SCAN (default on); set
         # JANUS_DFT_SCAN=0 to fall back to the stock (no-scan) cell list.
         if os.environ.get("JANUS_DFT_SCAN", "1") != "0":
-            cmd.append("DONT_USE_CELLS=*x1p*_ASAP7* *xp*_ASAP7* ICG*")
+            # §76 S4: JANUS_ARA_ALLOW_XP=1 (env, or `:= 1` in the block's
+            # config.mk / *_local.mk) drops the `*xp*` pattern so the resizer
+            # can use the intermediate (xp5/xp33/xp67) drive strengths for
+            # sizeup on the WNS paths. *x1p* and ICG* stay excluded.
+            allow_xp = os.environ.get("JANUS_ARA_ALLOW_XP") or self._janus_knob(block, "JANUS_ARA_ALLOW_XP") or "0"
+            if allow_xp.strip() == "1":
+                cmd.append("DONT_USE_CELLS=*x1p*_ASAP7* ICG*")
+                self.ui.step(f"{block}: §76 S4 ALLOW_XP — *xp* cells enabled (DONT_USE_CELLS=*x1p*_ASAP7* ICG*)")
+            else:
+                cmd.append("DONT_USE_CELLS=*x1p*_ASAP7* *xp*_ASAP7* ICG*")
 
         # ---- OPTIONAL: cap detailed-route iterations -------------------------
         # TritonRoute's default DETAILED_ROUTE_END_ITERATION is 64. When set,
@@ -966,7 +975,46 @@ class JANUSAutonomousAgent:
         libs += sorted(glob.glob(os.path.join(self.sram_out_dir, "*.lib")))
         if libs:
             env["LIB_FILES"] = " ".join(libs)
+        # §76 L3: give the ECO real parasitics + a wire-RC model. Without these
+        # post_route_opt.tcl's estimate_parasitics has no RC (repair_timing then
+        # optimises against zero wire delay) and never sees the routed SPEF.
+        if self.orfs:
+            pdir = os.path.join(self.orfs, "flow", "platforms", "asap7")
+            if os.path.isdir(pdir):
+                env["PLATFORM_DIR"] = pdir
+        odb = self._find_routed_odb(block)
+        if odb:
+            spef = os.path.join(os.path.dirname(odb), "6_final.spef")
+            if os.path.isfile(spef):
+                env["JANUS_SPEF"] = spef
+        rc_file = self._janus_knob(block, "JANUS_ARA_LAYER_RC_FILE")
+        if rc_file and self._janus_knob(block, "JANUS_ARA_LAYER_RC") == "1":
+            rc_file = os.path.expandvars(rc_file.replace("$(JANUS_RTL_ROOT)", self.rtl_root or os.path.dirname(_ROOT)))
+            if os.path.isfile(rc_file):
+                env["LAYER_PARASITICS_FILE"] = rc_file
         return env
+
+    def _janus_knob(self, block: str, name: str) -> Optional[str]:
+        """Read a JANUS_* make knob as the flow will see it: last assignment in
+        <design>/<block>_local.mk wins over <design>/<block>/config.mk (the
+        local file is `-include`d and uses `:=`). Returns the raw RHS string or
+        None. Cheap text scan - does not evaluate make."""
+        bdir = os.path.join(self.design_root, block)
+        val: Optional[str] = None
+        pat = re.compile(r"^\s*" + re.escape(name) + r"\s*[:?]?=\s*(.*?)\s*$")
+        for fn in (os.path.join(bdir, "config.mk"), os.path.join(bdir, f"{block}_local.mk")):
+            try:
+                with open(fn, encoding="utf-8", errors="replace") as fh:
+                    found = None
+                    for line in fh:
+                        m = pat.match(line.split("#", 1)[0])
+                        if m:
+                            found = m.group(1)
+                    if found is not None:
+                        val = found
+            except OSError:
+                continue
+        return val
 
     def _openroad_bin(self) -> str:
         cand = os.path.join(self.orfs, "tools", "install", "OpenROAD",
@@ -980,6 +1028,7 @@ class JANUSAutonomousAgent:
         replaced when the ECO strictly improves it. Best-effort and fully
         reversible — never flips a passing block to FAILED."""
         if getattr(self.args, "no_post_route_opt", False):
+            self.ui.step(f"{block}: post-route ECO skipped (--no-post-route-opt)")
             return
         res = self.results[block]
         setup = res.wns_ns          # authoritative setup WNS (ps) from _classify_timing
@@ -989,13 +1038,20 @@ class JANUSAutonomousAgent:
         has_hold_viol = hold is not None and hold < 0.0
         timing_closed = (setup is not None and setup >= 0.0
                          and hold is not None and hold >= 0.0)
+        # §76 L3: every skip path is now logged at step level (the §68 log had
+        # NO JANUS_PR lines and no explanation why the ECO never ran).
+        if setup is None and hold is None:
+            self.ui.warn(f"{block}: post-route ECO skipped — _classify_timing produced no "
+                         f"setup/hold numbers (routed .odb or openroad probe missing)")
+            return
         # nothing to do: closed timing and no DRCs
         if not (has_setup_viol or has_hold_viol) and not (
                 timing_closed and drc and drc > 0):
+            self.ui.step(f"{block}: post-route ECO not needed (setup {setup} ps, hold {hold} ps, drc {drc})")
             return
         odb = self._find_routed_odb(block)
         if not odb:
-            self.ui.debug(f"{block}: no routed .odb — skipping post-route ECO")
+            self.ui.warn(f"{block}: no routed .odb — skipping post-route ECO")
             return
         orb = self._openroad_bin()
         env = self._orfs_lib_env(block)
