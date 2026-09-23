@@ -1699,7 +1699,7 @@ class JANUSAutonomousAgent:
                         _lf.write(banner.encode())
                 except OSError:
                     pass
-                self.ui.error(f"{block}: {stale}")
+                self.ui.err(f"{block}: {stale}")
                 return 90  # nonzero -> treated as a build failure, no make run
         cmd = self._make_cmd(block)
         self.ui.debug(f"{block}: cwd={self.flow_dir} cmd={' '.join(cmd)}")
