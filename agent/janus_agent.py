@@ -101,6 +101,7 @@ from dependency_manager import DEFAULT_GRAPH as _DEP_GRAPH               # noqa:
 from checkpoint import Checkpoint                                        # noqa: E402
 from flow_state import FlowState                                        # noqa: E402
 from reporter import Reporter                                           # noqa: E402
+from notification import NotificationManager                            # noqa: E402
 from timing_classifier import classify_routed_odb, render as tc_render   # noqa: E402
 from incremental_opt import (run_eco_pass, decide_timing, decide_drc,     # noqa: E402
                              adopt_odb, discard_odb, ECOResult)
@@ -278,6 +279,26 @@ class JANUSAutonomousAgent:
         self.ckpt = Checkpoint(os.path.join(self.run_dir, "checkpoint.json"))
         self.ckpt.load()
         self.reporter = Reporter(self.run_dir)
+
+        # --- run-completion notifications (email + optional Google Drive) ----
+        # OFF unless --notify-email (or a channel) is given. Constructing it is
+        # always safe; it simply does nothing when no channel is enabled. All
+        # of its work is best-effort and can never crash a real ORFS run.
+        self.notifier = NotificationManager(
+            recipient=getattr(args, "notify_email", None),
+            smtp_host=getattr(args, "smtp_host", None),
+            smtp_port=getattr(args, "smtp_port", None),
+            smtp_user=getattr(args, "smtp_user", None),
+            smtp_pass=getattr(args, "smtp_pass", None),
+            gdrive_enabled=getattr(args, "gdrive_upload", False),
+            gdrive_creds=getattr(args, "gdrive_creds", None),
+            logger=self.ui.debug,
+        )
+        if self.notifier.enabled and not self.notifier.email_configured \
+                and getattr(args, "notify_email", None):
+            self.ui.warn("--notify-email set but SMTP is not fully configured "
+                         "(need host/user/pass via flags or env); emails will "
+                         "be skipped. See asic_flow/utils/notification.py.")
 
         # --- GLOBAL flow-state manifest (outside all run-dirs / blocks) ------
         # A single JSON at <asic_flow>/.janus_state/janus_flow_state.json that
@@ -2489,6 +2510,61 @@ class JANUSAutonomousAgent:
                     self.results[b].status = "BLOCKED"
                     self.results[b].note = "skipped — a dependency failed"
 
+        # Fire the completion/failure notification OUTSIDE the results lock so
+        # the (possibly slow) email/Drive I/O never serialises other blocks.
+        # Fully best-effort inside notify(); a failure here cannot affect the run.
+        self._notify_settled(block, res)
+
+    def _notify_settled(self, block: str, res: "BlockResult") -> None:
+        """Email (and optionally Drive-upload) the settled block's logs+reports.
+
+        No-op unless a notification channel was enabled on the CLI/env. Derives
+        the failing stage (best-effort) and a short QoR summary, then hands off
+        to NotificationManager.notify(), which swallows all of its own errors.
+        """
+        try:
+            if not getattr(self, "notifier", None) or not self.notifier.enabled:
+                return
+            # Best-effort failing stage: the last stage the manifest recorded as
+            # completed (the block died at/after it). DONE runs pass no stage.
+            stage = ""
+            if res.status != "DONE" and getattr(self, "manifest", None):
+                try:
+                    stage = self.manifest.last_completed_stage(block) or ""
+                except Exception:
+                    stage = ""
+            # Compact QoR summary for the email body.
+            bits = []
+            if res.wns_ns is not None:
+                bits.append(f"WNS(setup)={res.wns_ns} ps")
+            if res.hold_ps is not None:
+                bits.append(f"WNS(hold)={res.hold_ps} ps")
+            if res.tns_ns is not None:
+                bits.append(f"TNS={res.tns_ns} ps")
+            if res.drc_violations is not None:
+                bits.append(f"DRC={res.drc_violations}")
+            if res.area is not None:
+                bits.append(f"area={res.area}")
+            if res.utilization is not None:
+                bits.append(f"util={res.utilization}")
+            if res.tries:
+                bits.append(f"tries={res.tries}")
+            summary = "QoR: " + ", ".join(bits) if bits else ""
+            if res.note:
+                summary = (summary + "\n" if summary else "") + f"Note: {res.note}"
+            self.notifier.notify(
+                block=block,
+                status=res.status,
+                stage=stage,
+                run_dir=self.run_dir,
+                results_dir=self._results_dir(block),
+                reports_dir=self._reports_dir(block),
+                log_path=res.log_path or self._block_log(block),
+                summary=summary,
+            )
+        except Exception as e:  # never let notification affect the run
+            self.ui.debug(f"{block}: notification hook error (ignored): {e}")
+
     # ----- kepler-formal shared-library auto-fix -----------------------------
     def _ensure_kepler_libpath(self) -> None:
         """Make ORFS's logic-equivalence checker (kepler-formal) loadable.
@@ -2908,6 +2984,46 @@ def build_parser() -> argparse.ArgumentParser:
                         "agent renders an in-place live status panel/table "
                         "(no scroll spam); piped output falls back to one "
                         "throttled line per interval.")
+
+    # ----- run-completion notifications (email + optional Google Drive) ---
+    #   OFF by default. See asic_flow/utils/notification.py for full SMTP /
+    #   Google-Drive setup. All notification work is best-effort and fail-safe:
+    #   a notification error never crashes or alters the ASIC run.
+    notif = p.add_argument_group(
+        "notifications",
+        "email a tarball of logs + key reports (and optionally upload it to "
+        "Google Drive) when a block completes or fails, so you don't have to "
+        "poll a long EC2 run. SMTP creds may be given here or via the "
+        "SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS env vars (env is safer for "
+        "the password).")
+    notif.add_argument("--notify-email", default=None, metavar="ADDRESS",
+                       help="recipient email address. Enables notifications; "
+                            "requires SMTP config (flags below or env vars).")
+    notif.add_argument("--smtp-host", default=None, metavar="HOST",
+                       help="SMTP server host (or $SMTP_HOST), e.g. "
+                            "smtp.gmail.com")
+    notif.add_argument("--smtp-port", type=int, default=None, metavar="PORT",
+                       help="SMTP port (or $SMTP_PORT, default 587). 587 uses "
+                            "STARTTLS; 465 uses implicit SSL.")
+    notif.add_argument("--smtp-user", default=None, metavar="USER",
+                       help="SMTP username / from-address (or $SMTP_USER).")
+    notif.add_argument("--smtp-pass", default=None, metavar="PASS",
+                       help="SMTP password (or $SMTP_PASS). For Gmail use a "
+                            "16-char App Password, NOT your login password. "
+                            "Prefer the env var so it stays out of shell "
+                            "history / ps.")
+    notif.add_argument("--gdrive-upload", action="store_true",
+                       help="also upload the log/report tarball to Google "
+                            "Drive (folder JANUS_runs/<block>_<timestamp>). "
+                            "Needs google-api-python-client + a credentials "
+                            "file at ~/.config/janus_gdrive_credentials.json "
+                            "(or --gdrive-creds / $JANUS_GDRIVE_CREDENTIALS); "
+                            "gracefully skipped if either is missing.")
+    notif.add_argument("--gdrive-creds", default=None, metavar="PATH",
+                       help="path to the Google Drive credentials json "
+                            "(service account preferred for headless runs). "
+                            "Default: ~/.config/janus_gdrive_credentials.json "
+                            "or $JANUS_GDRIVE_CREDENTIALS.")
 
     # ----- live web dashboard --------------------------------------------
     dash = p.add_argument_group(
