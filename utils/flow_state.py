@@ -135,6 +135,47 @@ def _canonical_stage(stage_name: str) -> str:
     return stage_name
 
 
+def _stage_sibling_artifacts(results_dir: str, stage_base: str) -> List[str]:
+    """Return every on-disk sibling artifact that belongs to the SAME ORFS stage
+    as ``stage_base`` (matched by leading major number), not just its canonical
+    ``.odb``.
+
+    WHY THIS EXISTS
+    ---------------
+    ORFS synth is a make *chain*, and the ``.odb`` is the LAST link:
+
+        RTL + config.mk -> 1_1_yosys_canonicalize.rtlil -> 1_2_yosys.v -> 1_synth.odb
+
+    ``apply_resume_plan`` used to TOUCH only the canonical ``.odb`` (1_synth.odb)
+    when a stage was reused.  It never touched the fine-grained yosys
+    intermediates (``1_1_yosys_canonicalize.rtlil``, ``1_2_yosys.v``) that sit
+    EARLIEST in the make dependency graph.  So after a ``scripts/03`` re-stamp
+    bumped config.mk's mtime, make saw those intermediates as older than
+    config.mk and rebuilt the ENTIRE synth chain — a spurious ~2h re-synth —
+    even though 1_synth.odb itself had been freshly touched.
+
+    Touching the whole family of ``{major}_*`` products (every stage-owned
+    prerequisite that lives beside the .odb: .rtlil, .v, .sdc, .def, .json, ...)
+    makes the reuse airtight against re-stamp mtime churn.  Only files that
+    already exist are returned; the .odb itself is included so callers can pass
+    a single list.
+    """
+    if not results_dir or not os.path.isdir(results_dir):
+        return []
+    major, _ = _stage_key(stage_base)
+    if major == 99:  # unknown stage — do not sweep the whole dir
+        return []
+    prefix = f"{major}_"
+    out: List[str] = []
+    for name in os.listdir(results_dir):
+        if not name.startswith(prefix):
+            continue
+        toks = name.split("_")
+        if toks and toks[0].isdigit() and int(toks[0]) == major:
+            out.append(os.path.abspath(os.path.join(results_dir, name)))
+    return out
+
+
 def _sha256_file(path: str, cap_bytes: int = 64 * 1024 * 1024) -> str:
     """SHA-256 of a file's first ``cap_bytes`` (odb files are large; a capped
     hash is enough to detect a rebuild and keeps this cheap)."""
@@ -464,7 +505,18 @@ class FlowState:
             else:
                 plan.reuse.append(s)
                 if path_by_canon.get(s):
-                    plan.touch_paths.append(path_by_canon[s])
+                    # Touch the WHOLE stage artifact family (.odb + fine-grained
+                    # yosys/floorplan/route intermediates), not just the canonical
+                    # .odb — otherwise a config.mk re-stamp makes ORFS rebuild the
+                    # earliest intermediate (e.g. 1_1_yosys_canonicalize.rtlil) and
+                    # cascade a spurious full re-synth of a reused stage.
+                    sibs = _stage_sibling_artifacts(results_dir, s)
+                    if sibs:
+                        for sp in sibs:
+                            if sp not in plan.touch_paths:
+                                plan.touch_paths.append(sp)
+                    else:
+                        plan.touch_paths.append(path_by_canon[s])
 
         # also remove any fine-grained sibling .odb at/after earliest_invalid
         if earliest_invalid:
