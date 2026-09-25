@@ -357,6 +357,20 @@ class JANUSAutonomousAgent:
         }
         self._results_lock = threading.Lock()
 
+        # --- resume: per-block "assume-old" file list ------------------------
+        # On --resume, _plan_stage_resume() records here the absolute paths of
+        # every REUSED stage artifact (the resume plan's touch list: the whole
+        # {major}_* family — .rtlil/.v/.sdc/.odb/...). _make_cmd() turns each
+        # into a GNU-make `-o <file>` (--old-file / --assume-old) flag so make
+        # will NOT rebuild those files even if a prerequisite looks newer, AND
+        # will not rebuild anything downstream on their account. This is the
+        # DECISIVE defense against the spurious full re-synth: the synth make
+        # chain (1_1_yosys_canonicalize.rtlil : $(YOSYS_DEPENDENCIES)) is forced
+        # out-of-date by a rebuilt $(SDC_FILE_CLOCK_PERIOD) / re-stamped source,
+        # which mtime-touching a target cannot beat but `-o` does. See
+        # flow_state.ResumePlan.touch_paths.  Empty => no -o flags emitted.
+        self._resume_old_files: Dict[str, List[str]] = {}
+
         # --- optional web dashboard (browsable live/standalone run view) -----
         # Zero-dep HTTP server (see dashboard.py). Off unless --dashboard. The
         # DashboardState is a pure mirror the agent pushes into; it also writes
@@ -727,6 +741,37 @@ class JANUSAutonomousAgent:
                 "JANUS_DUMP_IMAGES="
                 + ("0" if getattr(self.args, "no_debug_images", False) else "1")
             )
+
+        # ---- RESUME: mark reused stage artifacts "old" (--old-file) ----------
+        # THE decisive fix for the recurring spurious full re-synth on --resume.
+        # ORFS's synth make chain is rooted at
+        #     $(RESULTS_DIR)/1_1_yosys_canonicalize.rtlil : $(YOSYS_DEPENDENCIES)
+        # and $(YOSYS_DEPENDENCIES) (scripts/variables.mk) includes
+        # $(SDC_FILE_CLOCK_PERIOD) — itself a FILE target rebuilt from the
+        # (re-stamped) constraint SDC — plus the RTL/lib sources. When any of
+        # those looks newer than the .rtlil, make rebuilds the .rtlil and the
+        # WHOLE chain cascades (1_2_yosys.v -> 1_synth.odb -> 2_floorplan.odb ->
+        # ...), re-running ~2h of synthesis even though the stage outputs are on
+        # disk and valid. mtime-TOUCHING the outputs cannot win this race (a
+        # phony/force or freshly-rebuilt prereq is *always* newer). GNU make's
+        # `-o FILE` / `--old-file` / `--assume-old` is the correct tool: make is
+        # told to treat FILE as older than every prerequisite, so it will (a)
+        # never rebuild FILE, and (b) never rebuild anything downstream because
+        # of FILE. We emit one `-o` per reused-stage artifact recorded by
+        # _plan_stage_resume(). Because the recipes recurse via $(UNSET_AND_MAKE)
+        # and the top make decides at each FILE target whether to run the recipe,
+        # stopping the top make from rebuilding the .odb/.rtlil/.v also stops the
+        # recursive sub-make from firing. Only files that still exist are passed.
+        if getattr(self.args, "resume", False):
+            old_files = self._resume_old_files.get(block) or []
+            n_old = 0
+            for p in old_files:
+                if p and os.path.exists(p):
+                    cmd += ["-o", p]
+                    n_old += 1
+            if n_old:
+                self.ui.step(f"{block}: resume — {n_old} reused artifact(s) "
+                             f"passed to make as --old-file (no spurious rebuild)")
 
         return cmd
 
@@ -2228,9 +2273,19 @@ class JANUSAutonomousAgent:
                                              config_path=cfg, sdc_path=sdc)
             summary = self.manifest.apply_resume_plan(plan, config_path=cfg)
             if plan.full_rebuild:
+                # nothing reused — make must redo from synthesis; no -o flags.
+                self._resume_old_files.pop(block, None)
                 self.ui.info(f"{block}: resume — full rebuild from synthesis "
                              f"({plan.reason})")
             else:
+                # Record the reused artifact family so _make_cmd() can pass each
+                # as `make -o <file>` (--old-file). This is the mechanism that
+                # actually stops ORFS from re-running the reused synth/floorplan
+                # chain: those files are declared old, so make neither rebuilds
+                # them (despite a forced-newer $(YOSYS_DEPENDENCIES) prereq) nor
+                # anything downstream on their account. The mtime-touch above is
+                # kept as belt-and-suspenders but is NOT sufficient on its own.
+                self._resume_old_files[block] = list(plan.touch_paths)
                 self.ui.info(
                     f"{block}: resume — reuse [{', '.join(plan.reuse) or 'none'}], "
                     f"rerun from {plan.rerun_from or 'finish'} "
