@@ -698,8 +698,36 @@ class JANUSAutonomousAgent:
             # sidesteps the lane-abstract PDN saga entirely (no lane macros -> no
             # lane ElementGrid -> no PDN-0232). Command-line assignment still wins
             # over config.mk; we simply pass through whatever the env selected.
+            #
+            # ENABLE_RESISTANCE_AWARE=0 (GRT segfault fix): ASAP7's platform
+            # config.mk sets `export ENABLE_RESISTANCE_AWARE ?= 1`, which makes
+            # ORFS append `-resistance_aware` to `global_route`. That flag turns
+            # on GRT-INTERNAL parasitic estimation inside the maze-route loop
+            # (grt::FastRouteCore::CalculatePartialSlack ->
+            # est::EstimateParasitics::estimateAllGlobalRouteParasitics ->
+            # est::MakeWireParasitics::makeRouteParasitics -> layerRC), and on
+            # the FLAT user_core_ara (JANUS_ARA_LANE_MACRO=0, 638,278 insts,
+            # only M2-M7 usable signal layers, heavy congestion -> 30 GRT
+            # iterations) that path SIGSEGVs during congestion "extra iteration
+            # 3/30" (0924-1-user_core_ara.log: Signal 11 in layerRC, make
+            # Error 245, peak 13.95 GB so NOT OOM). The custom calibrated RC
+            # (configs/rc/user_core_ara_setRC.tcl) is NOT the trigger:
+            # `estimate_parasitics -placement` ran 6x cleanly with setRC active
+            # BEFORE GRT -- the crash is specific to the fragile res-aware GRT
+            # feature on this flat/congested block. We disable it via a
+            # command-line assignment (highest GNU-make precedence, beats the
+            # platform `?= 1`); GRT falls back to standard congestion-driven
+            # routing (res-aware is off-by-default on most platforms). For a
+            # FREQUENCY-LOCK run this costs ~nothing: signoff WNS comes from
+            # detailed route + RCX-extracted SPEF (6_final), not the GRT-internal
+            # estimate, and setRC.tcl stays active for post-route repair
+            # estimation (proven safe). Env-overridable: set
+            # JANUS_ARA_RESIST_AWARE_GRT=1 to restore the platform default.
+            # >>> PD-UNVALIDATED locally (no openroad/ASAP7 DB in sandbox);
+            # on-box GRT re-run is the first exercise. <<<
             "user_core_ara":  ["SYNTH_MEMORY_MAX_BITS=16384",
-                                f"JANUS_ARA_LANE_MACRO={os.environ.get('JANUS_ARA_LANE_MACRO', '1')}"],
+                                f"JANUS_ARA_LANE_MACRO={os.environ.get('JANUS_ARA_LANE_MACRO', '1')}",
+                                f"ENABLE_RESISTANCE_AWARE={os.environ.get('JANUS_ARA_RESIST_AWARE_GRT', '0')}"],
             # L0.25 lane sub-macro: same defensive gate as the Ara macro. The
             # lane VRF banks are 8 words deep (< asic_tc_sram MIN_MACRO_DEPTH=32)
             # so they infer flops, but keep the gate identical for determinism.
