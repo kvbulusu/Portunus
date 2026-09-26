@@ -795,11 +795,31 @@ class JANUSAutonomousAgent:
             n_old = 0
             for p in old_files:
                 if p and os.path.exists(p):
-                    cmd += ["-o", p]
+                    # CRITICAL bug fix: the -o/--old-file value MUST be the target
+                    # name EXACTLY as ORFS's Makefile expresses it, which is
+                    # RELATIVE to the make cwd (self.flow_dir):
+                    #     results/asap7/<block>/base/1_synth.odb
+                    # GNU make matches --old-file by literal target-name string,
+                    # NOT by inode/realpath. _resume_old_files holds ABSOLUTE paths
+                    # (flow_state emits os.path.abspath). Passing them verbatim
+                    # matched NONE of make's relative targets, so every -o was a
+                    # no-op and make silently re-ran the whole synth->...->route
+                    # chain from scratch — the recurring "restarted even with
+                    # --resume" bug (0924_2 fully re-synthesized despite 24 -o
+                    # flags). Converting to a flow_dir-relative path makes the
+                    # strings match so make actually treats the artifacts as old.
+                    rel = os.path.relpath(p, self.flow_dir) if self.flow_dir else p
+                    # Guard: if the artifact somehow lives outside flow_dir the
+                    # relative form would escape with '..' and still not match a
+                    # make target; keep the absolute path in that (never-observed)
+                    # case rather than emit a broken '../..' flag.
+                    flag = p if rel.startswith(os.pardir + os.sep) else rel
+                    cmd += ["-o", flag]
                     n_old += 1
             if n_old:
                 self.ui.step(f"{block}: resume — {n_old} reused artifact(s) "
-                             f"passed to make as --old-file (no spurious rebuild)")
+                             f"passed to make as --old-file (relative target "
+                             f"names; no spurious rebuild)")
 
         return cmd
 
