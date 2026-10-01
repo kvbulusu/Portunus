@@ -419,6 +419,20 @@ class JANUSAutonomousAgent:
     def _config_path(self, block: str) -> str:
         return os.path.join(self.design_root, block, "config.mk")
 
+    # ----- ORFS FLOW_VARIANT leaf -------------------------------------------
+    def _leaf(self) -> str:
+        """The ORFS results/reports/logs leaf directory for THIS run.
+
+        ORFS writes under results|reports|logs/<platform>/<design>/<FLOW_VARIANT>
+        and FLOW_VARIANT defaults to 'base'. For parallel variant campaigns we
+        run the SAME block N times on ONE box, each with a distinct leaf so the
+        ODB/report trees never collide on the shared disk. When --variant is
+        unset (or 'base') this returns 'base', so single-run behaviour is
+        byte-identical to the pre-variant agent.
+        """
+        v = getattr(self.args, "variant", None) or "base"
+        return v
+
     def _block_log(self, block: str) -> str:
         return os.path.join(self.run_dir, f"{block}.log")
 
@@ -438,11 +452,11 @@ class JANUSAutonomousAgent:
         if not self.flow_dir:
             return None
         cands = [
-            os.path.join(self.flow_dir, "reports", "asap7", block, "base"),
-            os.path.join(self.flow_dir, "reports", "asap7", f"janus_{block}", "base"),
+            os.path.join(self.flow_dir, "reports", "asap7", block, self._leaf()),
+            os.path.join(self.flow_dir, "reports", "asap7", f"janus_{block}", self._leaf()),
         ]
         # last resort: glob for any reports dir whose name contains the block
-        cands += glob.glob(os.path.join(self.flow_dir, "reports", "*", f"*{block}*", "base"))
+        cands += glob.glob(os.path.join(self.flow_dir, "reports", "*", f"*{block}*", self._leaf()))
         for d in cands:
             if os.path.isdir(d) and glob.glob(os.path.join(d, "*_*.rpt")):
                 return d
@@ -462,12 +476,12 @@ class JANUSAutonomousAgent:
         if not self.flow_dir:
             return None
         cands = [
-            os.path.join(self.flow_dir, "results", "asap7", block, "base"),
-            os.path.join(self.flow_dir, "results", "asap7", f"janus_{block}", "base"),
-            os.path.join(self.flow_dir, "results", "asap7", "janus", block, "base"),
+            os.path.join(self.flow_dir, "results", "asap7", block, self._leaf()),
+            os.path.join(self.flow_dir, "results", "asap7", f"janus_{block}", self._leaf()),
+            os.path.join(self.flow_dir, "results", "asap7", "janus", block, self._leaf()),
         ]
         cands += glob.glob(os.path.join(self.flow_dir, "results", "*",
-                                        f"*{block}*", "base"))
+                                        f"*{block}*", self._leaf()))
         for d in cands:
             if os.path.isdir(d) and glob.glob(os.path.join(d, "*.odb")):
                 return d
@@ -478,9 +492,9 @@ class JANUSAutonomousAgent:
         if not self.flow_dir:
             return None
         for pat in (
-            os.path.join(self.flow_dir, "logs", "asap7", block, "base", "*synth_stat*"),
-            os.path.join(self.flow_dir, "reports", "asap7", block, "base", "synth_stat.txt"),
-            os.path.join(self.flow_dir, "logs", "asap7", f"janus_{block}", "base", "*synth_stat*"),
+            os.path.join(self.flow_dir, "logs", "asap7", block, self._leaf(), "*synth_stat*"),
+            os.path.join(self.flow_dir, "reports", "asap7", block, self._leaf(), "synth_stat.txt"),
+            os.path.join(self.flow_dir, "logs", "asap7", f"janus_{block}", self._leaf(), "*synth_stat*"),
         ):
             hits = sorted(glob.glob(pat))
             if hits:
@@ -515,6 +529,21 @@ class JANUSAutonomousAgent:
         cmd = ["make", f"DESIGN_CONFIG={self._config_path(block)}"]
         if self.args.num_cores:
             cmd.append(f"NUM_CORES={self.args.num_cores}")
+
+        # ---- Parallel-variant campaign: distinct ORFS leaf + extra make vars --
+        # When this run is one leg of a parallel variant campaign (--variant set
+        # to something other than 'base'), tell ORFS to write its results/reports/
+        # logs under that leaf instead of 'base' (FLOW_VARIANT). This lets N
+        # agents run the SAME block on ONE shared disk without clobbering each
+        # other. --extra-make carries per-variant make assignments (highest GNU-
+        # make precedence) — typically the lever enable for this leg, e.g.
+        # JANUS_VLSU_LDU_RETIME2=1. The config.mk ifeq blocks translate the JANUS_*
+        # knob into VERILOG_DEFINES, so no re-stamp is needed to flip a lever.
+        leaf = self._leaf()
+        if leaf != "base":
+            cmd.append(f"FLOW_VARIANT={leaf}")
+        for kv in (getattr(self.args, "extra_make", None) or []):
+            cmd.append(kv)
 
         # ---- GLOBAL setup-signoff corner: WORST (slow) -----------------------
         # Design owner policy (2026-08-12): every step from synthesis through
@@ -1014,9 +1043,9 @@ class JANUSAutonomousAgent:
             return []
         root = os.path.join(self.orfs, "flow", "results", "asap7")
         return [
-            os.path.join(root, block, "base"),
-            os.path.join(root, f"janus_{block}", "base"),
-            os.path.join(root, "janus", block, "base"),
+            os.path.join(root, block, self._leaf()),
+            os.path.join(root, f"janus_{block}", self._leaf()),
+            os.path.join(root, "janus", block, self._leaf()),
         ]
 
     def _find_abstract(self, block: str, ext: str) -> Optional[str]:
@@ -1230,11 +1259,11 @@ class JANUSAutonomousAgent:
         if not self.flow_dir:
             return None
         cands = [
-            os.path.join(self.flow_dir, "logs", "asap7", block, "base"),
-            os.path.join(self.flow_dir, "logs", "asap7", f"janus_{block}", "base"),
+            os.path.join(self.flow_dir, "logs", "asap7", block, self._leaf()),
+            os.path.join(self.flow_dir, "logs", "asap7", f"janus_{block}", self._leaf()),
         ]
         cands += glob.glob(os.path.join(self.flow_dir, "logs", "*",
-                                        f"*{block}*", "base"))
+                                        f"*{block}*", self._leaf()))
         for d in cands:
             if os.path.isdir(d) and glob.glob(os.path.join(d, "*.log")):
                 return d
@@ -2920,6 +2949,28 @@ def build_parser() -> argparse.ArgumentParser:
                    help="path to the JANUS repo root holding rtl/ (default $JANUS_RTL_ROOT)")
     p.add_argument("--run-dir", default=None,
                    help="override the run/log/report directory")
+    # ---- Parallel-variant campaign (one box, N variants of the SAME block) ----
+    p.add_argument("--variant", default="base", metavar="LEAF",
+                   help="ORFS FLOW_VARIANT leaf for THIS run's results/reports/"
+                        "logs (default 'base'). Set to a distinct name per leg so "
+                        "parallel variant runs on one shared disk do not collide. "
+                        "Usually set automatically by --variants fan-out.")
+    p.add_argument("--extra-make", nargs="*", default=[], metavar="VAR=VAL",
+                   help="extra make assignments appended to the ORFS make command "
+                        "(highest GNU-make precedence) — typically the lever enable "
+                        "for this variant, e.g. JANUS_VLSU_LDU_RETIME2=1. Can pass "
+                        "several: --extra-make A=1 B=0.")
+    p.add_argument("--variants", nargs="+", default=None, metavar="TAG[:VAR=VAL,...]",
+                   help="PARENT fan-out: launch one parallel child run per spec, "
+                        "each a full agent run of the SAME --blocks with its own "
+                        "FLOW_VARIANT leaf (=TAG) and lever defines. Example: "
+                        "--variants stock ldu_rt2:JANUS_VLSU_LDU_RETIME2=1 . The "
+                        "--num-cores budget is split evenly across the N children "
+                        "(reserve a few for the OS). Children run in parallel and "
+                        "the parent aggregates their exit codes.")
+    p.add_argument("--variants-reserve-cores", type=int, default=0, metavar="N",
+                   help="cores to leave unallocated when splitting --num-cores "
+                        "across --variants children (default 0).")
     p.add_argument("--resume", action="store_true",
                    help="resume using the GLOBAL flow-state manifest (survives a "
                         "fresh --run-dir): skip DONE blocks, and STAGE-resume "
@@ -3212,6 +3263,193 @@ def _manifest_only_cli(args: argparse.Namespace) -> Optional[int]:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Parallel-variant fan-out (PARENT coordinator)
+# ---------------------------------------------------------------------------
+#  Multi-value flags are greedy (nargs='+'/'*'): consume every following token
+#  until the next option (a token starting with '-').
+#  NOTE: --blocks is deliberately NOT stripped — every child must inherit the
+#  same block list.  Only parent-only greedy flags belong here.
+_VARIANT_PARENT_GREEDY = {"--variants", "--extra-make"}
+#  Single-value flags we rewrite per child (strip from the inherited argv so the
+#  child gets the per-leg value we append instead).
+_VARIANT_PARENT_ONEVAL = {
+    "--variants-reserve-cores", "--num-cores", "--run-dir", "--variant",
+}
+
+
+def _strip_argv(argv: List[str], greedy: set, oneval: set) -> List[str]:
+    """Return argv with the named options (and their values) removed.
+
+    Handles both `--flag value` and `--flag=value` forms.  Greedy options
+    consume every following non-option token; one-value options consume exactly
+    one following token.
+    """
+    out: List[str] = []
+    i = 0
+    n = len(argv)
+    while i < n:
+        tok = argv[i]
+        key = tok.split("=", 1)[0]
+        if key in greedy or key in oneval:
+            if "=" in tok:            # --flag=value : single token, just drop it
+                i += 1
+                continue
+            i += 1                    # drop the flag itself
+            if key in oneval:
+                if i < n:
+                    i += 1            # drop its single value
+            else:                     # greedy: drop until the next option token
+                while i < n and not argv[i].startswith("-"):
+                    i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _parse_variant_spec(spec: str) -> (str, List[str]):
+    """`TAG[:VAR=VAL,VAR=VAL,...]` -> (tag, ['VAR=VAL', ...])."""
+    if ":" in spec:
+        tag, rest = spec.split(":", 1)
+        defines = [kv.strip() for kv in rest.split(",") if kv.strip()]
+    else:
+        tag, defines = spec, []
+    tag = tag.strip()
+    if not tag:
+        raise ValueError(f"empty variant tag in spec {spec!r}")
+    return tag, defines
+
+
+def _run_variants_parent(args: argparse.Namespace, argv: Optional[List[str]]) -> int:
+    """Fan out one parallel CHILD agent run per --variants spec on ONE box.
+
+    Each child is a normal single-run of the SAME --blocks, but with its own
+    ORFS FLOW_VARIANT leaf (=TAG) and lever defines (--extra-make), its own
+    run-dir, and an even share of the --num-cores budget.  The whole per-run
+    pipeline (stage-resume, QoR parse, golden check, notify) is reused verbatim;
+    this coordinator only spawns + joins the children and aggregates exit codes.
+    """
+    import shlex
+    import threading
+
+    base_argv = list(argv) if argv is not None else list(sys.argv[1:])
+    child_base = _strip_argv(base_argv, _VARIANT_PARENT_GREEDY, _VARIANT_PARENT_ONEVAL)
+
+    # Parse + validate all specs up front.
+    specs = []
+    tags_seen = set()
+    for raw in args.variants:
+        tag, defines = _parse_variant_spec(raw)
+        if tag in tags_seen:
+            print(f"error: duplicate variant tag {tag!r}", file=sys.stderr)
+            return 2
+        tags_seen.add(tag)
+        specs.append((tag, defines))
+
+    # Resolve + split the core budget.
+    total_cores = args.num_cores
+    if total_cores is None:
+        try:
+            total_cores = int(subprocess.check_output(["nproc"], text=True).strip())
+        except (subprocess.SubprocessError, ValueError, FileNotFoundError):
+            total_cores = 8
+    reserve = max(0, args.variants_reserve_cores)
+    usable = max(1, total_cores - reserve)
+    per_child = max(1, usable // len(specs))
+
+    # Each child needs its own run-dir so logs/manifests never collide.
+    parent_run_dir = args.run_dir or os.path.join(
+        os.environ.get("JANUS_ASIC_HOME", os.path.expanduser("~/janus_asic")),
+        "variants_" + datetime.now().strftime("%Y%m%d_%H%M%S"),
+    )
+
+    # Build the child command lines.
+    children = []  # (tag, cmd:list[str], run_dir, results_hint)
+    for tag, defines in specs:
+        rd = os.path.join(parent_run_dir, tag)
+        cmd = [sys.executable, os.path.abspath(__file__)] + child_base + [
+            "--variant", tag,
+            "--num-cores", str(per_child),
+            "--run-dir", rd,
+        ]
+        if defines:
+            cmd += ["--extra-make", *defines]
+        results_hint = f"results/asap7/user_core_ara/{tag}/"
+        children.append((tag, cmd, rd, results_hint))
+
+    # Header / dry-run preview.
+    print("=" * 72)
+    print(f"PARALLEL VARIANT CAMPAIGN  ({len(specs)} variants, one box)")
+    print(f"  total cores : {total_cores}   reserve: {reserve}   "
+          f"per-child: {per_child}")
+    print(f"  parent run-dir: {parent_run_dir}")
+    for tag, cmd, rd, hint in children:
+        print("-" * 72)
+        print(f"  [{tag}]  ->  {hint}")
+        print(f"      {shlex.join(cmd)}")
+    print("=" * 72)
+
+    if args.dry_run:
+        print("(dry run — no child agents launched)")
+        return 0
+
+    os.makedirs(parent_run_dir, exist_ok=True)
+
+    # Launch all children in parallel, each with a prefixed log tee.
+    procs = []  # (tag, Popen, logfile handle)
+    for tag, cmd, rd, _hint in children:
+        os.makedirs(rd, exist_ok=True)
+        logpath = os.path.join(rd, "variant_child.log")
+        lf = open(logpath, "w")
+        p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT)
+        procs.append((tag, p, lf, logpath))
+        print(f"launched [{tag}] pid={p.pid}  (log: {logpath})")
+
+    # Optional: live-prefix tail of each child's log to the parent stdout so a
+    # single attached terminal shows interleaved progress.
+    stop = threading.Event()
+
+    def _tail(tag, path):
+        last = 0
+        while not stop.is_set():
+            try:
+                with open(path) as fh:
+                    fh.seek(last)
+                    for line in fh:
+                        sys.stdout.write(f"[{tag}] {line}")
+                    last = fh.tell()
+            except OSError:
+                pass
+            stop.wait(2.0)
+
+    tails = [threading.Thread(target=_tail, args=(tag, path), daemon=True)
+             for tag, _p, _lf, path in procs]
+    for t in tails:
+        t.start()
+
+    results = {}
+    for tag, p, lf, _path in procs:
+        rc = p.wait()
+        lf.close()
+        results[tag] = rc
+    stop.set()
+    for t in tails:
+        t.join(timeout=3.0)
+
+    # Summary table.
+    print("\n" + "=" * 72)
+    print("VARIANT CAMPAIGN SUMMARY")
+    worst = 0
+    for tag, _cmd, _rd, hint in children:
+        rc = results.get(tag, 1)
+        worst = worst or rc
+        status = "OK " if rc == 0 else f"FAIL({rc})"
+        print(f"  {status:9s} [{tag}]  ->  {hint}")
+    print("=" * 72)
+    return 0 if worst == 0 else 1
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     _apply_skips(args)
@@ -3224,6 +3462,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     rc = _manifest_only_cli(args)
     if rc is not None:
         return rc
+    # PARENT fan-out: --variants launches one parallel child agent per spec.
+    if getattr(args, "variants", None):
+        return _run_variants_parent(args, argv)
     agent = JANUSAutonomousAgent(args)
     return agent.run()
 
