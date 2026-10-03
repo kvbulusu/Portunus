@@ -37,11 +37,40 @@ _WARNING_PATTERNS = [
     re.compile(r"^Warning:", re.I),
 ]
 
+# OpenROAD / Yosys tool messages are severity-tagged "[SEVERITY TOOL-NNNN]"
+# (e.g. "[WARNING RSZ-2005]", "[INFO GPL-0106]", "[ERROR ODB-0012]"). When a
+# line carries such a tag, the tag is AUTHORITATIVE and must win over the generic
+# text heuristics in _ERROR_PATTERNS: a "[WARNING RSZ-2005] cannot find a viable
+# buffering solution ..." is a warning, NOT a hard failure, even though its text
+# contains "cannot find". Only ERROR/FATAL tags (that survive _IGNORE_PATTERNS)
+# are real failures. Untagged lines (make/Tcl errors) still use the heuristics.
+_RE_MSG_TAG = re.compile(r"\[(ERROR|FATAL|WARNING|INFO|DEBUG)\s+[A-Z]{2,6}-\d+\]", re.I)
+
 # Lines that look like an error but are benign noise we should not flag.
+#
+# The last four entries below are COSMETIC errors emitted by the artifact/image
+# dump hooks (janus_stage_dump.tcl / janus_stage_images.tcl), NOT flow failures:
+#   * STA-2204 "get_property <corner> is not an object" — the post-CTS image hook
+#     probes a corner object for coloring; harmless, the route still completes.
+#   * STA-0562 "... is not a known keyword or flag" — the summary dump used the
+#     invalid `report_wns -hold`/`report_tns -hold` form (fixed in the hook, but
+#     tolerated here for logs produced before that fix). Hold is still captured
+#     via the `report_worst_slack -min` line.
+#   * GUI-0056 "Invalid syntax for -filter" — the image hook's GUI filter string;
+#     affects a PNG dump only.
+# These appear with a zero return code and a written 6_final.gds, so treating
+# them as hard failures is a false FAIL. Signoff timing comes from the per-stage
+# detail-route .rpt, not from these lines.
 _IGNORE_PATTERNS = [
     re.compile(r"0 errors", re.I),
     re.compile(r"error_recovery", re.I),
     re.compile(r"errors?:\s*0\b", re.I),
+    re.compile(r"\[ERROR STA-2204\]", re.I),
+    re.compile(r"\[ERROR STA-0562\]", re.I),
+    re.compile(r"\[ERROR GUI-0056\]", re.I),
+    re.compile(r"is not an object", re.I),
+    re.compile(r"is not a known keyword or flag", re.I),
+    re.compile(r"Invalid syntax for -filter", re.I),
 ]
 
 # Metric extractors (best-effort; ORFS report formats vary by version).
@@ -63,6 +92,23 @@ _RE_WS_MIN   = re.compile(r"worst\s+slack\s+min\s+(-?\d+\.?\d*)", re.I)
 _RE_SETUP_WS = re.compile(r"timing__setup__ws\"?\s*[:=]?\s*(-?\d+\.?\d*)", re.I)
 _RE_HOLD_WS  = re.compile(r"timing__hold__ws\"?\s*[:=]?\s*(-?\d+\.?\d*)", re.I)
 _RE_SETUP_TNS = re.compile(r"timing__setup__tns\"?\s*[:=]?\s*(-?\d+\.?\d*)", re.I)
+# Lines carrying a "worst slack" number that is NOT a signoff result and must
+# never be mistaken for one by the generic fallbacks below. GPL-0106
+# "Timing-driven: worst slack ..." is the global-PLACEMENT internal estimate (in
+# seconds, e-09), printed long before routing; GRT-* are global-route estimates.
+# When the real post-route STA print is absent from the log (e.g. killed by a
+# cosmetic STA error in a dump hook), these estimates are the only "worst slack"
+# matches left — and grabbing the LAST one yields a bogus WNS like -1.35 (ps?)
+# that is actually -1.35e-09 s of placement slack. Skip them.
+_RE_NONSIGNOFF = re.compile(r"GPL-0106|Timing-driven|\bGRT-\d|global\s+route", re.I)
+
+# Per-stage detail-route .rpt header emitted by janus_stage_dump.tcl. This is the
+# AUTHORITATIVE signoff-comparable timing (design fully loaded, multi-corner).
+# Format:  "wns max -466.73" / "tns max -1100706.75" / "worst slack min -87.31".
+_RE_RPT_WNS_MAX = re.compile(r"\bwns\s+max\s+(-?\d+\.?\d*(?:[eE][-+]?\d+)?)", re.I)
+_RE_RPT_TNS_MAX = re.compile(r"\btns\s+max\s+(-?\d+\.?\d*(?:[eE][-+]?\d+)?)", re.I)
+_RE_RPT_WS_MIN  = re.compile(r"worst\s+slack\s+min\s+(-?\d+\.?\d*(?:[eE][-+]?\d+)?)", re.I)
+
 _RE_DRC = re.compile(r"(?:total\s+)?(?:drc|violations?)\s*[:=]?\s*(\d+)", re.I)
 _RE_AREA = re.compile(r"(?:design|core|total)\s+area\s*[:=]?\s*(\d+\.?\d*)", re.I)
 _RE_POWER = re.compile(r"\btotal\s+power\s*[:=]?\s*(\d+\.?\d*([eE]-?\d+)?)", re.I)
@@ -239,6 +285,23 @@ class LogAnalyzer:
         for i, line in enumerate(lines):
             if any(p.search(line) for p in _IGNORE_PATTERNS):
                 continue
+
+            # Explicit tool severity tag wins over the text heuristics so a
+            # "[WARNING ...] cannot find ..." never masquerades as a failure.
+            tag = _RE_MSG_TAG.search(line)
+            if tag:
+                sev = tag.group(1).upper()
+                if sev in ("ERROR", "FATAL"):
+                    rep.failed = True
+                    ctx = lines[max(0, i - 1): i + 2]
+                    for c in ctx:
+                        if c not in rep.error_lines:
+                            rep.error_lines.append(c.rstrip())
+                elif sev == "WARNING":
+                    rep.warning_count += 1
+                # INFO/DEBUG: neither error nor warning
+                continue
+
             if any(p.search(line) for p in _ERROR_PATTERNS):
                 rep.failed = True
                 # capture a little context around the error
@@ -269,10 +332,20 @@ class LogAnalyzer:
 
     # ---- metric extraction --------------------------------------------------
     def _extract_metrics(self, text: str, rep: LogReport) -> None:
-        def grab(rx: re.Pattern, cast=float):
+        lines = text.splitlines()
+
+        def grab(rx: re.Pattern, cast=float, skip: Optional[re.Pattern] = None):
+            # Scan line by line so we can skip non-signoff lines (e.g. the
+            # GPL-0106 global-placement "worst slack" estimate) that would
+            # otherwise poison the generic fallbacks. Keep the LAST match, which
+            # for a well-formed log is the final/report value.
             m = None
-            for m in rx.finditer(text):  # take the LAST occurrence (final report)
-                pass
+            for line in lines:
+                if skip is not None and skip.search(line):
+                    continue
+                mm = rx.search(line)
+                if mm:
+                    m = mm
             if m:
                 try:
                     return cast(m.group(1))
@@ -283,13 +356,16 @@ class LogAnalyzer:
         # ---- SETUP worst slack (ps) --------------------------------------
         # Prefer the unambiguous ORFS metrics key, then OpenROAD's
         # "worst slack max", then the generic "wns"/"worst slack" fallbacks.
+        # The generic fallbacks SKIP non-signoff lines (GPL/GRT estimates) so a
+        # log whose real STA print was lost never reports a placement estimate
+        # as the WNS.
         setup = grab(_RE_SETUP_WS)
         if setup is None:
-            setup = grab(_RE_WS_MAX)
+            setup = grab(_RE_WS_MAX, skip=_RE_NONSIGNOFF)
         if setup is None:
-            setup = grab(_RE_WNS)
+            setup = grab(_RE_WNS, skip=_RE_NONSIGNOFF)
         if setup is None:
-            setup = grab(_RE_SLACK)
+            setup = grab(_RE_SLACK, skip=_RE_NONSIGNOFF)
         rep.wns_ns = setup   # field name kept for checkpoint back-compat; value is ps
 
         # ---- HOLD worst slack (ps) ---------------------------------------
@@ -330,6 +406,42 @@ class LogAnalyzer:
         return (body + "\n" + tail)[:byte_budget]
 
 
+# =============================================================================
+# Authoritative per-stage timing — parsed from the detail-route .rpt header.
+# =============================================================================
+def parse_stage_timing_rpt(text: str) -> Dict[str, Optional[float]]:
+    """Parse the signoff-comparable timing from a janus_<NN>_<stage>_paths.rpt.
+
+    These reports are written by janus_stage_dump.tcl with the design fully
+    loaded (multi-corner if enabled), so their header is the authoritative,
+    6_finish-comparable timing for the stage — unlike the run log, whose final
+    STA print can be lost to a cosmetic dump-hook error.
+
+    Only the small header (first few hundred bytes) is needed; callers should
+    pass just the head of the file (these reports can be tens of MB of path
+    bodies). Returns picoseconds for the ASAP7 PDK.
+
+        {"setup_ws": <wns max>, "setup_tns": <tns max>, "hold_ws": <worst slack min>}
+
+    Any field not found is None. STA-0562 lines (from the old invalid
+    `report_wns -hold` form) carry no number and are simply not matched.
+    """
+    def _last(rx: re.Pattern) -> Optional[float]:
+        val = None
+        for m in rx.finditer(text):
+            try:
+                val = float(m.group(1))
+            except (ValueError, IndexError):
+                pass
+        return val
+
+    return {
+        "setup_ws": _last(_RE_RPT_WNS_MAX),
+        "setup_tns": _last(_RE_RPT_TNS_MAX),
+        "hold_ws": _last(_RE_RPT_WS_MIN),
+    }
+
+
 # ---- self-test --------------------------------------------------------------
 if __name__ == "__main__":
     sample = """
@@ -366,3 +478,74 @@ if __name__ == "__main__":
     assert r3.wns_ns == 5.0 and r3.hold_ps == -2.0
     assert r3.has_timing_violation()
     print("hold-violation detection OK:", r3.headline())
+
+    # ---- cosmetic dump-hook errors must NOT be a hard failure ----------------
+    # STA-2204 / STA-0562 / GUI-0056 come from the image/report dump hooks with a
+    # zero return code and a written GDS. They used to trip \bERROR\b -> FAILED.
+    cosmetic = """
+    [INFO] detailed route completed, 0 violations
+    [ERROR GUI-0056] Invalid syntax for -filter. Use -filter attribute=value.
+    [ERROR STA-2204] get_property slow is not an object.
+    [ERROR STA-0562] report_wns -hold is not a known keyword or flag.
+    cp results/asap7/user_core_ara/stock/6_1_merged.gds .../6_final.gds
+    """
+    rc = a.analyze_text(cosmetic, "user_core_ara", "flow")
+    assert not rc.failed, f"cosmetic dump errors wrongly flagged FAILED: {rc.error_lines}"
+    print("cosmetic-error tolerance OK:", rc.headline())
+
+    # a REAL (untagged-ignore) tool ERROR still fails
+    rc2 = a.analyze_text("[ERROR ODB-0001] cannot open def file\n", "noc", "flow")
+    assert rc2.failed
+    print("real-error still fails OK:", rc2.headline())
+
+    # ---- [WARNING ...] with scary text must NOT fail -------------------------
+    # RSZ-2005 "cannot find a viable buffering solution" is emitted thousands of
+    # times as a WARNING; its text matches the \bcannot find\b heuristic but the
+    # explicit [WARNING] tag must win.
+    rsz = (
+        "[WARNING RSZ-2005] cannot find a viable buffering solution on pin X\n"
+        "[WARNING RSZ-2005] cannot find a viable buffering solution on pin Y\n"
+        "[INFO] detailed route completed, 0 violations\n"
+    )
+    rw = a.analyze_text(rsz, "user_core_ara", "flow")
+    assert not rw.failed, f"tagged WARNING wrongly flagged FAILED: {rw.error_lines}"
+    assert rw.warning_count == 2, rw.warning_count
+    print("tagged-warning tolerance OK:", rw.headline())
+
+    # untagged make/Tcl errors still fail via the text heuristics
+    rc3 = a.analyze_text("make[1]: *** [synth] Error 1\n", "noc", "flow")
+    assert rc3.failed
+    print("untagged make-error still fails OK:", rc3.headline())
+
+    # ---- GPL-0106 placement estimate must NOT become the WNS -----------------
+    # When the real STA print is absent, the only "worst slack" lines left are
+    # the global-placement estimates. The generic fallback must skip them.
+    gpl = """
+    [INFO GPL-0106] Timing-driven: worst slack -1.8682291e-09
+    [INFO GPL-0106] Timing-driven: worst slack -1.3477159e-09
+    [INFO] detailed route completed, 0 violations
+    """
+    rg = a.analyze_text(gpl, "user_core_ara", "flow")
+    assert rg.wns_ns is None, f"GPL estimate leaked into WNS: {rg.wns_ns}"
+    print("GPL-estimate guard OK (wns_ns stays None)")
+
+    # ---- authoritative .rpt header parse ------------------------------------
+    rpt_header = """JANUS per-stage timing dump -- stage=detail_route
+    ==============================================================================
+    SETUP report_wns
+    ------------------------------------------------------------------------------
+    wns max -466.73
+    SETUP report_tns
+    tns max -1100706.75
+    HOLD  report_wns -hold
+    [ERROR STA-0562] report_wns -hold is not a known keyword or flag.
+    HOLD  report_worst_slack -min
+    worst slack min -87.31
+    """
+    t = parse_stage_timing_rpt(rpt_header)
+    assert t["setup_ws"] == -466.73, t
+    assert t["setup_tns"] == -1100706.75, t
+    assert t["hold_ws"] == -87.31, t
+    print("stage-rpt parse OK:", t)
+
+    print("\nALL log_analyzer self-tests passed.")

@@ -89,7 +89,7 @@ for _p in (_HERE, os.path.join(_ROOT, "utils")):
         sys.path.insert(0, _p)
 
 from dependency_manager import DependencyManager, Status, DEFAULT_GRAPH  # noqa: E402
-from log_analyzer import LogAnalyzer, classify_failure                  # noqa: E402
+from log_analyzer import LogAnalyzer, classify_failure, parse_stage_timing_rpt  # noqa: E402
 from llm_interface import AbacusLLM                                      # noqa: E402
 from fix_applier import FixApplier                                       # noqa: E402
 from git_ops import GitOps                                               # noqa: E402
@@ -461,6 +461,39 @@ class JANUSAutonomousAgent:
             if os.path.isdir(d) and glob.glob(os.path.join(d, "*_*.rpt")):
                 return d
         return None
+
+    # ----- authoritative signoff timing from the detail-route .rpt -----------
+    def _authoritative_timing_from_rpt(self, block: str) -> Optional[Dict[str, Optional[float]]]:
+        """Read signoff-comparable WNS/TNS/hold from the detail-route report.
+
+        The run log's final STA print can be lost to a cosmetic dump-hook error,
+        leaving only global-placement estimates behind — which is exactly how a
+        clean route got mislabelled (bogus WNS, false FAIL). The per-stage dump
+        janus_08_detail_route_paths.rpt is written with the design fully loaded
+        and is the authoritative, 6_finish-comparable timing. We read only the
+        small header (these reports can be tens of MB of path bodies) and return
+        {"setup_ws", "setup_tns", "hold_ws"} in ASAP7 ps, or None if not found.
+        """
+        rdir = self._reports_dir(block)
+        if not rdir:
+            return None
+        # Prefer the detail-route dump; fall back to the latest janus_NN_*_paths.rpt.
+        cand = os.path.join(rdir, "janus_08_detail_route_paths.rpt")
+        if not os.path.isfile(cand):
+            others = sorted(glob.glob(os.path.join(rdir, "janus_*_paths.rpt")))
+            cand = others[-1] if others else None
+        if not cand or not os.path.isfile(cand):
+            return None
+        try:
+            with open(cand, "r", errors="replace") as fh:
+                head = fh.read(16384)   # header holds the summary numbers
+        except OSError:
+            return None
+        t = parse_stage_timing_rpt(head)
+        if t.get("setup_ws") is None and t.get("hold_ws") is None:
+            return None
+        t["_source"] = cand
+        return t
 
     # ----- ORFS results (.odb) directory for a block -------------------------
     def _results_dir(self, block: str) -> Optional[str]:
@@ -2045,6 +2078,22 @@ class JANUSAutonomousAgent:
             res.wns_ns = report.wns_ns
             res.hold_ps = report.hold_ps
             res.tns_ns = report.tns_ns
+
+            # Authoritative override: the run log's final STA print can be lost to
+            # a cosmetic dump-hook error, leaving only placement estimates. The
+            # detail-route .rpt header is the signoff-comparable timing — prefer
+            # it whenever present so WNS/TNS/hold never come from an estimate.
+            auth = self._authoritative_timing_from_rpt(block)
+            if auth:
+                if auth.get("setup_ws") is not None:
+                    res.wns_ns = auth["setup_ws"]
+                if auth.get("hold_ws") is not None:
+                    res.hold_ps = auth["hold_ws"]
+                if auth.get("setup_tns") is not None:
+                    res.tns_ns = auth["setup_tns"]
+                self.ui.debug(
+                    f"{block}: authoritative timing from {os.path.basename(auth['_source'])}"
+                    f" setup_ws={res.wns_ns} tns={res.tns_ns} hold_ws={res.hold_ps}")
             res.drc_violations = report.drc_violations
             res.area = report.area
             res.power = report.power
