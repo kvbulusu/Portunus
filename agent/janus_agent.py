@@ -129,6 +129,10 @@ class UI:
         self.verbose = verbose
         self.console = Console() if _RICH else None
         self._lock = threading.Lock()
+        # When the live dashboard owns the terminal we suppress routine
+        # scrolling output (info/good/step/debug) so only errors/warnings
+        # scroll above the pinned dashboard. Toggled by the agent.
+        self.quiet = False
 
     def _emit(self, msg: str, style: str = "") -> None:
         with self._lock:
@@ -138,9 +142,13 @@ class UI:
                 print(msg)
 
     def info(self, msg: str) -> None:
+        if self.quiet:
+            return
         self._emit(msg)
 
     def good(self, msg: str) -> None:
+        if self.quiet:
+            return
         self._emit(msg, "bold green")
 
     def warn(self, msg: str) -> None:
@@ -150,6 +158,8 @@ class UI:
         self._emit(msg, "bold red")
 
     def step(self, msg: str) -> None:
+        if self.quiet:
+            return
         self._emit(f"[*] {msg}", "bold cyan")
 
     def debug(self, msg: str) -> None:
@@ -202,6 +212,307 @@ def _fmt(v) -> str:
     if isinstance(v, float):
         return f"{v:+.3f}" if v < 0 or v > 0 else "0.000"
     return str(v)
+
+
+# ---------------------------------------------------------------------------- #
+# System resource monitor  (no psutil — pure /proc parsing)
+# ---------------------------------------------------------------------------- #
+class SystemMonitor:
+    """Sample system-wide CPU utilisation and memory from /proc only.
+
+    CPU%: busy-vs-total jiffy delta in /proc/stat between consecutive
+    ``cpu_percent()`` calls.  Memory: MemTotal / MemAvailable from
+    /proc/meminfo.  Every reader is wrapped so a missing or unreadable
+    /proc (non-Linux, container restriction, …) degrades to ``None`` —
+    which the dashboard renders as "N/A" — instead of raising.
+    """
+
+    def __init__(self) -> None:
+        self._prev = self._read_cpu_sample()
+
+    @staticmethod
+    def _read_cpu_sample():
+        """Return (idle_jiffies, total_jiffies) from /proc/stat, or None."""
+        try:
+            with open("/proc/stat") as fh:
+                for line in fh:
+                    if line.startswith("cpu "):
+                        parts = [int(x) for x in line.split()[1:]]
+                        if len(parts) < 4:
+                            return None
+                        # idle + iowait count as "not busy".
+                        idle = parts[3] + (parts[4] if len(parts) > 4 else 0)
+                        total = sum(parts)
+                        return idle, total
+        except (OSError, ValueError):
+            return None
+        return None
+
+    def cpu_percent(self):
+        """System CPU busy % since the previous call, or None if unavailable."""
+        cur = self._read_cpu_sample()
+        if cur is None or self._prev is None:
+            self._prev = cur
+            return None
+        idle0, total0 = self._prev
+        idle1, total1 = cur
+        self._prev = cur
+        dt = total1 - total0
+        di = idle1 - idle0
+        if dt <= 0:
+            return None
+        return max(0.0, min(100.0, 100.0 * (dt - di) / dt))
+
+    @staticmethod
+    def mem_info():
+        """Return (used_gb, total_gb, used_pct) or None if unavailable."""
+        try:
+            vals = {}
+            with open("/proc/meminfo") as fh:
+                for line in fh:
+                    key, _, rest = line.partition(":")
+                    if key in ("MemTotal", "MemAvailable"):
+                        vals[key] = int(rest.strip().split()[0])  # kB
+                    if len(vals) == 2:
+                        break
+            total_kb = vals.get("MemTotal")
+            if not total_kb:
+                return None
+            avail_kb = vals.get("MemAvailable", 0)
+            used_kb = max(0, total_kb - avail_kb)
+            gb = 1024.0 * 1024.0
+            pct = 100.0 * used_kb / total_kb if total_kb else 0.0
+            return used_kb / gb, total_kb / gb, pct
+        except (OSError, ValueError, IndexError):
+            return None
+
+
+# ---------------------------------------------------------------------------- #
+# Live in-place dashboard  (rich.live if available, else raw-ANSI fallback)
+# ---------------------------------------------------------------------------- #
+class DashboardUI:
+    """htop-style in-place dashboard for a (possibly parallel) agent run.
+
+    Reads the agent's shared live state (per-block stage / progress / elapsed /
+    WNS registered by ``_run_make``) plus a :class:`SystemMonitor` CPU+memory
+    row and repaints a single status table in place every ``refresh`` seconds.
+    Routine scrolling output is suppressed while this is active (see
+    ``UI.quiet``); only errors/warnings still scroll (rich prints them above
+    the live region).  The existing final summary table is untouched — it is
+    printed by ``_finalize`` after :meth:`stop`.
+
+    Rendering backends, in order of preference:
+      * rich.live.Live  (auto-refreshing renderable) when ``rich`` is present;
+      * a raw-ANSI (cursor-reposition + clear) repaint thread otherwise.
+    The caller only starts this on a real TTY; a piped/redirected stdout keeps
+    the classic scrolling output.
+    """
+
+    _STAGE_TOTAL = 6
+
+    def __init__(self, agent, refresh: float = 2.5) -> None:
+        self.agent = agent
+        self.refresh = max(1.0, float(refresh))
+        self.sysmon = SystemMonitor()
+        self.console = agent.ui.console if _RICH else None
+        self._rich = bool(_RICH and self.console is not None)
+        self._live = None
+        self._thread = None
+        self._stop = threading.Event()
+        self._started = False
+        # throttled system-resource cache (so a fast rich refresh does not
+        # shrink the CPU sampling window to a jumpy sub-second value)
+        self._last_sample = 0.0
+        self._cpu_cache = None
+        self._mem_cache = None
+
+    # ------------------------------------------------------------------ data
+    def _sys_strings(self):
+        now = time.time()
+        if (now - self._last_sample) >= self.refresh or self._last_sample == 0.0:
+            self._cpu_cache = self.sysmon.cpu_percent()
+            self._mem_cache = self.sysmon.mem_info()
+            self._last_sample = now
+        cpu = self._cpu_cache
+        cpu_s = f"{cpu:.0f}%" if cpu is not None else "N/A"
+        if self._mem_cache is not None:
+            used, total, pct = self._mem_cache
+            mem_s = f"{used:.1f}/{total:.1f} GB ({pct:.0f}%)"
+        else:
+            mem_s = "N/A"
+        return cpu_s, mem_s
+
+    def _rows(self):
+        a = self.agent
+        rows = []
+        for block in a.dep.graph:
+            r = a.results.get(block)
+            raw = (r.status if r else "PENDING") or "PENDING"
+            status = {"PENDING": "WAITING", "BLOCKED": "WAITING",
+                      "ABORTED": "FAILED"}.get(raw, raw)
+            stage, idx, elapsed = "-", 0, ""
+            live = a._live_blocks.get(block)
+            if live is not None:
+                stt, sl = live.get("state"), live.get("state_lock")
+                if stt is not None and sl is not None:
+                    with sl:
+                        stage = stt.get("stage", "-")
+                        idx = stt.get("stage_idx", 0)
+                    idx = max(idx, a._stage_major_index(stage))
+                t0 = live.get("t_start")
+                if live.get("active") and t0:
+                    elapsed = a._fmt_elapsed(time.time() - t0)
+                elif live.get("final_elapsed") is not None:
+                    elapsed = a._fmt_elapsed(live["final_elapsed"])
+            wns = _fmt(r.wns_ns) if r else "n/a"
+            rows.append({"block": block, "status": status, "stage": stage,
+                         "idx": idx, "elapsed": elapsed, "wns": wns})
+        return rows
+
+    @staticmethod
+    def _counts(rows):
+        c = {"DONE": 0, "RUNNING": 0, "FAILED": 0, "WAITING": 0}
+        for r in rows:
+            c[r["status"]] = c.get(r["status"], 0) + 1
+        return c
+
+    def _total_elapsed(self):
+        a = self.agent
+        return a._fmt_elapsed(time.time() - a._run_start) if a._run_start else "0:00"
+
+    # --------------------------------------------------------------- rich UI
+    def _render_group(self):
+        from rich.table import Table
+        from rich.panel import Panel
+        from rich.console import Group
+        a = self.agent
+        cpu_s, mem_s = self._sys_strings()
+        rows = self._rows()
+        c = self._counts(rows)
+        head = Table.grid(padding=(0, 2))
+        head.add_column(justify="right", style="cyan")
+        head.add_column()
+        head.add_row("blocks", f"{len(rows)}  "
+                     f"(done {c['DONE']} · running {c['RUNNING']} · "
+                     f"failed {c['FAILED']} · waiting {c['WAITING']})")
+        head.add_row("parallel / cores",
+                     f"{a.args.parallel} / {a.args.num_cores}")
+        head.add_row("total elapsed", self._total_elapsed())
+        head.add_row("CPU / MEM", f"[bold]{cpu_s}[/bold]   ·   [bold]{mem_s}[/bold]")
+        t = Table(show_lines=False, expand=False)
+        for col in ("block", "status", "stage", "progress", "elapsed", "WNS(ps)"):
+            t.add_column(col)
+        style = {"RUNNING": "green", "DONE": "bold green",
+                 "FAILED": "bold red", "WAITING": "yellow"}
+        for r in rows:
+            idx = max(0, min(self._STAGE_TOTAL, r["idx"]))
+            bar = "█" * idx + "░" * (self._STAGE_TOTAL - idx)
+            t.add_row(r["block"],
+                      f"[{style.get(r['status'], '')}]{r['status']}[/]",
+                      str(r["stage"]),
+                      f"{bar} {idx}/{self._STAGE_TOTAL}",
+                      r["elapsed"] or "", r["wns"])
+        return Group(Panel(head, title="JANUS Agent · live",
+                           border_style="cyan", expand=False), t)
+
+    # --------------------------------------------------------------- ANSI UI
+    def _ansi_frame(self):
+        a = self.agent
+        cpu_s, mem_s = self._sys_strings()
+        rows = self._rows()
+        c = self._counts(rows)
+        out = []
+        out.append("=" * 78)
+        out.append(f" JANUS Agent · live     total elapsed {self._total_elapsed()}")
+        out.append(f" blocks={len(rows)}  done={c['DONE']} running={c['RUNNING']} "
+                   f"failed={c['FAILED']} waiting={c['WAITING']}   "
+                   f"parallel={a.args.parallel} cores={a.args.num_cores}")
+        out.append(f" CPU={cpu_s}   MEM={mem_s}")
+        out.append("-" * 78)
+        out.append(f" {'block':<18}{'status':<9}{'stage':<16}"
+                   f"{'prog':<7}{'elapsed':<9}{'WNS(ps)'}")
+        for r in rows:
+            idx = max(0, min(self._STAGE_TOTAL, r["idx"]))
+            out.append(f" {r['block'][:17]:<18}{r['status']:<9}"
+                       f"{str(r['stage'])[:15]:<16}{f'{idx}/6':<7}"
+                       f"{(r['elapsed'] or ''):<9}{r['wns']}")
+        out.append("=" * 78)
+        return "\n".join(out)
+
+    def _ansi_loop(self):
+        try:
+            sys.stdout.write("\x1b[?25l")  # hide cursor
+            sys.stdout.flush()
+        except Exception:
+            pass
+        prev_lines = 0
+        while not self._stop.wait(self.refresh):
+            try:
+                frame = self._ansi_frame()
+                n = frame.count("\n") + 1
+                buf = []
+                if prev_lines:
+                    buf.append(f"\x1b[{prev_lines}A")  # cursor up
+                buf.append("\x1b[J")                   # clear to end of screen
+                buf.append(frame + "\n")
+                sys.stdout.write("".join(buf))
+                sys.stdout.flush()
+                prev_lines = n
+            except Exception:
+                break
+        try:
+            sys.stdout.write("\x1b[?25h")  # show cursor
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    # --------------------------------------------------------------- control
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        if self._rich:
+            try:
+                from rich.live import Live
+                parent = self
+
+                class _Renderable:
+                    def __rich__(self_inner):
+                        return parent._render_group()
+
+                self._live = Live(_Renderable(), console=self.console,
+                                  refresh_per_second=2, transient=False)
+                self._live.start()
+                return
+            except Exception:
+                self._live = None
+                self._rich = False
+        # ANSI fallback
+        self._thread = threading.Thread(target=self._ansi_loop,
+                                        name="janus-dashboard", daemon=True)
+        self._thread.start()
+
+    def refresh_now(self) -> None:
+        if self._live is not None:
+            try:
+                self._live.refresh()
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        if not self._started:
+            return
+        self._stop.set()
+        if self._live is not None:
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+            self._live = None
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        self._started = False
 
 
 # ---------------------------------------------------------------------------- #
@@ -357,6 +668,17 @@ class JANUSAutonomousAgent:
         }
         self._results_lock = threading.Lock()
 
+        # --- live in-place dashboard state -----------------------------------
+        # Shared registry the live DashboardUI reads: block -> {state, lock,
+        # t_start, log_path, active, final_elapsed}. _run_make registers a
+        # block when it starts running and deregisters it (recording final
+        # elapsed) when make exits, so the dashboard shows live stage/progress/
+        # elapsed for every running block even under --parallel.
+        self._run_start = None
+        self._live_blocks: Dict[str, Dict] = {}
+        self._live_lock = threading.Lock()
+        self._dashboard_ui = None
+
         # --- resume: per-block "assume-old" file list ------------------------
         # On --resume, _plan_stage_resume() records here the absolute paths of
         # every REUSED stage artifact (the resume plan's touch list: the whole
@@ -414,6 +736,58 @@ class JANUSAutonomousAgent:
             self.dash_state.update_block(block, **kw)
         except Exception:
             pass
+
+    # ----- live in-place dashboard: per-block state registry ----------------
+    def _live_register(self, block: str, state: Dict, state_lock,
+                       t_start: float, log_path: str) -> None:
+        """Expose a running block's shared progress state to the DashboardUI."""
+        with self._live_lock:
+            self._live_blocks[block] = {
+                "state": state, "state_lock": state_lock,
+                "t_start": t_start, "log_path": log_path,
+                "active": True, "final_elapsed": None,
+            }
+
+    def _live_deregister(self, block: str, final_elapsed=None) -> None:
+        """Mark a block's live entry finished (freeze its elapsed time)."""
+        with self._live_lock:
+            e = self._live_blocks.get(block)
+            if e:
+                e["active"] = False
+                if final_elapsed is not None:
+                    e["final_elapsed"] = final_elapsed
+
+    def _maybe_start_dashboard(self) -> None:
+        """Start the live in-place dashboard when appropriate.
+
+        Enabled for --progress {auto,dashboard} on a real TTY (not --verbose,
+        which streams raw ORFS output and would fight the live region). For a
+        piped/redirected stdout, or --progress {plain,quiet}, this is a no-op so
+        the classic scrolling output is preserved. Fully best-effort: a failure
+        here never breaks the run, it just falls back to scrolling output.
+        """
+        mode = getattr(self.args, "progress", "auto")
+        if mode in ("quiet", "plain"):
+            return
+        if self.args.verbose or not sys.stdout.isatty():
+            return
+        try:
+            self._dashboard_ui = DashboardUI(self)
+            self._dashboard_ui.start()
+            self.ui.quiet = True
+        except Exception as e:  # never let the dashboard break a run
+            self._dashboard_ui = None
+            self.ui.quiet = False
+            self.ui.warn(f"live dashboard unavailable ({e}); scrolling output")
+
+    def _stop_dashboard(self) -> None:
+        if self._dashboard_ui is not None:
+            try:
+                self._dashboard_ui.stop()
+            except Exception:
+                pass
+            self._dashboard_ui = None
+        self.ui.quiet = False
 
     # ----- DESIGN_CONFIG path for a block -----------------------------------
     def _config_path(self, block: str) -> str:
@@ -1888,6 +2262,10 @@ class JANUSAutonomousAgent:
         state_lock = threading.Lock()
         hb_stop = threading.Event()
 
+        # Expose this block's live progress to the in-place DashboardUI (if any)
+        # so it shows real stage/progress/elapsed even under --parallel.
+        self._live_register(block, state, state_lock, t_start, log_path)
+
         interval = max(5.0, float(getattr(self.args, "heartbeat", 30.0)))
 
         # In-place live status panel: only for a SERIAL run on a real TTY with
@@ -1896,10 +2274,14 @@ class JANUSAutonomousAgent:
         # that cannot share one rich.Live, so they fall back to the throttled
         # one-line updates. The web dashboard (if any) is fed in every mode — it
         # is independent of the console.
+        # The global in-place DashboardUI, when active, owns the terminal's
+        # live region; a per-block rich.Live panel would collide with it, so
+        # the serial panel is only used when NO global dashboard is running.
         use_live = bool(
             _RICH and self.ui.console is not None and sys.stdout.isatty()
             and int(getattr(self.args, "parallel", 1)) <= 1
             and not self.args.verbose
+            and self._dashboard_ui is None
         )
 
         def _push_dash(status: str) -> None:
@@ -2044,6 +2426,7 @@ class JANUSAutonomousAgent:
                     except Exception:
                         pass
         el = self._fmt_elapsed(time.time() - t_start)
+        self._live_deregister(block, time.time() - t_start)
         self.ui.info(f"    {block}: make exited rc={proc.returncode} after {el}")
         return proc.returncode
 
@@ -2628,12 +3011,19 @@ class JANUSAutonomousAgent:
                 self._plan_stage_resume(b)
 
         start = time.time()
+        self._run_start = start
+        # Live in-place dashboard (htop-style): per-block status + CPU/mem row.
+        # No-op when piped/redirected or --progress {plain,quiet}; see
+        # _maybe_start_dashboard. Stopped in finally so the final summary table
+        # (printed by _finalize) renders cleanly below it.
+        self._maybe_start_dashboard()
         try:
             self._main_loop()
         except KeyboardInterrupt:
             self._stop.set()
             self.ui.err("\nInterrupted — saving checkpoint and writing report...")
         finally:
+            self._stop_dashboard()
             elapsed = time.time() - start
             self._finalize(elapsed)
         # exit code: 0 if every targeted block is DONE
@@ -2658,7 +3048,13 @@ class JANUSAutonomousAgent:
                     futs = {ex.submit(self._process_and_mark, b): b for b in ready}
                     for _ in as_completed(futs):
                         pass
-            self.ui.table([self.results[b].as_row() for b in self.dep.graph])
+            # Refresh the live dashboard on each wave completion; only print the
+            # scrolling per-wave status table when NO live dashboard owns the
+            # terminal (otherwise it would scroll under the pinned dashboard).
+            if self._dashboard_ui is not None:
+                self._dashboard_ui.refresh_now()
+            else:
+                self.ui.table([self.results[b].as_row() for b in self.dep.graph])
 
     def _process_and_mark(self, block: str) -> None:
         try:
@@ -3187,6 +3583,26 @@ def build_parser() -> argparse.ArgumentParser:
                         "agent renders an in-place live status panel/table "
                         "(no scroll spam); piped output falls back to one "
                         "throttled line per interval.")
+    p.add_argument("--progress", choices=["auto", "dashboard", "plain", "quiet"],
+                   default="auto",
+                   help="console progress style. 'auto' (default) and "
+                        "'dashboard' render an in-place live dashboard — a "
+                        "per-block status table (status / stage / progress bar / "
+                        "elapsed / latest WNS) plus a system CPU+memory row, "
+                        "updating in place every ~2-3s — when stdout is a TTY, "
+                        "and fall back to the classic scrolling output when "
+                        "piped/redirected or under --verbose. 'plain' always "
+                        "uses the classic scrolling output. 'quiet' suppresses "
+                        "the live dashboard (only errors/warnings scroll; the "
+                        "final summary table is still printed).")
+    p.add_argument("--tmux", action="store_true",
+                   help="launch this agent inside a new DETACHED tmux session "
+                        "named janus-agent-<timestamp>, inheriting all other "
+                        "args and the current environment, then print the attach "
+                        "command and exit immediately. Lets you start a long run "
+                        "and detach in one command; attach later with "
+                        "`tmux attach -t janus-agent-<timestamp>` to watch the "
+                        "live dashboard. Requires tmux on PATH.")
 
     # ----- run-completion notifications (email + optional Google Drive) ---
     #   OFF by default. See asic_flow/utils/notification.py for full SMTP /
@@ -3499,9 +3915,44 @@ def _run_variants_parent(args: argparse.Namespace, argv: Optional[List[str]]) ->
     return 0 if worst == 0 else 1
 
 
+def _relaunch_in_tmux(argv: Optional[List[str]]) -> int:
+    """Re-exec this agent in a new DETACHED tmux session and exit.
+
+    The child inherits every original arg EXCEPT --tmux (dropped to avoid an
+    infinite re-launch loop) and the current environment (tmux passes the
+    caller's env to the new session). The parent prints the attach command and
+    returns immediately so the terminal is freed.
+    """
+    import shlex
+    import shutil as _sh
+    if _sh.which("tmux") is None:
+        print("error: --tmux requested but 'tmux' is not installed / not on "
+              "PATH. Install tmux or drop --tmux.", file=sys.stderr)
+        return 2
+    base_argv = list(argv) if argv is not None else list(sys.argv[1:])
+    child_argv = [a for a in base_argv if a != "--tmux"]
+    session = "janus-agent-" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    inner = [sys.executable, os.path.abspath(__file__)] + child_argv
+    cmd = ["tmux", "new-session", "-d", "-s", session, shlex.join(inner)]
+    try:
+        subprocess.run(cmd, check=True, env=os.environ.copy())
+    except (subprocess.SubprocessError, OSError) as e:
+        print(f"error: failed to launch tmux session {session!r}: {e}",
+              file=sys.stderr)
+        return 2
+    print(f"Launched in tmux session: {session}")
+    print(f"Attach with: tmux attach -t {session}")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     _apply_skips(args)
+    # --tmux: re-exec detached in a tmux session (inheriting all other args +
+    # env) and exit immediately. Done BEFORE any heavy work so nothing runs
+    # twice. The child (inside tmux) gets the live dashboard when it has a TTY.
+    if getattr(args, "tmux", False):
+        return _relaunch_in_tmux(argv)
     if args.blocks:
         bad = [b for b in args.blocks if b not in DEFAULT_GRAPH]
         if bad:
