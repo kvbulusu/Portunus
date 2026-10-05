@@ -348,6 +348,16 @@ class DashboardUI:
         for block in a.dep.graph:
             r = a.results.get(block)
             raw = (r.status if r else "PENDING") or "PENDING"
+            # BlockResult.status is seeded "PENDING" and only promoted to
+            # DONE/FAILED at completion — it is NEVER set to RUNNING. The live
+            # RUNNING state lives in the scheduler (dep.status), so while a
+            # result still reads PENDING we consult dep.status; otherwise an
+            # in-flight block is mislabeled WAITING and 'running' shows 0 even
+            # though its route job is pinning cores.
+            if raw == "PENDING":
+                sv = a.dep.status.get(block)
+                if sv is not None:
+                    raw = sv.value
             status = {"PENDING": "WAITING", "BLOCKED": "WAITING",
                       "ABORTED": "FAILED"}.get(raw, raw)
             stage, idx, elapsed = "-", 0, ""
@@ -365,8 +375,20 @@ class DashboardUI:
                 elif live.get("final_elapsed") is not None:
                     elapsed = a._fmt_elapsed(live["final_elapsed"])
             wns = _fmt(r.wns_ns) if r else "n/a"
+            # DONE means the FLOW ran to completion (6/6 stages + GDS + DRC
+            # gate) — NOT that timing closed. Flag whether setup AND hold worst
+            # slack are both >= 0 so the renderer can show CLOSED vs DONE⚠
+            # (ran-with-violations) instead of a reassuring green DONE for e.g.
+            # a -126 ps block.
+            timing_known = r is not None and (
+                r.wns_ns is not None or r.hold_ps is not None)
+            timing_closed = timing_known and not (
+                (r.wns_ns is not None and r.wns_ns < 0) or
+                (r.hold_ps is not None and r.hold_ps < 0))
             rows.append({"block": block, "status": status, "stage": stage,
-                         "idx": idx, "elapsed": elapsed, "wns": wns})
+                         "idx": idx, "elapsed": elapsed, "wns": wns,
+                         "timing_known": timing_known,
+                         "timing_closed": timing_closed})
         return rows
 
     @staticmethod
@@ -407,8 +429,17 @@ class DashboardUI:
         for r in rows:
             idx = max(0, min(self._STAGE_TOTAL, r["idx"]))
             bar = "█" * idx + "░" * (self._STAGE_TOTAL - idx)
+            st = r["status"]
+            label, st_style = st, style.get(st, "")
+            if st == "DONE" and r.get("timing_known"):
+                # ran-to-completion but split closed vs violating so a negative
+                # worst-slack block never reads as a clean green pass.
+                if r.get("timing_closed"):
+                    label, st_style = "CLOSED", "bold green"
+                else:
+                    label, st_style = "DONE⚠", "yellow"
             t.add_row(r["block"],
-                      f"[{style.get(r['status'], '')}]{r['status']}[/]",
+                      f"[{st_style}]{label}[/]",
                       str(r["stage"]),
                       f"{bar} {idx}/{self._STAGE_TOTAL}",
                       r["elapsed"] or "", r["wns"])
@@ -433,7 +464,10 @@ class DashboardUI:
                    f"{'prog':<7}{'elapsed':<9}{'WNS(ps)'}")
         for r in rows:
             idx = max(0, min(self._STAGE_TOTAL, r["idx"]))
-            out.append(f" {r['block'][:17]:<18}{r['status']:<9}"
+            st = r["status"]
+            if st == "DONE" and r.get("timing_known"):
+                st = "CLOSED" if r.get("timing_closed") else "DONE!"
+            out.append(f" {r['block'][:17]:<18}{st:<9}"
                        f"{str(r['stage'])[:15]:<16}{f'{idx}/6':<7}"
                        f"{(r['elapsed'] or ''):<9}{r['wns']}")
         out.append("=" * 78)
@@ -2737,7 +2771,13 @@ class JANUSAutonomousAgent:
             r = self.results[block]
             results_dir = self._results_dir(block)
             top_qor = {
+                # NOTE: ASAP7 reports time in PICOSECONDS. The legacy *_ns keys
+                # actually carry ps (historical misnomer); the *_ps keys below
+                # are the correctly-labelled values. Both are emitted so older
+                # readers / --resume keep working while new consumers can use
+                # the honest names. See log_analyzer.py header.
                 "wns_ns": r.wns_ns, "hold_ps": r.hold_ps, "tns_ns": r.tns_ns,
+                "wns_ps": r.wns_ns, "tns_ps": r.tns_ns,
                 "drc": r.drc_violations, "area": r.area, "power": r.power,
                 "util": r.utilization, "status": r.status, "note": r.note,
             }
