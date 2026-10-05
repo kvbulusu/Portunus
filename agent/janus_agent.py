@@ -76,7 +76,8 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (ThreadPoolExecutor, as_completed,
+                                wait, FIRST_COMPLETED)
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -3031,30 +3032,75 @@ class JANUSAutonomousAgent:
                   if r.status not in ("DONE",) and b in self.dep.graph]
         return 0 if not failed else 1
 
-    def _main_loop(self) -> None:
-        parallel = max(1, self.args.parallel)
-        while not self.dep.all_settled() and not self._stop.is_set():
-            ready = self.dep.ready()
-            if not ready:
-                break
-            for b in ready:
-                self.dep.mark(b, Status.RUNNING)
+    def _refresh_schedule_ui(self) -> None:
+        """Repaint the live dashboard, or print the scrolling status table when
+        no live dashboard owns the terminal (otherwise it scrolls under the
+        pinned dashboard)."""
+        if self._dashboard_ui is not None:
+            self._dashboard_ui.refresh_now()
+        else:
+            self.ui.table([self.results[b].as_row() for b in self.dep.graph])
 
-            if parallel == 1 or len(ready) == 1:
-                for b in ready:
-                    self._process_and_mark(b)
-            else:
-                with ThreadPoolExecutor(max_workers=parallel) as ex:
-                    futs = {ex.submit(self._process_and_mark, b): b for b in ready}
-                    for _ in as_completed(futs):
-                        pass
-            # Refresh the live dashboard on each wave completion; only print the
-            # scrolling per-wave status table when NO live dashboard owns the
-            # terminal (otherwise it would scroll under the pinned dashboard).
-            if self._dashboard_ui is not None:
-                self._dashboard_ui.refresh_now()
-            else:
-                self.ui.table([self.results[b].as_row() for b in self.dep.graph])
+    def _main_loop(self) -> None:
+        """Rolling (slot-filling) scheduler.
+
+        Previously this was a WAVE BARRIER: it computed the whole set of ready
+        blocks, launched them, and blocked until EVERY block in that wave had
+        finished before recomputing readiness. A freed worker slot therefore sat
+        idle until the slowest block in the wave drained — e.g. while `security`
+        alone kept routing, noc's released cores (and any spare --parallel slot)
+        did nothing, and blocks that security would unblock could not start.
+
+        The rolling scheduler keeps ONE persistent pool. Each time ANY block
+        finishes it frees a slot that is IMMEDIATELY refilled with whatever just
+        became ready (its deps now satisfied). Only blocks that are actually
+        in-flight are marked RUNNING, so the dashboard's running-count stays
+        honest. Dependency semantics are unchanged — a block still starts only
+        once all of its deps are DONE, and a failed dep still propagates BLOCKED.
+        """
+        parallel = max(1, self.args.parallel)
+
+        # Sequential fast-path: one block at a time in dependency order. Keeps
+        # the simplest possible control flow (and stack traces) for --parallel 1.
+        if parallel == 1:
+            while not self.dep.all_settled() and not self._stop.is_set():
+                ready = self.dep.ready()
+                if not ready:
+                    break
+                b = ready[0]
+                self.dep.mark(b, Status.RUNNING)
+                self._process_and_mark(b)
+                self._refresh_schedule_ui()
+            return
+
+        # Parallel rolling scheduler.
+        with ThreadPoolExecutor(max_workers=parallel) as ex:
+            futs: Dict = {}            # Future -> block name (in-flight only)
+            while not self._stop.is_set():
+                # Fill every free slot with blocks that are ready RIGHT NOW.
+                # ready()/mark() touch self.dep.status, which workers also mutate
+                # on completion, so take the same lock they use.
+                free = parallel - len(futs)
+                launch: List[str] = []
+                if free > 0:
+                    with self._results_lock:
+                        launch = self.dep.ready()[:free]
+                        for b in launch:
+                            self.dep.mark(b, Status.RUNNING)
+                for b in launch:
+                    futs[ex.submit(self._process_and_mark, b)] = b
+                if launch:
+                    self._refresh_schedule_ui()
+
+                if not futs:
+                    break  # nothing running and nothing ready -> settled/blocked
+
+                # Wake as soon as the NEXT block finishes (not the whole wave),
+                # free its slot, and loop to refill it immediately.
+                done, _ = wait(set(futs), return_when=FIRST_COMPLETED)
+                for f in done:
+                    futs.pop(f, None)
+                self._refresh_schedule_ui()
 
     def _process_and_mark(self, block: str) -> None:
         try:
