@@ -312,6 +312,20 @@ class FlowState:
     def is_done(self, block: str) -> bool:
         return self.block_status(block) == "DONE"
 
+    def forget_block(self, block: str, save: bool = True) -> bool:
+        """Drop ALL recorded state for ``block`` (status, per-stage ledger, QoR,
+        config/sdc snapshot, run list).  Used by the agent's --force-blocks /
+        --clean path so a forced re-run cannot reuse a stale stage record or the
+        old config snapshot.  Returns True if an entry was actually removed.
+        Best-effort / idempotent — forgetting an unknown block is a no-op."""
+        blocks = self.state.setdefault("blocks", {})
+        existed = block in blocks
+        if existed:
+            del blocks[block]
+            if save:
+                self.save()
+        return existed
+
     # ---- stage scan / update ------------------------------------------------
     @staticmethod
     def scan_stage_odbs(results_dir: str) -> List[Tuple[str, str]]:
