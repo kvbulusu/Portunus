@@ -109,6 +109,18 @@ _RE_RPT_WNS_MAX = re.compile(r"\bwns\s+max\s+(-?\d+\.?\d*(?:[eE][-+]?\d+)?)", re
 _RE_RPT_TNS_MAX = re.compile(r"\btns\s+max\s+(-?\d+\.?\d*(?:[eE][-+]?\d+)?)", re.I)
 _RE_RPT_WS_MIN  = re.compile(r"worst\s+slack\s+min\s+(-?\d+\.?\d*(?:[eE][-+]?\d+)?)", re.I)
 
+# Per-PATH-GROUP path-body markers inside the same detail-route .rpt. Each
+# individual path block carries a "Path Group: reg2reg|reg2out|in2reg|in2out",
+# a "Path Type: max" (SETUP) / "min" (HOLD), and terminates in a
+# "<slack>   slack (VIOLATED|MET)" line. Bucketing the worst slack per group
+# lets the dashboard show reg2reg vs reg2out for setup AND hold, so a block
+# whose reg2reg closes but reg2out violates (a boundary-budget signature) is
+# never read as a clean pass off the single overall WNS.
+_RE_PG_GROUP = re.compile(r"Path\s+Group:\s*(\S+)", re.I)
+_RE_PG_TYPE  = re.compile(r"Path\s+Type:\s*(max|min)", re.I)
+_RE_PG_SLACK = re.compile(
+    r"(-?\d+\.?\d*(?:[eE][-+]?\d+)?)\s+slack\s+\((?:VIOLATED|MET)\)", re.I)
+
 _RE_DRC = re.compile(r"(?:total\s+)?(?:drc|violations?)\s*[:=]?\s*(\d+)", re.I)
 _RE_AREA = re.compile(r"(?:design|core|total)\s+area\s*[:=]?\s*(\d+\.?\d*)", re.I)
 _RE_POWER = re.compile(r"\btotal\s+power\s*[:=]?\s*(\d+\.?\d*([eE]-?\d+)?)", re.I)
@@ -442,6 +454,54 @@ def parse_stage_timing_rpt(text: str) -> Dict[str, Optional[float]]:
     }
 
 
+def parse_path_group_slacks(lines) -> Dict[str, Dict[str, float]]:
+    """Worst (minimum) slack per PATH GROUP, split into setup and hold.
+
+    Unlike the summary header (which collapses everything into one setup WNS and
+    one hold WNS), this walks the per-path bodies of a detail-route paths .rpt
+    and buckets the worst slack by path group (reg2reg, reg2out, in2reg,
+    in2out, ...) separately for SETUP (Path Type: max) and HOLD (min). That is
+    what lets the dashboard say, at a glance, that e.g. reg2reg closes but
+    reg2out does not — the classic standalone-build boundary-budget signature.
+
+    `lines` is any iterable of text lines, so the caller can STREAM the file
+    (these reports are multi-MB of path bodies) instead of loading it whole.
+    Returns picoseconds for the ASAP7 PDK:
+
+        {"setup": {"reg2reg": .., "reg2out": ..},
+         "hold":  {"reg2reg": .., "reg2out": ..}}
+
+    Groups with no matched path are simply absent; both sub-dicts are empty when
+    the file carries no per-path bodies (e.g. only a header was passed).
+    """
+    out: Dict[str, Dict[str, float]] = {"setup": {}, "hold": {}}
+    cur_group: Optional[str] = None
+    cur_type: Optional[str] = None  # 'max' (setup) | 'min' (hold)
+    for line in lines:
+        mg = _RE_PG_GROUP.search(line)
+        if mg:
+            cur_group = mg.group(1)
+            continue
+        mt = _RE_PG_TYPE.search(line)
+        if mt:
+            cur_type = mt.group(1).lower()
+            continue
+        ms = _RE_PG_SLACK.search(line)
+        if ms and cur_group is not None and cur_type is not None:
+            try:
+                slk = float(ms.group(1))
+            except (ValueError, IndexError):
+                continue
+            bucket = out["setup"] if cur_type == "max" else out["hold"]
+            if cur_group not in bucket or slk < bucket[cur_group]:
+                bucket[cur_group] = slk
+            # Each path block re-declares its own Path Group / Path Type, so
+            # reset to avoid attributing a stray slack line to the wrong block.
+            cur_group = None
+            cur_type = None
+    return out
+
+
 # ---- self-test --------------------------------------------------------------
 if __name__ == "__main__":
     sample = """
@@ -547,5 +607,40 @@ if __name__ == "__main__":
     assert t["setup_tns"] == -1100706.75, t
     assert t["hold_ws"] == -87.31, t
     print("stage-rpt parse OK:", t)
+
+    # ---- per-path-group slack parse -----------------------------------------
+    # Two path blocks per section; worst (min) per group must win, and setup
+    # (Path Type: max) must never leak into hold (min) or vice-versa.
+    pg_body = """TOP-100 ANY-CLASS SETUP (max)
+    Startpoint: a
+    Path Group: reg2out
+    Path Type: max
+                      -126.61   slack (VIOLATED)
+    Startpoint: b
+    Path Group: reg2reg
+    Path Type: max
+                      274.00   slack (MET)
+    Startpoint: c
+    Path Group: reg2reg
+    Path Type: max
+                      300.00   slack (MET)
+    TOP-100 ANY-CLASS HOLD (min)
+    Startpoint: d
+    Path Group: reg2reg
+    Path Type: min
+                      23.15   slack (MET)
+    Startpoint: e
+    Path Group: reg2out
+    Path Type: min
+                      602.80   slack (MET)
+    """
+    g = parse_path_group_slacks(pg_body.splitlines())
+    assert g["setup"]["reg2out"] == -126.61, g
+    assert g["setup"]["reg2reg"] == 274.00, g   # worst of 274/300
+    assert g["hold"]["reg2reg"] == 23.15, g
+    assert g["hold"]["reg2out"] == 602.80, g
+    # header-only input yields no per-group data
+    assert parse_path_group_slacks(rpt_header.splitlines()) == {"setup": {}, "hold": {}}
+    print("path-group parse OK:", g)
 
     print("\nALL log_analyzer self-tests passed.")

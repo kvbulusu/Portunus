@@ -90,7 +90,9 @@ for _p in (_HERE, os.path.join(_ROOT, "utils")):
         sys.path.insert(0, _p)
 
 from dependency_manager import DependencyManager, Status, DEFAULT_GRAPH  # noqa: E402
-from log_analyzer import LogAnalyzer, classify_failure, parse_stage_timing_rpt  # noqa: E402
+from log_analyzer import (  # noqa: E402
+    LogAnalyzer, classify_failure, parse_stage_timing_rpt,
+    parse_path_group_slacks)
 from llm_interface import AbacusLLM                                      # noqa: E402
 from fix_applier import FixApplier                                       # noqa: E402
 from git_ops import GitOps                                               # noqa: E402
@@ -386,11 +388,47 @@ class DashboardUI:
             timing_closed = timing_known and not (
                 (r.wns_ns is not None and r.wns_ns < 0) or
                 (r.hold_ps is not None and r.hold_ps < 0))
+            # Stage-label fix: the live `stage` string is scraped from the
+            # running log and gets STUCK at whatever it last read (e.g.
+            # "1_synth (yosys)") after the block finishes. status/progress are
+            # authoritative — not the scraped stage text — so once a block is
+            # DONE pin the stage to the final step and fill the progress bar
+            # instead of showing a stale early-stage label next to 6/6 DONE.
+            if status == "DONE":
+                stage, idx = "6_final", self._STAGE_TOTAL
+            # Per-path-group worst slack (reg2reg/reg2out) for setup AND hold,
+            # so the row can show which group closes vs violates.
+            pg = r.path_groups if r else None
+            setup_groups = (pg or {}).get("setup") or {}
+            hold_groups = (pg or {}).get("hold") or {}
             rows.append({"block": block, "status": status, "stage": stage,
                          "idx": idx, "elapsed": elapsed, "wns": wns,
                          "timing_known": timing_known,
-                         "timing_closed": timing_closed})
+                         "timing_closed": timing_closed,
+                         "setup_groups": setup_groups,
+                         "hold_groups": hold_groups})
         return rows
+
+    # ----- compact per-path-group slack formatting --------------------------
+    @staticmethod
+    def _fmt_group_cell(groups: Dict[str, float], rich: bool) -> str:
+        """Render {'reg2reg':274.0,'reg2out':-126.61} as 'r2r:+274 r2o:-127'.
+
+        Shows the two signoff-critical groups the user asked for (reg2reg,
+        reg2out). A violating (negative) group is coloured red / closing green
+        when `rich`; plain text otherwise. '-' when a group has no path."""
+        def one(label: str, key: str) -> str:
+            v = groups.get(key)
+            if v is None:
+                return f"{label}:-"
+            txt = f"{label}:{v:+.0f}"
+            if rich:
+                col = "red" if v < 0 else "green"
+                return f"[{col}]{txt}[/]"
+            return txt
+        if not groups:
+            return "-"
+        return f"{one('r2r', 'reg2reg')} {one('r2o', 'reg2out')}"
 
     @staticmethod
     def _counts(rows):
@@ -423,7 +461,8 @@ class DashboardUI:
         head.add_row("total elapsed", self._total_elapsed())
         head.add_row("CPU / MEM", f"[bold]{cpu_s}[/bold]   ·   [bold]{mem_s}[/bold]")
         t = Table(show_lines=False, expand=False)
-        for col in ("block", "status", "stage", "progress", "elapsed", "WNS(ps)"):
+        for col in ("block", "status", "stage", "progress", "elapsed",
+                    "WNS(ps)", "SETUP r2r/r2o", "HOLD r2r/r2o"):
             t.add_column(col)
         style = {"RUNNING": "green", "DONE": "bold green",
                  "FAILED": "bold red", "WAITING": "yellow"}
@@ -443,7 +482,9 @@ class DashboardUI:
                       f"[{st_style}]{label}[/]",
                       str(r["stage"]),
                       f"{bar} {idx}/{self._STAGE_TOTAL}",
-                      r["elapsed"] or "", r["wns"])
+                      r["elapsed"] or "", r["wns"],
+                      self._fmt_group_cell(r.get("setup_groups") or {}, rich=True),
+                      self._fmt_group_cell(r.get("hold_groups") or {}, rich=True))
         return Group(Panel(head, title="JANUS Agent · live",
                            border_style="cyan", expand=False), t)
 
@@ -454,24 +495,28 @@ class DashboardUI:
         rows = self._rows()
         c = self._counts(rows)
         out = []
-        out.append("=" * 78)
+        out.append("=" * 104)
         out.append(f" JANUS Agent · live     total elapsed {self._total_elapsed()}")
         out.append(f" blocks={len(rows)}  done={c['DONE']} running={c['RUNNING']} "
                    f"failed={c['FAILED']} waiting={c['WAITING']}   "
                    f"parallel={a.args.parallel} cores={a.args.num_cores}")
         out.append(f" CPU={cpu_s}   MEM={mem_s}")
-        out.append("-" * 78)
+        out.append("-" * 104)
         out.append(f" {'block':<18}{'status':<9}{'stage':<16}"
-                   f"{'prog':<7}{'elapsed':<9}{'WNS(ps)'}")
+                   f"{'prog':<7}{'elapsed':<9}{'WNS(ps)':<10}"
+                   f"{'SETUP r2r/r2o':<22}{'HOLD r2r/r2o'}")
         for r in rows:
             idx = max(0, min(self._STAGE_TOTAL, r["idx"]))
             st = r["status"]
             if st == "DONE" and r.get("timing_known"):
                 st = "CLOSED" if r.get("timing_closed") else "DONE!"
+            setup_c = self._fmt_group_cell(r.get("setup_groups") or {}, rich=False)
+            hold_c = self._fmt_group_cell(r.get("hold_groups") or {}, rich=False)
             out.append(f" {r['block'][:17]:<18}{st:<9}"
                        f"{str(r['stage'])[:15]:<16}{f'{idx}/6':<7}"
-                       f"{(r['elapsed'] or ''):<9}{r['wns']}")
-        out.append("=" * 78)
+                       f"{(r['elapsed'] or ''):<9}{r['wns']:<10}"
+                       f"{setup_c:<22}{hold_c}")
+        out.append("=" * 104)
         return "\n".join(out)
 
     def _ansi_loop(self):
@@ -569,6 +614,11 @@ class BlockResult:
     note: str = ""
     llm_calls: int = 0
     timing_detail: str = ""             # rendered classified-timing breakdown
+    # Worst slack per PATH GROUP, split setup vs hold (ASAP7 ps):
+    #   {"setup": {"reg2reg": .., "reg2out": ..}, "hold": {...}}
+    # Lets the dashboard show reg2reg vs reg2out so a block whose reg2reg closes
+    # but reg2out violates is never read as a clean pass off the overall WNS.
+    path_groups: Optional[Dict[str, Dict[str, float]]] = None
 
     def as_row(self) -> Dict:
         return {
@@ -903,6 +953,41 @@ class JANUSAutonomousAgent:
             return None
         t["_source"] = cand
         return t
+
+    # ----- per-path-group signoff slacks from the detail-route .rpt -----------
+    def _path_group_timing_from_rpt(
+            self, block: str) -> Optional[Dict[str, Dict[str, float]]]:
+        """Worst slack per path group (reg2reg/reg2out/…) for setup AND hold.
+
+        The header read by _authoritative_timing_from_rpt() collapses the whole
+        design into ONE setup WNS and ONE hold WNS, so a block whose reg2reg
+        closes but whose reg2out violates (the standalone-build boundary-budget
+        signature) still shows a single red number with no hint of WHICH group
+        failed. Here we STREAM the same janus_08_detail_route_paths.rpt line by
+        line (these dumps are multi-MB of path bodies — never slurp them whole)
+        and bucket the worst slack per group, split setup vs hold, so the
+        dashboard can show both and make "is timing met?" unambiguous.
+
+        Returns {"setup": {grp: ps, …}, "hold": {grp: ps, …}} or None when no
+        report / no per-path bodies are found.
+        """
+        rdir = self._reports_dir(block)
+        if not rdir:
+            return None
+        cand = os.path.join(rdir, "janus_08_detail_route_paths.rpt")
+        if not os.path.isfile(cand):
+            others = sorted(glob.glob(os.path.join(rdir, "janus_*_paths.rpt")))
+            cand = others[-1] if others else None
+        if not cand or not os.path.isfile(cand):
+            return None
+        try:
+            with open(cand, "r", errors="replace") as fh:
+                groups = parse_path_group_slacks(fh)   # streamed, not slurped
+        except OSError:
+            return None
+        if not groups.get("setup") and not groups.get("hold"):
+            return None
+        return groups
 
     # ----- ORFS results (.odb) directory for a block -------------------------
     def _results_dir(self, block: str) -> Optional[str]:
@@ -1330,6 +1415,13 @@ class JANUSAutonomousAgent:
             stale lever overrides).
           * if source <blk>_local.mk is ABSENT but a stamped one lingers, that
             is stale too (would apply levers the user removed).
+          * source configs/constraints/<blk>.sdc (when present) must be
+            byte-identical to the stamped <design_root>/<blk>/constraint.sdc —
+            scripts/03 copies it verbatim. This is what previously let a STALE
+            noc SDC through: the design dir kept a snapshot with the 600 MHz
+            period but WITHOUT the §87 boundary-budget relief, so reg2out still
+            read -126 ps while the repo SDC would have closed it. The .mk-only
+            guard never noticed because the constraints live in the .sdc.
         """
         src_cfg = self._repo_config_path(block)
         if not src_cfg:
@@ -1367,6 +1459,27 @@ class JANUSAutonomousAgent:
             problems.append(
                 f"  STALE {block}_local.mk in stamped dir (no source): {stamped_local}\n"
                 f"     (a previous run's lever overrides would still apply)")
+
+        # Constraints SDC. scripts/03 copies configs/constraints/<blk>.sdc verbatim
+        # to <design_root>/<blk>/constraint.sdc (plain cp, no substitution), so a
+        # byte-compare is valid. THIS IS THE GAP THAT LET A STALE noc SDC THROUGH:
+        # the run carried the 600 MHz period but NOT the §87 boundary-budget relief
+        # (uncertainty 60→40, out_frac 0.30→0.15) because the design dir held a
+        # snapshot from between §86 and §87, and this guard only checked the .mk
+        # files. A stale SDC silently signs off against the WRONG constraints.
+        src_sdc = self._repo_sdc_path(block)
+        if src_sdc:
+            stamped_sdc = os.path.join(stamped_dir, "constraint.sdc")
+            if not os.path.isfile(stamped_sdc):
+                problems.append(
+                    f"  constraint.sdc MISSING from stamped dir: {stamped_sdc}\n"
+                    f"     (source constraints at {src_sdc} are NOT reaching make)")
+            elif not _same(src_sdc, stamped_sdc):
+                problems.append(
+                    f"  constraint.sdc DIFFERS: source {src_sdc}\n"
+                    f"                      vs stamped {stamped_sdc}\n"
+                    f"     (run would sign off against STALE constraints — e.g. an "
+                    f"old clock period / boundary budget)")
 
         if not problems:
             return None
@@ -2512,6 +2625,15 @@ class JANUSAutonomousAgent:
                 self.ui.debug(
                     f"{block}: authoritative timing from {os.path.basename(auth['_source'])}"
                     f" setup_ws={res.wns_ns} tns={res.tns_ns} hold_ws={res.hold_ps}")
+            # Per-path-group breakdown (reg2reg/reg2out for setup AND hold) so
+            # the dashboard shows WHICH group closes vs violates, not just the
+            # single overall WNS. Streams the same detail-route .rpt.
+            pg = self._path_group_timing_from_rpt(block)
+            if pg:
+                res.path_groups = pg
+                self.ui.debug(
+                    f"{block}: path-group slacks setup={pg.get('setup')} "
+                    f"hold={pg.get('hold')}")
             res.drc_violations = report.drc_violations
             res.area = report.area
             res.power = report.power
