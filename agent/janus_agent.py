@@ -2846,6 +2846,111 @@ class JANUSAutonomousAgent:
         except Exception as e:                       # pragma: no cover
             self.ui.debug(f"{block}: stage-resume planning skipped — {e}")
 
+    # ----- force a clean re-run (--force-blocks / --clean) -------------------
+    def _force_targets(self) -> List[str]:
+        """Resolve the set of blocks to force-clean from --clean / --force-blocks.
+
+        --clean           -> every block targeted by this run.
+        --force-blocks ...-> the named blocks (space- OR comma-separated).
+        Restricted to blocks actually in this run's dependency graph so a typo
+        can never wipe an unrelated block's results. De-duplicated, order-stable.
+        """
+        want: List[str] = []
+        if getattr(self.args, "clean", False):
+            want.extend(self.dep.graph)
+        for tok in (getattr(self.args, "force_blocks", None) or []):
+            want.extend(x for x in re.split(r"[,\s]+", tok) if x)
+        out: List[str] = []
+        seen = set()
+        for b in want:
+            if b in seen:
+                continue
+            seen.add(b)
+            if b in self.dep.graph:
+                out.append(b)
+            else:
+                self.ui.warn(f"--force-blocks: '{b}' is not in this run's blocks "
+                             f"({', '.join(self.dep.graph)}); ignoring")
+        return out
+
+    def _orfs_state_dirs(self, block: str) -> List[str]:
+        """Every on-disk ORFS state dir that belongs to ``block`` across the
+        known ORFS layouts (<block>, janus_<block>, janus/<block>) and ALL
+        FLOW_VARIANT leaves. We remove the whole per-block dir under each kind
+        (results/reports/logs/objects) — the decisive equivalent of
+        `make clean_<block>` — so no stale .odb can make ORFS make short-circuit
+        and no stale report can be mis-read as a fresh pass."""
+        if not self.flow_dir:
+            return []
+        out: List[str] = []
+        seen = set()
+        for kind in ("results", "reports", "logs", "objects"):
+            base = os.path.join(self.flow_dir, kind, "asap7")
+            cands = [
+                os.path.join(base, block),
+                os.path.join(base, f"janus_{block}"),
+                os.path.join(base, "janus", block),
+            ]
+            cands += glob.glob(os.path.join(base, f"*{block}*"))
+            for d in cands:
+                if d not in seen:
+                    seen.add(d)
+                    out.append(d)
+        return out
+
+    def _force_clean_blocks(self) -> None:
+        """Honor --force-blocks / --clean: wipe ALL on-disk ORFS state for the
+        targeted blocks AND their flow-state manifest entries, BEFORE anything is
+        scheduled, so each one genuinely re-runs from 1_synth.
+
+        WHY THIS EXISTS
+        ---------------
+        Deleting janus_flow_state.json by hand does NOT force a re-run. The state
+        that makes a block look "already built" is the on-disk
+        results/asap7/<block>/base/*.odb tree — ORFS `make` is mtime-driven and
+        skips any stage whose .odb is newer than its prerequisites. Worse, on
+        --resume with NO stored config snapshot (exactly what you get right after
+        deleting the JSON), resume_plan() falls back to "reuse on-disk stages
+        as-is" and TOUCHES every .odb newer than config.mk, so make jumps
+        straight to 6_final and the block reports DONE instantly. Removing the
+        on-disk results/reports/logs/objects dirs (and the manifest record) is
+        the only thing that reliably defeats both paths."""
+        targets = self._force_targets()
+        if not targets:
+            return
+        self.ui.step(f"force-clean: wiping ORFS state for "
+                     f"{', '.join(targets)} (will re-run from 1_synth)")
+        for block in targets:
+            removed: List[str] = []
+            for d in self._orfs_state_dirs(block):
+                try:
+                    if os.path.isdir(d):
+                        shutil.rmtree(d)
+                        removed.append(d)
+                except OSError as e:
+                    self.ui.warn(f"{block}: force-clean could not remove {d}: {e}")
+            # drop the manifest record so --resume can't reuse a stale stage
+            # ledger or the old config/sdc snapshot.
+            if self.manifest is not None:
+                try:
+                    if self.manifest.forget_block(block):
+                        self.ui.debug(f"{block}: force-clean cleared manifest entry")
+                except Exception as e:                # pragma: no cover
+                    self.ui.warn(f"{block}: force-clean could not clear manifest "
+                                 f"entry — {e}")
+            # keep the live dashboard / results map honest
+            if block in self.results:
+                self.results[block].status = "PENDING"
+                self.results[block].note = "force-clean (rebuild from synthesis)"
+            if removed:
+                self.ui.good(f"{block}: force-clean removed {len(removed)} ORFS "
+                             f"state dir(s)")
+                for d in removed:
+                    self.ui.debug(f"   rm -rf {d}")
+            else:
+                self.ui.info(f"{block}: force-clean — no on-disk ORFS state found "
+                             "(already clean)")
+
     # ----- git commit of an applied LLM fix ----------------------------------
     def _commit_fixes(self, block: str, attempt: int, llm_res, applied) -> None:
         """Commit the repo-source files an LLM fix touched (config/sdc mirrors
@@ -3027,6 +3132,12 @@ class JANUSAutonomousAgent:
             for b in self.dep.graph:
                 self.ui.info(f"  ({b}) cd {self.flow_dir} && " + " ".join(self._make_cmd(b)))
             return 0
+
+        # honor --force-blocks / --clean FIRST (before resume or scheduling):
+        # wipe the on-disk ORFS state + manifest entry for the forced blocks so
+        # they genuinely rebuild from 1_synth. This must precede --resume, which
+        # would otherwise reuse/touch the very .odb we are about to remove.
+        self._force_clean_blocks()
 
         # honor --resume: consult the GLOBAL manifest (survives a fresh
         # --run-dir), fall back to the per-run checkpoint. A block that is fully
@@ -3513,6 +3624,22 @@ def build_parser() -> argparse.ArgumentParser:
                         "(default: <asic_flow>/.janus_state/janus_flow_state.json, "
                         "or $JANUS_MANIFEST). It lives OUTSIDE every run-dir so "
                         "stage/QoR/cleanup state persists across runs.")
+    p.add_argument("--force-blocks", nargs="+", default=None, metavar="BLOCK",
+                   help="force a clean re-run of these blocks from 1_synth. "
+                        "Wipes ALL their on-disk ORFS state "
+                        "(flow/{results,reports,logs,objects}/asap7/<block>/...) "
+                        "AND their flow-state manifest entry, BEFORE scheduling. "
+                        "This is what actually forces a rebuild: deleting "
+                        "janus_flow_state.json alone does NOT, because ORFS make "
+                        "is mtime-driven on the on-disk *.odb (and --resume "
+                        "re-touches them when no config snapshot is stored). "
+                        "Accepts space- or comma-separated names; only blocks in "
+                        "this run's --blocks are affected.")
+    p.add_argument("--clean", action="store_true",
+                   help="force a clean re-run of EVERY targeted block (shorthand "
+                        "for --force-blocks <all --blocks>). Wipes their on-disk "
+                        "ORFS state + manifest entries so the run starts from "
+                        "1_synth. Combine with --blocks to scope it.")
     p.add_argument("--status", action="store_true",
                    help="print the flow-state manifest (per-block stages done, "
                         "per-stage/final QoR, all run/log/report dirs, and "
