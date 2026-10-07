@@ -1,0 +1,36 @@
+# SYNTHETIC FIXTURE (not a captured report). Reproduces the format of
+# janus_stage_dump.tcl's detail-route dump and the hold value the dashboard
+# showed for agent_domain run 20261007_104052 (hold reg2reg -122.25 ps,
+# GRT/estimated RC, pre-OpenRCX). Path bodies are abbreviated.
+==========================================================================
+detail_route report_tns
+--------------------------------------------------------------------------
+tns max 0.00
+==========================================================================
+detail_route report_wns
+--------------------------------------------------------------------------
+wns max 0.00
+==========================================================================
+detail_route report_worst_slack -min
+--------------------------------------------------------------------------
+worst slack min -122.25
+
+Startpoint: g_core[2].u_core.u_cv32e40p.core_i.id_stage_i/controller_i/ctrl_fsm_cs[4]$_DFF_PN0_
+Path Group: reg2reg
+Path Type: min
+                               -122.25   slack (VIOLATED)
+
+Startpoint: u_axi/id_q[5]$_DFFE_PN0P_
+Path Group: reg2out
+Path Type: min
+                               2071.40   slack (MET)
+
+Startpoint: g_core[0].u_core.u_cv32e40p.core_i.id_stage_i/alu_operand_b_ex_o[9]$_DFFE_PN0P_
+Path Group: reg2reg
+Path Type: max
+                               1160.02   slack (MET)
+
+Startpoint: g_core[3].u_core.u_cv32e40p.core_i.id_stage_i/alu_operand_a_ex_o[9]$_DFFE_PN0P_
+Path Group: reg2out
+Path Type: max
+                                528.90   slack (MET)

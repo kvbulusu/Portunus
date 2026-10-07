@@ -12,9 +12,11 @@ serialized to JSON and/or trimmed to a byte budget before being sent to the LLM.
 
 from __future__ import annotations
 
+import glob
+import os
 import re
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 # Phrases that indicate a hard failure in ORFS / OpenROAD / Yosys output.
@@ -116,7 +118,8 @@ _RE_RPT_WS_MIN  = re.compile(r"worst\s+slack\s+min\s+(-?\d+\.?\d*(?:[eE][-+]?\d+
 # lets the dashboard show reg2reg vs reg2out for setup AND hold, so a block
 # whose reg2reg closes but reg2out violates (a boundary-budget signature) is
 # never read as a clean pass off the single overall WNS.
-_RE_PG_GROUP = re.compile(r"Path\s+Group:\s*(\S+)", re.I)
+# Group names may contain spaces ("gated clock"), so capture to end of line.
+_RE_PG_GROUP = re.compile(r"Path\s+Group:\s*(\S.*?)\s*$", re.I)
 _RE_PG_TYPE  = re.compile(r"Path\s+Type:\s*(max|min)", re.I)
 _RE_PG_SLACK = re.compile(
     r"(-?\d+\.?\d*(?:[eE][-+]?\d+)?)\s+slack\s+\((?:VIOLATED|MET)\)", re.I)
@@ -500,6 +503,141 @@ def parse_path_group_slacks(lines) -> Dict[str, Dict[str, float]]:
             cur_group = None
             cur_type = None
     return out
+
+
+# =============================================================================
+# FINAL signoff timing — ORFS 6_finish.rpt (post-route, OpenRCX-extracted).
+# =============================================================================
+# Why this exists: janus_08_detail_route_paths.rpt is dumped by the post-detail-
+# route hook BEFORE 6_final runs OpenRCX; its parasitics are the flow's
+# GRT/placement estimate, not the extracted routed RC. On agent_domain run
+# 20261007_104052 it reported hold reg2reg -122 ps while 6_finish.rpt (same
+# netlist, RCX-extracted, multi-corner) reported +9.95 ps and
+# "hold violation count 0". The dashboard must read the latter when it exists.
+_RE_FIN_COUNT = re.compile(
+    r"^\s*(setup|hold|max\s+slew|max\s+cap|max\s+fanout)\s+violation\s+count\s+(\d+)",
+    re.I)
+_RE_FIN_WS_MAX = re.compile(r"^\s*worst\s+slack\s+max\s+(-?\d+\.?\d*(?:[eE][-+]?\d+)?)", re.I)
+_RE_FIN_FMAX = re.compile(r"period_min\s*=\s*(-?\d+\.?\d*)\s+fmax\s*=\s*(-?\d+\.?\d*)", re.I)
+
+FINAL_RPT_NAME = "6_finish.rpt"
+GRT_RPT_NAME = "janus_08_detail_route_paths.rpt"
+
+
+def parse_final_sta_rpt(lines) -> Dict[str, object]:
+    """One streamed pass over an ORFS 6_finish.rpt.
+
+    Returns (ASAP7 ps; None when absent):
+        setup_ws   'wns max'  (ORFS clamps WNS at 0 when met)
+        setup_tns  'tns max'
+        setup_worst 'worst slack max' (true worst setup slack, may be > 0)
+        hold_ws    'worst slack min' if printed, else min over the per-group
+                   hold path bodies (6_finish prints no 'worst slack min')
+        fmax_mhz, counts {setup, hold, max_slew, max_cap, max_fanout},
+        path_groups {"setup": {...}, "hold": {...}}
+    """
+    head: List[str] = []
+    counts: Dict[str, int] = {}
+    setup_worst: Optional[float] = None
+    fmax: Optional[float] = None
+
+    def _tee():
+        nonlocal setup_worst, fmax
+        for i, line in enumerate(lines):
+            if i < 400:
+                head.append(line)
+            mc = _RE_FIN_COUNT.search(line)
+            if mc:
+                counts[re.sub(r"\s+", "_", mc.group(1).lower())] = int(mc.group(2))
+            mw = _RE_FIN_WS_MAX.search(line)
+            if mw and setup_worst is None:
+                setup_worst = float(mw.group(1))
+            mf = _RE_FIN_FMAX.search(line)
+            if mf and fmax is None:
+                fmax = float(mf.group(2))
+            yield line
+
+    groups = parse_path_group_slacks(_tee())
+    hdr = parse_stage_timing_rpt("".join(head))
+    hold = hdr.get("hold_ws")
+    if hold is None and groups.get("hold"):
+        hold = min(groups["hold"].values())
+    return {
+        "setup_ws": hdr.get("setup_ws"),
+        "setup_tns": hdr.get("setup_tns"),
+        "setup_worst": setup_worst,
+        "hold_ws": hold,
+        "fmax_mhz": fmax,
+        "counts": counts,
+        "path_groups": groups,
+    }
+
+
+def select_timing_report(rdir: Optional[str]) -> Optional[Tuple[str, str]]:
+    """Pick the most authoritative timing report in an ORFS reports dir.
+
+    Returns (path, source) with source "6_finish" (post-route RCX signoff) or
+    "janus_08" (detail-route dump, GRT/estimated RC) / "janus_NN" (older stage
+    dump), or None. 6_finish wins only if it is at least as new as the janus_08
+    dump, so a stale 6_finish left over from a previous run is never paired with
+    a newer, failed-before-finish route.
+    """
+    if not rdir or not os.path.isdir(rdir):
+        return None
+    fin = os.path.join(rdir, FINAL_RPT_NAME)
+    grt = os.path.join(rdir, GRT_RPT_NAME)
+    if not os.path.isfile(grt):
+        others = sorted(glob.glob(os.path.join(rdir, "janus_*_paths.rpt")))
+        grt = others[-1] if others else ""
+    has_fin, has_grt = os.path.isfile(fin), bool(grt) and os.path.isfile(grt)
+    if has_fin and (not has_grt or os.path.getmtime(fin) >= os.path.getmtime(grt)):
+        return fin, "6_finish"
+    if has_grt:
+        tag = os.path.basename(grt).split("_")
+        return grt, ("janus_" + tag[1]) if len(tag) > 1 else "janus"
+    return None
+
+
+def read_block_timing(rdir: Optional[str]) -> Optional[Dict[str, object]]:
+    """Authoritative block timing for the dashboard/result, source-tagged.
+
+    Prefers 6_finish.rpt (final extraction); falls back to the janus_08 GRT-RC
+    dump. Result keys: setup_ws, setup_tns, hold_ws, path_groups, counts,
+    setup_worst, fmax_mhz, _source (path), source ("6_finish"|"janus_08"|…),
+    final (bool). None when nothing parseable is found.
+    """
+    sel = select_timing_report(rdir)
+    if not sel:
+        return None
+    path, source = sel
+    try:
+        with open(path, "r", errors="replace") as fh:
+            if source == "6_finish":
+                t = parse_final_sta_rpt(fh)
+            else:
+                t = {"counts": {}, "setup_worst": None, "fmax_mhz": None}
+                head = fh.read(16384)
+                t.update(parse_stage_timing_rpt(head))
+                fh.seek(0)
+                t["path_groups"] = parse_path_group_slacks(fh)
+    except OSError:
+        return None
+    if t.get("setup_ws") is None and t.get("hold_ws") is None \
+            and not (t.get("path_groups") or {}).get("hold"):
+        return None
+    t["_source"] = path
+    t["source"] = source
+    t["final"] = source == "6_finish"
+    return t
+
+
+def timing_verdict(setup_ws: Optional[float], hold_ws: Optional[float]) -> str:
+    """'CLOSED' (setup AND hold worst slack >= 0), 'VIOLATED', or 'UNKNOWN'."""
+    if setup_ws is None and hold_ws is None:
+        return "UNKNOWN"
+    if (setup_ws is not None and setup_ws < 0) or (hold_ws is not None and hold_ws < 0):
+        return "VIOLATED"
+    return "CLOSED"
 
 
 # ---- self-test --------------------------------------------------------------
