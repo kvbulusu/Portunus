@@ -3226,8 +3226,70 @@ class JANUSAutonomousAgent:
              "  only spent diagnosing real failures. All PPA targets in the\n"
              "  configs are DESIGN-INTENT, not measured results."))
 
-    # ----- main entry --------------------------------------------------------
+    # ----- read-only slew triage on an already-finished block ----------------
+    def _triage_slew_cmd(self, block: str, script: str) -> List[str]:
+        """The block's EXACT build make line (same DESIGN_CONFIG, FLOW_VARIANT,
+        CORNER/CORNERS lib sets, NUM_CORES, --extra-make) + `run RUN_SCRIPT=`.
+        Reusing _make_cmd guarantees the triage loads the same liberty corners
+        the 6_finish STA used, so its slew numbers are comparable."""
+        return self._make_cmd(block) + ["run", f"RUN_SCRIPT={script}"]
+
+    def _triage_slew(self) -> int:
+        """--triage-slew: run asic_flow/scripts/slew_triage.tcl on each block's
+        existing 6_final.odb. READ-ONLY: no stamp check, no re-stamp, no build,
+        no manifest/checkpoint update, no dashboard. Safe while another block
+        (e.g. user_core_ara) is running — it uses one OpenROAD process."""
+        script = os.path.join(_ROOT, "scripts", "slew_triage.tcl")
+        blocks = list(self.args.blocks or [])
+        if not blocks:
+            self.ui.err("--triage-slew needs --blocks <block> (e.g. --blocks agent_domain)")
+            return 2
+        if not os.path.isfile(script):
+            self.ui.err(f"slew triage script not found: {script}")
+            return 2
+        if not self.flow_dir or not os.path.isdir(self.flow_dir):
+            self.ui.err(f"ORFS flow dir not found: {self.flow_dir or '(unset — pass --orfs)'}")
+            return 2
+        os.makedirs(self.run_dir, exist_ok=True)
+        rc_all = 0
+        for b in blocks:
+            res = self._results_dir(b) if hasattr(self, "_results_dir") else None
+            odb = os.path.join(res, "6_final.odb") if res else None
+            if not odb or not os.path.exists(odb):
+                self.ui.err(f"{b}: no 6_final.odb found (looked in {res or 'n/a'}) — "
+                            "the block must have finished 6_final first; skipping.")
+                rc_all = rc_all or 3
+                continue
+            if not os.path.exists(os.path.join(res, "6_final.spef")):
+                self.ui.warn(f"{b}: 6_final.spef missing — triage will fall back to "
+                             "GRT-estimated parasitics (numbers won't match 6_finish).")
+            cmd = self._triage_slew_cmd(b, script)
+            log_path = os.path.join(self.run_dir, f"slew_triage_{b}.log")
+            self.ui.step(f"{b}: slew triage (read-only) on {odb}")
+            self.ui.info(f"  cd {self.flow_dir} && {' '.join(cmd)}")
+            if self.args.dry_run:
+                continue
+            with open(log_path, "wb", buffering=0) as logf:
+                proc = subprocess.run(cmd, cwd=self.flow_dir, stdout=logf,
+                                      stderr=subprocess.STDOUT)
+            janus_lines = []
+            try:
+                with open(log_path, "r", errors="replace") as fh:
+                    janus_lines = [ln.rstrip() for ln in fh if ln.startswith("JANUS_SLEW_")]
+            except OSError:
+                pass
+            for ln in [l for l in janus_lines if not l.startswith("JANUS_SLEW_NET")]:
+                self.ui.info(f"  {ln}")
+            n_net = sum(1 for l in janus_lines if l.startswith("JANUS_SLEW_NET"))
+            msg = f"{b}: triage rc={proc.returncode}, {n_net} net rows -> {log_path}"
+            (self.ui.good if proc.returncode == 0 else self.ui.warn)(msg)
+            if proc.returncode != 0:
+                rc_all = rc_all or proc.returncode
+        return rc_all
+
     def run(self) -> int:
+        if getattr(self.args, "triage_slew", False):
+            return self._triage_slew()
         self._preflight()
         if self.dashboard is not None:
             try:
@@ -3778,6 +3840,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "stamp is intentionally different from source.")
     p.add_argument("--dry-run", action="store_true",
                    help="print the make commands but do not run anything")
+    p.add_argument("--triage-slew", action="store_true",
+                   help="READ-ONLY: run asic_flow/scripts/slew_triage.tcl on the "
+                        "existing 6_final.odb of each --blocks block, using the "
+                        "block's exact build make line (corners, FLOW_VARIANT, "
+                        "NUM_CORES). No stamp check, no build, no manifest update. "
+                        "Log -> <run-dir>/slew_triage_<block>.log. Combine with "
+                        "--dry-run to only print the make command.")
     p.add_argument("--estimate", action="store_true",
                    help="print the execution plan + rough cost estimate, then exit")
     p.add_argument("--no-llm", action="store_true",
