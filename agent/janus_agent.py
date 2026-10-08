@@ -384,7 +384,10 @@ class DashboardUI:
             # a -126 ps block.
             verdict = timing_verdict(r.wns_ns, r.hold_ps) if r else "UNKNOWN"
             timing_known = verdict != "UNKNOWN"
-            timing_closed = verdict == "CLOSED"
+            # §71: macros loaded without liberty => macro-pin paths untimed;
+            # the slack numbers are incomplete, so never show CLOSED.
+            nolib = a._macro_lib_missing(block) if status == "DONE" else []
+            timing_closed = verdict == "CLOSED" and not nolib
             # "final" = numbers from 6_finish (RCX signoff); "est" = janus_08
             # GRT-RC fallback, shown so an estimate is never mistaken for signoff.
             src = (r.timing_source if r else None) or ""
@@ -407,6 +410,7 @@ class DashboardUI:
                          "timing_known": timing_known,
                          "timing_closed": timing_closed,
                          "src_tag": src_tag,
+                         "nolib": nolib,
                          "setup_groups": setup_groups,
                          "hold_groups": hold_groups})
         return rows
@@ -480,6 +484,8 @@ class DashboardUI:
                     label, st_style = "CLOSED", "bold green"
                 else:
                     label, st_style = "DONE⚠", "yellow"
+                if r.get("nolib"):
+                    label, st_style = "DONE⚠(nolib)", "bold red"
                 if r.get("src_tag") == "est":
                     label += "(est)"
             t.add_row(r["block"],
@@ -514,6 +520,8 @@ class DashboardUI:
             st = r["status"]
             if st == "DONE" and r.get("timing_known"):
                 st = "CLOSED" if r.get("timing_closed") else "DONE!"
+                if r.get("nolib"):
+                    st = "NOLIB!"      # macros had no liberty: timing incomplete
                 if r.get("src_tag") == "est":
                     st += "~"          # ~ = GRT-RC estimate, not 6_finish signoff
             setup_c = self._fmt_group_cell(r.get("setup_groups") or {}, rich=False)
@@ -910,6 +918,37 @@ class JANUSAutonomousAgent:
     def _block_log(self, block: str) -> str:
         return os.path.join(self.run_dir, f"{block}.log")
 
+    _NOLIB_RE = re.compile(r"ORD-2011\]? LEF master (\S+) has no liberty cell"
+                           r"|master (\S+) has signal pins but no liberty cell")
+
+    def _macro_lib_missing(self, block: str) -> List[str]:
+        """§71: macro masters OpenROAD loaded WITHOUT liberty (timing black
+        boxes) per the block log. Non-empty => every macro-pin path was untimed,
+        so the block's WNS/hold can NOT be called CLOSED. Cached on log mtime."""
+        path = self._block_log(block)
+        try:
+            mt = os.path.getmtime(path)
+        except OSError:
+            return []
+        cache = self.__dict__.setdefault("_nolib_cache", {})
+        hit = cache.get(block)
+        if hit and hit[0] == mt:
+            return hit[1]
+        masters: List[str] = []
+        try:
+            with open(path, "r", errors="replace") as fh:
+                for ln in fh:
+                    if "liberty cell" in ln:
+                        m = self._NOLIB_RE.search(ln)
+                        if m:
+                            nm = m.group(1) or m.group(2)
+                            if nm not in masters:
+                                masters.append(nm)
+        except OSError:
+            pass
+        cache[block] = (mt, masters)
+        return masters
+
     # ----- ORFS stage-report directory for a block ---------------------------
     def _reports_dir(self, block: str) -> Optional[str]:
         """Locate the ORFS reports dir for a block (holds 2_floorplan…6_finish).
@@ -1099,10 +1138,24 @@ class JANUSAutonomousAgent:
         # liberty memory vs single-corner; it is meant for the resized box. Set
         # JANUS_MULTICORNER=0 to fall back to single-corner CORNER=WC (setup
         # only; hold then needs a separate BC pass) on a memory-starved box.
+        #
+        # §71 FIX — MACRO LIBERTY WAS DROPPED IN MULTI-CORNER MODE. ORFS
+        # read_liberty.tcl reads ONLY $<CORNER>_LIB_FILES when CORNERS is set;
+        # the block config's `ADDITIONAL_LIBS += fakeram*.lib / <child>.lib`
+        # only lands in LIB_FILES (single-corner path). Passing the bare
+        # platform lists here therefore loaded the SRAM / hardened-child
+        # macros as LEF-only black boxes in EVERY OpenROAD stage (proof:
+        # agent_domain run 20261007_104052 log "[WARNING ORD-2011] LEF master
+        # fakeram7_8192x8 has no liberty cell" + "master fakeram7_* has signal
+        # pins but no liberty cell" at 6_report; slew_triage read_liberty list
+        # had zero fakeram libs). Every path launched/captured at a macro pin
+        # was untimed (slack INF) — never timing-repaired, never in WNS.
+        # The macro .libs are single-corner; reading the same file into both
+        # corners is the standard academic-PDK practice (ihp/sky130 do this).
         if os.environ.get("JANUS_MULTICORNER", "1") != "0":
             cmd += ["CORNERS=slow fast",
-                    "SLOW_LIB_FILES=$(WC_NLDM_LIB_FILES)",
-                    "FAST_LIB_FILES=$(BC_NLDM_LIB_FILES)"]
+                    "SLOW_LIB_FILES=$(WC_NLDM_LIB_FILES) $(ADDITIONAL_LIBS)",
+                    "FAST_LIB_FILES=$(BC_NLDM_LIB_FILES) $(ADDITIONAL_LIBS)"]
 
         # ---- enable scan flops in the cell library (DFT) ---------------------
         # The ASAP7 platform FORBIDS the scan flops by default:
@@ -2645,6 +2698,11 @@ class JANUSAutonomousAgent:
                 # strict improvement). Runs BEFORE abstract so the abstract is
                 # emitted from the adopted database.
                 self._post_route_opt(block)
+                _nolib = self._macro_lib_missing(block)
+                if _nolib:
+                    self.ui.err(f"{block}: §71 macros loaded WITHOUT liberty in OpenROAD "
+                                f"({', '.join(_nolib)}) — macro-pin paths were UNTIMED; "
+                                "WNS/hold are incomplete. Do NOT sign off this result.")
                 # Emit the block's .lef/.lib abstract so janus_soc_top can
                 # consume it as a hard macro (hierarchical bottom-up assembly).
                 self._run_abstract(block)
