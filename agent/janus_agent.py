@@ -91,8 +91,7 @@ for _p in (_HERE, os.path.join(_ROOT, "utils")):
 
 from dependency_manager import DependencyManager, Status, DEFAULT_GRAPH  # noqa: E402
 from log_analyzer import (  # noqa: E402
-    LogAnalyzer, classify_failure, parse_stage_timing_rpt,
-    parse_path_group_slacks)
+    LogAnalyzer, classify_failure, read_block_timing, timing_verdict)
 from llm_interface import AbacusLLM                                      # noqa: E402
 from fix_applier import FixApplier                                       # noqa: E402
 from git_ops import GitOps                                               # noqa: E402
@@ -383,11 +382,16 @@ class DashboardUI:
             # slack are both >= 0 so the renderer can show CLOSED vs DONE⚠
             # (ran-with-violations) instead of a reassuring green DONE for e.g.
             # a -126 ps block.
-            timing_known = r is not None and (
-                r.wns_ns is not None or r.hold_ps is not None)
-            timing_closed = timing_known and not (
-                (r.wns_ns is not None and r.wns_ns < 0) or
-                (r.hold_ps is not None and r.hold_ps < 0))
+            verdict = timing_verdict(r.wns_ns, r.hold_ps) if r else "UNKNOWN"
+            timing_known = verdict != "UNKNOWN"
+            # §71: macros loaded without liberty => macro-pin paths untimed;
+            # the slack numbers are incomplete, so never show CLOSED.
+            nolib = a._macro_lib_missing(block) if status == "DONE" else []
+            timing_closed = verdict == "CLOSED" and not nolib
+            # "final" = numbers from 6_finish (RCX signoff); "est" = janus_08
+            # GRT-RC fallback, shown so an estimate is never mistaken for signoff.
+            src = (r.timing_source if r else None) or ""
+            src_tag = "" if not src else ("final" if src == "6_finish" else "est")
             # Stage-label fix: the live `stage` string is scraped from the
             # running log and gets STUCK at whatever it last read (e.g.
             # "1_synth (yosys)") after the block finishes. status/progress are
@@ -405,6 +409,8 @@ class DashboardUI:
                          "idx": idx, "elapsed": elapsed, "wns": wns,
                          "timing_known": timing_known,
                          "timing_closed": timing_closed,
+                         "src_tag": src_tag,
+                         "nolib": nolib,
                          "setup_groups": setup_groups,
                          "hold_groups": hold_groups})
         return rows
@@ -478,6 +484,10 @@ class DashboardUI:
                     label, st_style = "CLOSED", "bold green"
                 else:
                     label, st_style = "DONE⚠", "yellow"
+                if r.get("nolib"):
+                    label, st_style = "DONE⚠(nolib)", "bold red"
+                if r.get("src_tag") == "est":
+                    label += "(est)"
             t.add_row(r["block"],
                       f"[{st_style}]{label}[/]",
                       str(r["stage"]),
@@ -510,6 +520,10 @@ class DashboardUI:
             st = r["status"]
             if st == "DONE" and r.get("timing_known"):
                 st = "CLOSED" if r.get("timing_closed") else "DONE!"
+                if r.get("nolib"):
+                    st = "NOLIB!"      # macros had no liberty: timing incomplete
+                if r.get("src_tag") == "est":
+                    st += "~"          # ~ = GRT-RC estimate, not 6_finish signoff
             setup_c = self._fmt_group_cell(r.get("setup_groups") or {}, rich=False)
             hold_c = self._fmt_group_cell(r.get("hold_groups") or {}, rich=False)
             out.append(f" {r['block'][:17]:<18}{st:<9}"
@@ -619,6 +633,12 @@ class BlockResult:
     # Lets the dashboard show reg2reg vs reg2out so a block whose reg2reg closes
     # but reg2out violates is never read as a clean pass off the overall WNS.
     path_groups: Optional[Dict[str, Dict[str, float]]] = None
+    # Which report the WNS/hold/path-group numbers came from: "6_finish"
+    # (post-route OpenRCX signoff) or "janus_08" (GRT-RC estimate fallback).
+    timing_source: Optional[str] = None
+    # Final-STA design-rule counts (6_finish only; None when not available).
+    max_slew_violations: Optional[int] = None
+    max_cap_violations: Optional[int] = None
 
     def as_row(self) -> Dict:
         return {
@@ -627,6 +647,9 @@ class BlockResult:
             "drc_violations": self.drc_violations, "area": self.area,
             "power": self.power, "utilization": self.utilization,
             "log_path": self.log_path, "note": self.note, "llm_calls": self.llm_calls,
+            "timing_source": self.timing_source,
+            "max_slew_violations": self.max_slew_violations,
+            "max_cap_violations": self.max_cap_violations,
         }
 
 
@@ -895,6 +918,37 @@ class JANUSAutonomousAgent:
     def _block_log(self, block: str) -> str:
         return os.path.join(self.run_dir, f"{block}.log")
 
+    _NOLIB_RE = re.compile(r"ORD-2011\]? LEF master (\S+) has no liberty cell"
+                           r"|master (\S+) has signal pins but no liberty cell")
+
+    def _macro_lib_missing(self, block: str) -> List[str]:
+        """§71: macro masters OpenROAD loaded WITHOUT liberty (timing black
+        boxes) per the block log. Non-empty => every macro-pin path was untimed,
+        so the block's WNS/hold can NOT be called CLOSED. Cached on log mtime."""
+        path = self._block_log(block)
+        try:
+            mt = os.path.getmtime(path)
+        except OSError:
+            return []
+        cache = self.__dict__.setdefault("_nolib_cache", {})
+        hit = cache.get(block)
+        if hit and hit[0] == mt:
+            return hit[1]
+        masters: List[str] = []
+        try:
+            with open(path, "r", errors="replace") as fh:
+                for ln in fh:
+                    if "liberty cell" in ln:
+                        m = self._NOLIB_RE.search(ln)
+                        if m:
+                            nm = m.group(1) or m.group(2)
+                            if nm not in masters:
+                                masters.append(nm)
+        except OSError:
+            pass
+        cache[block] = (mt, masters)
+        return masters
+
     # ----- ORFS stage-report directory for a block ---------------------------
     def _reports_dir(self, block: str) -> Optional[str]:
         """Locate the ORFS reports dir for a block (holds 2_floorplan…6_finish).
@@ -921,70 +975,35 @@ class JANUSAutonomousAgent:
                 return d
         return None
 
-    # ----- authoritative signoff timing from the detail-route .rpt -----------
-    def _authoritative_timing_from_rpt(self, block: str) -> Optional[Dict[str, Optional[float]]]:
-        """Read signoff-comparable WNS/TNS/hold from the detail-route report.
+    # ----- authoritative block timing: 6_finish (RCX) > janus_08 (GRT RC) -----
+    def _authoritative_timing_from_rpt(self, block: str) -> Optional[Dict]:
+        """Source-tagged signoff timing for a block (ASAP7 ps).
 
+        Preference order (log_analyzer.read_block_timing):
+          1. 6_finish.rpt — ORFS final STA AFTER OpenRCX extraction, multi-corner.
+             This is the signoff authority.
+          2. janus_08_detail_route_paths.rpt — written by the post-detail-route
+             hook BEFORE 6_final extracts parasitics, i.e. GRT/estimated RC.
+             Kept only as a fallback (e.g. a run that died between route and
+             finish). On agent_domain 20261007_104052 it read hold reg2reg
+             -122 ps while 6_finish read +9.95 ps / 0 hold violations — the
+             false DONE⚠ this fixes.
         The run log's final STA print can be lost to a cosmetic dump-hook error,
-        leaving only global-placement estimates behind — which is exactly how a
-        clean route got mislabelled (bogus WNS, false FAIL). The per-stage dump
-        janus_08_detail_route_paths.rpt is written with the design fully loaded
-        and is the authoritative, 6_finish-comparable timing. We read only the
-        small header (these reports can be tens of MB of path bodies) and return
-        {"setup_ws", "setup_tns", "hold_ws"} in ASAP7 ps, or None if not found.
-        """
-        rdir = self._reports_dir(block)
-        if not rdir:
-            return None
-        # Prefer the detail-route dump; fall back to the latest janus_NN_*_paths.rpt.
-        cand = os.path.join(rdir, "janus_08_detail_route_paths.rpt")
-        if not os.path.isfile(cand):
-            others = sorted(glob.glob(os.path.join(rdir, "janus_*_paths.rpt")))
-            cand = others[-1] if others else None
-        if not cand or not os.path.isfile(cand):
-            return None
-        try:
-            with open(cand, "r", errors="replace") as fh:
-                head = fh.read(16384)   # header holds the summary numbers
-        except OSError:
-            return None
-        t = parse_stage_timing_rpt(head)
-        if t.get("setup_ws") is None and t.get("hold_ws") is None:
-            return None
-        t["_source"] = cand
-        return t
+        so neither source is ever taken from the log when a report exists.
 
-    # ----- per-path-group signoff slacks from the detail-route .rpt -----------
+        Returns {"setup_ws","setup_tns","hold_ws","path_groups","counts",
+        "setup_worst","fmax_mhz","_source","source","final"} or None.
+        """
+        return read_block_timing(self._reports_dir(block))
+
     def _path_group_timing_from_rpt(
             self, block: str) -> Optional[Dict[str, Dict[str, float]]]:
-        """Worst slack per path group (reg2reg/reg2out/…) for setup AND hold.
-
-        The header read by _authoritative_timing_from_rpt() collapses the whole
-        design into ONE setup WNS and ONE hold WNS, so a block whose reg2reg
-        closes but whose reg2out violates (the standalone-build boundary-budget
-        signature) still shows a single red number with no hint of WHICH group
-        failed. Here we STREAM the same janus_08_detail_route_paths.rpt line by
-        line (these dumps are multi-MB of path bodies — never slurp them whole)
-        and bucket the worst slack per group, split setup vs hold, so the
-        dashboard can show both and make "is timing met?" unambiguous.
-
-        Returns {"setup": {grp: ps, …}, "hold": {grp: ps, …}} or None when no
-        report / no per-path bodies are found.
-        """
-        rdir = self._reports_dir(block)
-        if not rdir:
-            return None
-        cand = os.path.join(rdir, "janus_08_detail_route_paths.rpt")
-        if not os.path.isfile(cand):
-            others = sorted(glob.glob(os.path.join(rdir, "janus_*_paths.rpt")))
-            cand = others[-1] if others else None
-        if not cand or not os.path.isfile(cand):
-            return None
-        try:
-            with open(cand, "r", errors="replace") as fh:
-                groups = parse_path_group_slacks(fh)   # streamed, not slurped
-        except OSError:
-            return None
+        """Worst slack per path group (reg2reg/reg2out/gated clock) for setup
+        AND hold, from the SAME source chosen by _authoritative_timing_from_rpt
+        (6_finish preferred), so the per-group cells and the CLOSED/DONE⚠
+        verdict can never disagree about which parasitic model they used."""
+        t = self._authoritative_timing_from_rpt(block)
+        groups = (t or {}).get("path_groups") or {}
         if not groups.get("setup") and not groups.get("hold"):
             return None
         return groups
@@ -1119,10 +1138,24 @@ class JANUSAutonomousAgent:
         # liberty memory vs single-corner; it is meant for the resized box. Set
         # JANUS_MULTICORNER=0 to fall back to single-corner CORNER=WC (setup
         # only; hold then needs a separate BC pass) on a memory-starved box.
+        #
+        # §71 FIX — MACRO LIBERTY WAS DROPPED IN MULTI-CORNER MODE. ORFS
+        # read_liberty.tcl reads ONLY $<CORNER>_LIB_FILES when CORNERS is set;
+        # the block config's `ADDITIONAL_LIBS += fakeram*.lib / <child>.lib`
+        # only lands in LIB_FILES (single-corner path). Passing the bare
+        # platform lists here therefore loaded the SRAM / hardened-child
+        # macros as LEF-only black boxes in EVERY OpenROAD stage (proof:
+        # agent_domain run 20261007_104052 log "[WARNING ORD-2011] LEF master
+        # fakeram7_8192x8 has no liberty cell" + "master fakeram7_* has signal
+        # pins but no liberty cell" at 6_report; slew_triage read_liberty list
+        # had zero fakeram libs). Every path launched/captured at a macro pin
+        # was untimed (slack INF) — never timing-repaired, never in WNS.
+        # The macro .libs are single-corner; reading the same file into both
+        # corners is the standard academic-PDK practice (ihp/sky130 do this).
         if os.environ.get("JANUS_MULTICORNER", "1") != "0":
             cmd += ["CORNERS=slow fast",
-                    "SLOW_LIB_FILES=$(WC_NLDM_LIB_FILES)",
-                    "FAST_LIB_FILES=$(BC_NLDM_LIB_FILES)"]
+                    "SLOW_LIB_FILES=$(WC_NLDM_LIB_FILES) $(ADDITIONAL_LIBS)",
+                    "FAST_LIB_FILES=$(BC_NLDM_LIB_FILES) $(ADDITIONAL_LIBS)"]
 
         # ---- enable scan flops in the cell library (DFT) ---------------------
         # The ASAP7 platform FORBIDS the scan flops by default:
@@ -1645,8 +1678,16 @@ class JANUSAutonomousAgent:
             self.ui.debug(f"{block}: classified timing unavailable — {ct.error}")
             return
         res = self.results[block]
-        # Prefer these authoritative slacks over the stdout-scraped ones; this
-        # is where hold stops being 'n/a'.
+        res.timing_detail = tc_render(ct)
+        if res.timing_source == "6_finish":
+            # 6_finish is RCX-extracted signoff; this re-time of the .odb is
+            # not. Keep the breakdown as detail but never let it overwrite the
+            # final numbers (that would re-introduce the false DONE⚠).
+            self.ui.info(f"{block}: classified timing (detail only; WNS/hold "
+                         f"kept from 6_finish) —\n{res.timing_detail}")
+            return
+        # Prefer these slacks over the stdout-scraped ones; this is where hold
+        # stops being 'n/a' when no 6_finish report exists.
         if ct.setup_wns is not None:
             res.wns_ns = ct.setup_wns
         if ct.setup_tns is not None:
@@ -2614,6 +2655,8 @@ class JANUSAutonomousAgent:
             # a cosmetic dump-hook error, leaving only placement estimates. The
             # detail-route .rpt header is the signoff-comparable timing — prefer
             # it whenever present so WNS/TNS/hold never come from an estimate.
+            # 6_finish (RCX) is preferred; janus_08 (GRT RC) is the fallback.
+            res.timing_source = None
             auth = self._authoritative_timing_from_rpt(block)
             if auth:
                 if auth.get("setup_ws") is not None:
@@ -2622,18 +2665,19 @@ class JANUSAutonomousAgent:
                     res.hold_ps = auth["hold_ws"]
                 if auth.get("setup_tns") is not None:
                     res.tns_ns = auth["setup_tns"]
+                res.timing_source = auth.get("source")
+                counts = auth.get("counts") or {}
+                res.max_slew_violations = counts.get("max_slew")
+                res.max_cap_violations = counts.get("max_cap")
+                # Per-path-group breakdown from the SAME report (one parse).
+                pg = auth.get("path_groups") or {}
+                if pg.get("setup") or pg.get("hold"):
+                    res.path_groups = pg
                 self.ui.debug(
-                    f"{block}: authoritative timing from {os.path.basename(auth['_source'])}"
-                    f" setup_ws={res.wns_ns} tns={res.tns_ns} hold_ws={res.hold_ps}")
-            # Per-path-group breakdown (reg2reg/reg2out for setup AND hold) so
-            # the dashboard shows WHICH group closes vs violates, not just the
-            # single overall WNS. Streams the same detail-route .rpt.
-            pg = self._path_group_timing_from_rpt(block)
-            if pg:
-                res.path_groups = pg
-                self.ui.debug(
-                    f"{block}: path-group slacks setup={pg.get('setup')} "
-                    f"hold={pg.get('hold')}")
+                    f"{block}: authoritative timing [{res.timing_source}] from "
+                    f"{os.path.basename(auth['_source'])} setup_ws={res.wns_ns} "
+                    f"tns={res.tns_ns} hold_ws={res.hold_ps} "
+                    f"groups={res.path_groups} drv_counts={counts}")
             res.drc_violations = report.drc_violations
             res.area = report.area
             res.power = report.power
@@ -2654,6 +2698,11 @@ class JANUSAutonomousAgent:
                 # strict improvement). Runs BEFORE abstract so the abstract is
                 # emitted from the adopted database.
                 self._post_route_opt(block)
+                _nolib = self._macro_lib_missing(block)
+                if _nolib:
+                    self.ui.err(f"{block}: §71 macros loaded WITHOUT liberty in OpenROAD "
+                                f"({', '.join(_nolib)}) — macro-pin paths were UNTIMED; "
+                                "WNS/hold are incomplete. Do NOT sign off this result.")
                 # Emit the block's .lef/.lib abstract so janus_soc_top can
                 # consume it as a hard macro (hierarchical bottom-up assembly).
                 self._run_abstract(block)
@@ -2903,6 +2952,9 @@ class JANUSAutonomousAgent:
                 "wns_ps": r.wns_ns, "tns_ps": r.tns_ns,
                 "drc": r.drc_violations, "area": r.area, "power": r.power,
                 "util": r.utilization, "status": r.status, "note": r.note,
+                "timing_source": r.timing_source,
+                "max_slew_violations": r.max_slew_violations,
+                "max_cap_violations": r.max_cap_violations,
             }
             self.manifest.update_block_from_scan(
                 block,
@@ -3232,8 +3284,70 @@ class JANUSAutonomousAgent:
              "  only spent diagnosing real failures. All PPA targets in the\n"
              "  configs are DESIGN-INTENT, not measured results."))
 
-    # ----- main entry --------------------------------------------------------
+    # ----- read-only slew triage on an already-finished block ----------------
+    def _triage_slew_cmd(self, block: str, script: str) -> List[str]:
+        """The block's EXACT build make line (same DESIGN_CONFIG, FLOW_VARIANT,
+        CORNER/CORNERS lib sets, NUM_CORES, --extra-make) + `run RUN_SCRIPT=`.
+        Reusing _make_cmd guarantees the triage loads the same liberty corners
+        the 6_finish STA used, so its slew numbers are comparable."""
+        return self._make_cmd(block) + ["run", f"RUN_SCRIPT={script}"]
+
+    def _triage_slew(self) -> int:
+        """--triage-slew: run asic_flow/scripts/slew_triage.tcl on each block's
+        existing 6_final.odb. READ-ONLY: no stamp check, no re-stamp, no build,
+        no manifest/checkpoint update, no dashboard. Safe while another block
+        (e.g. user_core_ara) is running — it uses one OpenROAD process."""
+        script = os.path.join(_ROOT, "scripts", "slew_triage.tcl")
+        blocks = list(self.args.blocks or [])
+        if not blocks:
+            self.ui.err("--triage-slew needs --blocks <block> (e.g. --blocks agent_domain)")
+            return 2
+        if not os.path.isfile(script):
+            self.ui.err(f"slew triage script not found: {script}")
+            return 2
+        if not self.flow_dir or not os.path.isdir(self.flow_dir):
+            self.ui.err(f"ORFS flow dir not found: {self.flow_dir or '(unset — pass --orfs)'}")
+            return 2
+        os.makedirs(self.run_dir, exist_ok=True)
+        rc_all = 0
+        for b in blocks:
+            res = self._results_dir(b) if hasattr(self, "_results_dir") else None
+            odb = os.path.join(res, "6_final.odb") if res else None
+            if not odb or not os.path.exists(odb):
+                self.ui.err(f"{b}: no 6_final.odb found (looked in {res or 'n/a'}) — "
+                            "the block must have finished 6_final first; skipping.")
+                rc_all = rc_all or 3
+                continue
+            if not os.path.exists(os.path.join(res, "6_final.spef")):
+                self.ui.warn(f"{b}: 6_final.spef missing — triage will fall back to "
+                             "GRT-estimated parasitics (numbers won't match 6_finish).")
+            cmd = self._triage_slew_cmd(b, script)
+            log_path = os.path.join(self.run_dir, f"slew_triage_{b}.log")
+            self.ui.step(f"{b}: slew triage (read-only) on {odb}")
+            self.ui.info(f"  cd {self.flow_dir} && {' '.join(cmd)}")
+            if self.args.dry_run:
+                continue
+            with open(log_path, "wb", buffering=0) as logf:
+                proc = subprocess.run(cmd, cwd=self.flow_dir, stdout=logf,
+                                      stderr=subprocess.STDOUT)
+            janus_lines = []
+            try:
+                with open(log_path, "r", errors="replace") as fh:
+                    janus_lines = [ln.rstrip() for ln in fh if ln.startswith("JANUS_SLEW_")]
+            except OSError:
+                pass
+            for ln in [l for l in janus_lines if not l.startswith("JANUS_SLEW_NET")]:
+                self.ui.info(f"  {ln}")
+            n_net = sum(1 for l in janus_lines if l.startswith("JANUS_SLEW_NET"))
+            msg = f"{b}: triage rc={proc.returncode}, {n_net} net rows -> {log_path}"
+            (self.ui.good if proc.returncode == 0 else self.ui.warn)(msg)
+            if proc.returncode != 0:
+                rc_all = rc_all or proc.returncode
+        return rc_all
+
     def run(self) -> int:
+        if getattr(self.args, "triage_slew", False):
+            return self._triage_slew()
         self._preflight()
         if self.dashboard is not None:
             try:
@@ -3784,6 +3898,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "stamp is intentionally different from source.")
     p.add_argument("--dry-run", action="store_true",
                    help="print the make commands but do not run anything")
+    p.add_argument("--triage-slew", action="store_true",
+                   help="READ-ONLY: run asic_flow/scripts/slew_triage.tcl on the "
+                        "existing 6_final.odb of each --blocks block, using the "
+                        "block's exact build make line (corners, FLOW_VARIANT, "
+                        "NUM_CORES). No stamp check, no build, no manifest update. "
+                        "Log -> <run-dir>/slew_triage_<block>.log. Combine with "
+                        "--dry-run to only print the make command.")
     p.add_argument("--estimate", action="store_true",
                    help="print the execution plan + rough cost estimate, then exit")
     p.add_argument("--no-llm", action="store_true",
