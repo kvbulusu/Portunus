@@ -84,6 +84,11 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     "PLACE_DENSITY_LB_ADDON": "3_place",
     "GPL_ROUTABILITY_DRIVEN": "3_place",
     "GPL_TIMING_DRIVEN": "3_place",
+    # §73: first stage whose repair_timing actually fixes hold. Verified in the
+    # agent_domain 20261007_202416 log: floorplan passes -hold_margin but runs
+    # `-setup` only; the 3_4 resize call is issued without -hold_margin; the
+    # first hold repair (RSZ-0046, 165 endpoints) is in 4_1_cts.
+    "HOLD_SLACK_MARGIN": "4_cts",
 }
 _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("SYNTH_", "1_synth"),

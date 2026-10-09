@@ -3292,13 +3292,19 @@ class JANUSAutonomousAgent:
         the 6_finish STA used, so its slew numbers are comparable."""
         return self._make_cmd(block) + ["run", f"RUN_SCRIPT={script}"]
 
-    def _triage_slew(self) -> int:
+    def _triage_slew(self, blocks: Optional[List[str]] = None,
+                     post_flow: bool = False) -> int:
         """--triage-slew: run asic_flow/scripts/slew_triage.tcl on each block's
         existing 6_final.odb. READ-ONLY: no stamp check, no re-stamp, no build,
         no manifest/checkpoint update, no dashboard. Safe while another block
-        (e.g. user_core_ara) is running — it uses one OpenROAD process."""
+        (e.g. user_core_ara) is running — it uses one OpenROAD process.
+
+        post_flow=True (--post-triage-slew): called after the build loop for
+        the blocks that finished DONE in this run; every JANUS_SLEW_* line
+        (incl. per-net rows) is also appended to <run-dir>/<block>.log so the
+        unattended run carries its own triage."""
         script = os.path.join(_ROOT, "scripts", "slew_triage.tcl")
-        blocks = list(self.args.blocks or [])
+        blocks = list(blocks if blocks is not None else (self.args.blocks or []))
         if not blocks:
             self.ui.err("--triage-slew needs --blocks <block> (e.g. --blocks agent_domain)")
             return 2
@@ -3336,8 +3342,17 @@ class JANUSAutonomousAgent:
                     janus_lines = [ln.rstrip() for ln in fh if ln.startswith("JANUS_SLEW_")]
             except OSError:
                 pass
-            for ln in [l for l in janus_lines if not l.startswith("JANUS_SLEW_NET")]:
+            for ln in [l for l in janus_lines
+                       if not l.startswith(("JANUS_SLEW_NET ", "JANUS_SLEW_CONST"))]:
                 self.ui.info(f"  {ln}")
+            if post_flow:
+                try:
+                    with open(self._block_log(b), "a") as bl:
+                        bl.write(f"\n===== {b} : POST-FLOW SLEW TRIAGE (rc={proc.returncode}, "
+                                 f"full log {log_path}) @ {datetime.now()} =====\n")
+                        bl.write("\n".join(janus_lines) + "\n")
+                except OSError as e:
+                    self.ui.warn(f"{b}: could not append triage to block log ({e})")
             n_net = sum(1 for l in janus_lines if l.startswith("JANUS_SLEW_NET"))
             msg = f"{b}: triage rc={proc.returncode}, {n_net} net rows -> {log_path}"
             (self.ui.good if proc.returncode == 0 else self.ui.warn)(msg)
@@ -3390,6 +3405,23 @@ class JANUSAutonomousAgent:
                         done = self.manifest.is_done(b)
                     except Exception:
                         done = self.ckpt.is_done(b)
+                if done and self.manifest is not None:
+                    # §73: a DONE block whose stamped config/sdc changed since its
+                    # last run (e.g. HOLD_SLACK_MARGIN) must be STAGE-resumed, not
+                    # skipped — otherwise --resume silently ignores the edit.
+                    try:
+                        res_dir = self._results_dir(b)
+                        if res_dir:
+                            pv = self.manifest.resume_plan(
+                                b, res_dir, config_path=self._config_path(b),
+                                sdc_path=os.path.join(self.design_root, b, "constraint.sdc"))
+                            if pv.config_changed and pv.rerun_from:
+                                self.ui.info(f"{b}: was DONE but config changed "
+                                             f"({', '.join(pv.changed_keys)}) — "
+                                             f"re-running from {pv.rerun_from}")
+                                done = False
+                    except Exception as e:
+                        self.ui.debug(f"{b}: DONE-vs-config check skipped — {e}")
                 if done:
                     self.dep.mark(b, Status.DONE)
                     self.results[b].status = "DONE"
@@ -3407,6 +3439,16 @@ class JANUSAutonomousAgent:
         self._maybe_start_dashboard()
         try:
             self._main_loop()
+            if getattr(self.args, "post_triage_slew", False) and not self.args.dry_run:
+                done_blocks = [b for b in self.dep.graph
+                               if self.results[b].status == "DONE"
+                               and "already DONE" not in (self.results[b].note or "")]
+                if done_blocks:
+                    self.ui.step(f"post-flow slew triage: {', '.join(done_blocks)}")
+                    try:
+                        self._triage_slew(done_blocks, post_flow=True)
+                    except Exception as e:      # triage must never fail the run
+                        self.ui.warn(f"post-flow slew triage failed: {e}")
         except KeyboardInterrupt:
             self._stop.set()
             self.ui.err("\nInterrupted — saving checkpoint and writing report...")
@@ -3905,6 +3947,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "NUM_CORES). No stamp check, no build, no manifest update. "
                         "Log -> <run-dir>/slew_triage_<block>.log. Combine with "
                         "--dry-run to only print the make command.")
+    p.add_argument("--post-triage-slew", action="store_true",
+                   help="after the build finishes, run the same read-only slew "
+                        "triage on every block that ended DONE in this run "
+                        "(output also appended to <run-dir>/<block>.log). Exit "
+                        "code still reflects the build only.")
     p.add_argument("--estimate", action="store_true",
                    help="print the execution plan + rough cost estimate, then exit")
     p.add_argument("--no-llm", action="store_true",
