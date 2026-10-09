@@ -3918,6 +3918,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "for --force-blocks <all --blocks>). Wipes their on-disk "
                         "ORFS state + manifest entries so the run starts from "
                         "1_synth. Combine with --blocks to scope it.")
+    p.add_argument("--resume-preview", action="store_true",
+                   help="READ-ONLY: show what --resume would do for each --blocks "
+                        "block (skip / reused stages / rerun-from / files it "
+                        "would delete) against --manifest, then exit.")
     p.add_argument("--status", action="store_true",
                    help="print the flow-state manifest (per-block stages done, "
                         "per-stage/final QoR, all run/log/report dirs, and "
@@ -4188,10 +4192,13 @@ def _manifest_only_cli(args: argparse.Namespace) -> Optional[int]:
     """Handle the manifest-only sub-commands (--status / --gc / --gc-dry-run)
     WITHOUT constructing the full agent (which needs ORFS_DIR etc). Returns an
     exit code if it handled the invocation, else None."""
-    if not (args.status or args.gc or args.gc_dry_run):
+    if not (args.status or args.gc or args.gc_dry_run
+            or getattr(args, "resume_preview", False)):
         return None
     mpath = args.manifest or FlowState.default_path(_ROOT)
     fs = FlowState(mpath).load()
+    if getattr(args, "resume_preview", False):
+        return _resume_preview(args, fs, mpath)
     if args.status:
         print(fs.render_status(args.blocks or None))
         return 0
@@ -4228,6 +4235,43 @@ def _manifest_only_cli(args: argparse.Namespace) -> Optional[int]:
         except OSError as e:
             print(f"   FAILED to remove {rd}: {e}", file=sys.stderr)
     print(f"done — removed {removed}/{len(cands)} run-dir(s).")
+    return 0
+
+
+def _resume_preview(args: argparse.Namespace, fs: FlowState, mpath: str) -> int:
+    """--resume-preview: print what `--resume` WOULD do per --blocks block
+    (skip / reuse which stages / rerun from where / which files it would
+    delete). Pure read: nothing is touched or removed."""
+    orfs = (args.orfs or os.environ.get("ORFS_DIR", "")
+            or os.path.join(_ROOT, "OpenROAD-flow-scripts"))
+    flow = os.path.join(orfs, "flow")
+    leaf = getattr(args, "variant", None) or "base"
+    if not args.blocks:
+        print("--resume-preview needs --blocks", file=sys.stderr)
+        return 2
+    print(f"flow-state manifest: {mpath}\nORFS flow dir: {flow}")
+    for b in args.blocks:
+        res = os.path.join(flow, "results", "asap7", b, leaf)
+        cfg = os.path.join(flow, "designs", "asap7", "janus", b, "config.mk")
+        sdc = os.path.join(flow, "designs", "asap7", "janus", b, "constraint.sdc")
+        rec = fs.state.get("blocks", {}).get(b, {})
+        print(f"\n[{b}] manifest status={rec.get('status', 'PENDING')}  "
+              f"config snapshot={'yes' if rec.get('config_vars') is not None else 'NO'}")
+        print(f"   results: {res}{'' if os.path.isdir(res) else '  (MISSING)'}")
+        if not os.path.isfile(cfg):
+            print(f"   stamped config missing: {cfg} — run scripts/03 first")
+            continue
+        plan = fs.resume_plan(b, res, config_path=cfg, sdc_path=sdc)
+        if fs.is_done(b) and not (plan.config_changed and plan.rerun_from):
+            print("   -> SKIP (DONE, no config/sdc change)")
+            continue
+        print(f"   changed keys : {', '.join(plan.changed_keys) or 'none'}")
+        print(f"   reuse        : {', '.join(plan.reuse) or 'nothing'}")
+        print(f"   rerun from   : {'1_synth (FULL REBUILD)' if plan.full_rebuild else plan.rerun_from or 'finish'}")
+        rm = plan.remove_paths + (plan.touch_paths if plan.full_rebuild else [])
+        print(f"   would delete : {', '.join(os.path.basename(x) for x in rm) or 'nothing'}")
+        print(f"   reason       : {plan.reason}")
+    print("\n(preview only — nothing touched)")
     return 0
 
 
