@@ -400,6 +400,12 @@ class DashboardUI:
             # instead of showing a stale early-stage label next to 6/6 DONE.
             if status == "DONE":
                 stage, idx = "6_final", self._STAGE_TOTAL
+            # §75: after the build, the status column keeps the verdict
+            # (CLOSED / DONE⚠ / FAILED) and the stage column shows the
+            # post-build step in flight (abstract, signoff, slew triage...).
+            post = a._post_step.get(block) if hasattr(a, "_post_step") else None
+            if post and status in ("DONE", "FAILED"):
+                stage = post
             # Per-path-group worst slack (reg2reg/reg2out) for setup AND hold,
             # so the row can show which group closes vs violates.
             pg = r.path_groups if r else None
@@ -412,8 +418,33 @@ class DashboardUI:
                          "src_tag": src_tag,
                          "nolib": nolib,
                          "setup_groups": setup_groups,
-                         "hold_groups": hold_groups})
+                         "hold_groups": hold_groups,
+                         "slew": self._fmt_drv(r.max_slew_violations if r else None,
+                                               r.max_cap_violations if r else None),
+                         "slew_bad": bool(r and ((r.max_slew_violations or 0)
+                                                 or (r.max_cap_violations or 0))),
+                         "cells": self._fmt_cells(r.std_cells if r else None),
+                         "util": (f"{r.utilization:.0f}%"
+                                  if r and r.utilization is not None else "-")})
         return rows
+
+    @staticmethod
+    def _fmt_drv(slew: Optional[int], cap: Optional[int]) -> str:
+        """'839/0' = max-slew / max-cap violation counts (6_finish); '-' unknown."""
+        if slew is None and cap is None:
+            return "-"
+        return f"{'-' if slew is None else slew}/{'-' if cap is None else cap}"
+
+    @staticmethod
+    def _fmt_cells(n: Optional[int]) -> str:
+        """155911 -> '155.9k'; 1.2M -> '1.20M'; '-' unknown."""
+        if n is None:
+            return "-"
+        if n >= 1_000_000:
+            return f"{n / 1e6:.2f}M"
+        if n >= 1_000:
+            return f"{n / 1e3:.1f}k"
+        return str(n)
 
     # ----- compact per-path-group slack formatting --------------------------
     @staticmethod
@@ -468,7 +499,8 @@ class DashboardUI:
         head.add_row("CPU / MEM", f"[bold]{cpu_s}[/bold]   ·   [bold]{mem_s}[/bold]")
         t = Table(show_lines=False, expand=False)
         for col in ("block", "status", "stage", "progress", "elapsed",
-                    "WNS(ps)", "SETUP r2r/r2o", "HOLD r2r/r2o"):
+                    "WNS(ps)", "SETUP r2r/r2o", "HOLD r2r/r2o",
+                    "SLEW/CAP", "CELLS", "UTIL"):
             t.add_column(col)
         style = {"RUNNING": "green", "DONE": "bold green",
                  "FAILED": "bold red", "WAITING": "yellow"}
@@ -494,7 +526,9 @@ class DashboardUI:
                       f"{bar} {idx}/{self._STAGE_TOTAL}",
                       r["elapsed"] or "", r["wns"],
                       self._fmt_group_cell(r.get("setup_groups") or {}, rich=True),
-                      self._fmt_group_cell(r.get("hold_groups") or {}, rich=True))
+                      self._fmt_group_cell(r.get("hold_groups") or {}, rich=True),
+                      (f"[red]{r['slew']}[/]" if r.get("slew_bad") else r["slew"]),
+                      r["cells"], r["util"])
         return Group(Panel(head, title="JANUS Agent · live",
                            border_style="cyan", expand=False), t)
 
@@ -505,16 +539,17 @@ class DashboardUI:
         rows = self._rows()
         c = self._counts(rows)
         out = []
-        out.append("=" * 104)
+        out.append("=" * 132)
         out.append(f" JANUS Agent · live     total elapsed {self._total_elapsed()}")
         out.append(f" blocks={len(rows)}  done={c['DONE']} running={c['RUNNING']} "
                    f"failed={c['FAILED']} waiting={c['WAITING']}   "
                    f"parallel={a.args.parallel} cores={a.args.num_cores}")
         out.append(f" CPU={cpu_s}   MEM={mem_s}")
-        out.append("-" * 104)
-        out.append(f" {'block':<18}{'status':<9}{'stage':<16}"
+        out.append("-" * 132)
+        out.append(f" {'block':<18}{'status':<9}{'stage':<20}"
                    f"{'prog':<7}{'elapsed':<9}{'WNS(ps)':<10}"
-                   f"{'SETUP r2r/r2o':<22}{'HOLD r2r/r2o'}")
+                   f"{'SETUP r2r/r2o':<22}{'HOLD r2r/r2o':<22}"
+                   f"{'SLEW/CAP':<11}{'CELLS':<9}{'UTIL'}")
         for r in rows:
             idx = max(0, min(self._STAGE_TOTAL, r["idx"]))
             st = r["status"]
@@ -527,10 +562,11 @@ class DashboardUI:
             setup_c = self._fmt_group_cell(r.get("setup_groups") or {}, rich=False)
             hold_c = self._fmt_group_cell(r.get("hold_groups") or {}, rich=False)
             out.append(f" {r['block'][:17]:<18}{st:<9}"
-                       f"{str(r['stage'])[:15]:<16}{f'{idx}/6':<7}"
+                       f"{str(r['stage'])[:19]:<20}{f'{idx}/6':<7}"
                        f"{(r['elapsed'] or ''):<9}{r['wns']:<10}"
-                       f"{setup_c:<22}{hold_c}")
-        out.append("=" * 104)
+                       f"{setup_c:<22}{hold_c:<22}"
+                       f"{r['slew']:<11}{r['cells']:<9}{r['util']}")
+        out.append("=" * 132)
         return "\n".join(out)
 
     def _ansi_loop(self):
@@ -639,6 +675,8 @@ class BlockResult:
     # Final-STA design-rule counts (6_finish only; None when not available).
     max_slew_violations: Optional[int] = None
     max_cap_violations: Optional[int] = None
+    # Standard logic cells from the final "Cell type report" (no macro/fill/tap).
+    std_cells: Optional[int] = None
 
     def as_row(self) -> Dict:
         return {
@@ -650,6 +688,7 @@ class BlockResult:
             "timing_source": self.timing_source,
             "max_slew_violations": self.max_slew_violations,
             "max_cap_violations": self.max_cap_violations,
+            "std_cells": self.std_cells,
         }
 
 
@@ -800,6 +839,10 @@ class JANUSAutonomousAgent:
         # which mtime-touching a target cannot beat but `-o` does. See
         # flow_state.ResumePlan.touch_paths.  Empty => no -o flags emitted.
         self._resume_old_files: Dict[str, List[str]] = {}
+        # §75: post-build step per block shown in the dashboard stage column
+        # once the main build is DONE/FAILED ("abstract", "signoff",
+        # "slew triage running", "triage done"...). Absent => "6_final".
+        self._post_step: Dict[str, str] = {}
 
         # --- optional web dashboard (browsable live/standalone run view) -----
         # Zero-dep HTTP server (see dashboard.py). Off unless --dashboard. The
@@ -1412,6 +1455,43 @@ class JANUSAutonomousAgent:
 
         return cmd
 
+    # ----- §75: make line for steps that run AFTER the block's build ---------
+    def _post_build_make_cmd(self, block: str, targets: List[str]) -> List[str]:
+        """_make_cmd(block) (same NUM_CORES / CORNER=WC / CORNERS / FLOW_VARIANT
+        / --extra-make / resume -o) + `-o` for EVERY existing file under the
+        block's results/, logs/ and objects/ leaf dirs, then `targets`.
+
+        Post-build targets (generate_abstract, run) must never rebuild a stage:
+        generate_abstract depends on 6_final.{gds,def,v,sdc}, whose chain goes
+        back through $(LOG_DIR)/6_report.log ... to 1_1_yosys_canonicalize.rtlil
+        : $(YOSYS_DEPENDENCIES) (incl. clock_period.txt <- constraint.sdc). Any
+        re-stamped source would otherwise cascade a full re-synth. -o matches
+        by literal target name, so paths are flow_dir-relative (like _make_cmd).
+        The abstract's own outputs are not make targets (do-generate_abstract
+        is phony), so marking them old cannot suppress their regeneration."""
+        cmd = self._make_cmd(block)
+        seen = {cmd[i + 1] for i, t in enumerate(cmd[:-1]) if t == "-o"}
+        res = self._results_dir(block)
+        extra: List[str] = []
+        if res and self.flow_dir:
+            res_root = os.path.join(self.flow_dir, "results")
+            rel_leaf = os.path.relpath(res, res_root)
+            if not rel_leaf.startswith(os.pardir):
+                for sub in ("results", "logs", "objects"):
+                    d = os.path.join(self.flow_dir, sub, rel_leaf)
+                    if not os.path.isdir(d):
+                        continue
+                    for root, _dirs, files in os.walk(d):
+                        for fn in sorted(files):
+                            rel = os.path.relpath(os.path.join(root, fn), self.flow_dir)
+                            if rel not in seen:
+                                seen.add(rel)
+                                extra += ["-o", rel]
+        if extra:
+            self.ui.debug(f"{block}: post-build make — {len(extra) // 2} existing "
+                          "artifact(s) passed as --old-file (no stage rebuild)")
+        return cmd + extra + list(targets)
+
     # ----- repo SOURCE config / sdc for a block ------------------------------
     # The stamped copies in the ORFS tree are regenerated by scripts/03 from
     # these. Config filename == block name (security.mk, noc.mk, ...); the SDC
@@ -1596,7 +1676,12 @@ class JANUSAutonomousAgent:
         target = self._detect_abstract_target()
         if not target:
             return
-        cmd = ["make", f"DESIGN_CONFIG={self._config_path(block)}", target]
+        # §75: was a bare `make DESIGN_CONFIG=.. generate_abstract` — no -o
+        # flags, no NUM_CORES/CORNER=WC/CORNERS. On --resume the re-stamped
+        # config/SDC is newer than 1_1_yosys_canonicalize.rtlil, so that bare
+        # make re-ran synth -> ... -> route single-threaded on the default
+        # corner, overwriting the finished .odbs (agent_domain 2026-10-08).
+        cmd = self._post_build_make_cmd(block, [target])
         self.ui.step(f"{block}: generating abstract (.lef/.lib) via '{target}'")
         log_path = self._block_log(block)
         try:
@@ -2689,6 +2774,7 @@ class JANUSAutonomousAgent:
             res.area = report.area
             res.power = report.power
             res.utilization = report.utilization
+            res.std_cells = report.std_cells
             res.log_path = self._block_log(block)
 
             if rc == 0 and not report.failed:
@@ -2704,6 +2790,7 @@ class JANUSAutonomousAgent:
                 # degrades the result (the canonical .odb is only swapped on a
                 # strict improvement). Runs BEFORE abstract so the abstract is
                 # emitted from the adopted database.
+                self._post_step[block] = "post-route opt"
                 self._post_route_opt(block)
                 _nolib = self._macro_lib_missing(block)
                 if _nolib:
@@ -2712,6 +2799,7 @@ class JANUSAutonomousAgent:
                                 "WNS/hold are incomplete. Do NOT sign off this result.")
                 # Emit the block's .lef/.lib abstract so janus_soc_top can
                 # consume it as a hard macro (hierarchical bottom-up assembly).
+                self._post_step[block] = "abstract"
                 self._run_abstract(block)
                 # Sign-off parasitic extraction (and, when its collateral lands,
                 # LVS) on the routed .odb: runs the real ASAP7 OpenRCX model to
@@ -2720,13 +2808,16 @@ class JANUSAutonomousAgent:
                 # discipline); disable with --no-signoff. Never flips the block
                 # off DONE (fully wrapped in try/except inside). Runs BEFORE the
                 # golden snapshot so its outputs are captured into golden/.
+                self._post_step[block] = "signoff"
                 self._run_signoff(block)
+                self._post_step[block] = "golden"
                 # Sign-off snapshot: if this block converged (timing met within
                 # the configured margins AND DRC within a handful), copy its
                 # logs/reports/final outputs + a QoR manifest into the golden
                 # area and commit surgically. Never flips the block off DONE
                 # (fully wrapped in try/except inside).
                 self._archive_golden(block, res)
+                self._post_step.pop(block, None)
                 return res
 
             # --- failed -----------------------------------------------------
@@ -2961,6 +3052,7 @@ class JANUSAutonomousAgent:
                 "util": r.utilization, "status": r.status, "note": r.note,
                 "timing_source": r.timing_source,
                 "max_slew_violations": r.max_slew_violations,
+                "std_cells": r.std_cells,
                 "max_cap_violations": r.max_cap_violations,
             }
             self.manifest.update_block_from_scan(
@@ -3300,7 +3392,7 @@ class JANUSAutonomousAgent:
         CORNER/CORNERS lib sets, NUM_CORES, --extra-make) + `run RUN_SCRIPT=`.
         Reusing _make_cmd guarantees the triage loads the same liberty corners
         the 6_finish STA used, so its slew numbers are comparable."""
-        return self._make_cmd(block) + ["run", f"RUN_SCRIPT={script}"]
+        return self._post_build_make_cmd(block, ["run", f"RUN_SCRIPT={script}"])
 
     def _triage_slew(self, blocks: Optional[List[str]] = None,
                      post_flow: bool = False) -> int:
@@ -3338,6 +3430,8 @@ class JANUSAutonomousAgent:
                 self.ui.warn(f"{b}: 6_final.spef missing — triage will fall back to "
                              "GRT-estimated parasitics (numbers won't match 6_finish).")
             cmd = self._triage_slew_cmd(b, script)
+            if post_flow:
+                self._post_step[b] = "slew triage running"
             log_path = os.path.join(self.run_dir, f"slew_triage_{b}.log")
             self.ui.step(f"{b}: slew triage (read-only) on {odb}")
             self.ui.info(f"  cd {self.flow_dir} && {' '.join(cmd)}")
@@ -3364,6 +3458,9 @@ class JANUSAutonomousAgent:
                 except OSError as e:
                     self.ui.warn(f"{b}: could not append triage to block log ({e})")
             n_net = sum(1 for l in janus_lines if l.startswith("JANUS_SLEW_NET"))
+            if post_flow:
+                self._post_step[b] = ("triage done" if proc.returncode == 0
+                                      else f"triage rc={proc.returncode}")
             msg = f"{b}: triage rc={proc.returncode}, {n_net} net rows -> {log_path}"
             (self.ui.good if proc.returncode == 0 else self.ui.warn)(msg)
             if proc.returncode != 0:

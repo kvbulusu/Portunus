@@ -128,6 +128,16 @@ _RE_DRC = re.compile(r"(?:total\s+)?(?:drc|violations?)\s*[:=]?\s*(\d+)", re.I)
 _RE_AREA = re.compile(r"(?:design|core|total)\s+area\s*[:=]?\s*(\d+\.?\d*)", re.I)
 _RE_POWER = re.compile(r"\btotal\s+power\s*[:=]?\s*(\d+\.?\d*([eE]-?\d+)?)", re.I)
 _RE_UTIL = re.compile(r"utiliz\w*\s*[:=]?\s*(\d+\.?\d*)\s*%?", re.I)
+# OpenROAD report_design_area: "Design area 198507 um^2 55% utilization."
+# The LAST such line is the final (6_report) value; the generic _RE_UTIL can
+# latch onto unrelated lines (e.g. an earlier "100% utilization"), so prefer this.
+_RE_DESIGN_AREA_UTIL = re.compile(
+    r"Design area\s+(\d+\.?\d*)\s+um\^2\s+(\d+\.?\d*)%\s+utilization", re.I)
+# report_cell_usage "Cell type report:" table rows: "  <label>   <count>  <area>"
+_RE_CELL_TYPE_HDR = re.compile(r"^\s*Cell type report:", re.I)
+_RE_CELL_TYPE_ROW = re.compile(r"^\s+([A-Za-z][A-Za-z \-/]*?)\s+(\d+)\s+(\d+\.?\d*)\s*$")
+# Rows that are NOT standard logic cells (excluded from std_cells).
+_NON_STD_CELL_TYPES = {"macro", "fill cell", "tap cell", "endcap cell", "total"}
 
 
 # =============================================================================
@@ -260,6 +270,9 @@ class LogReport:
     area: Optional[float] = None
     power: Optional[float] = None
     utilization: Optional[float] = None
+    # Standard logic cells from the LAST "Cell type report" (excludes macros,
+    # fill, tap/endcap). None when the log has no such table.
+    std_cells: Optional[int] = None
     tail: str = ""   # last N lines, useful context
 
     def to_dict(self) -> Dict:
@@ -285,6 +298,38 @@ class LogReport:
         if self.area is not None:
             bits.append(f"area={self.area}")
         return f"{self.block}/{self.stage}: OK" + (f" ({', '.join(bits)})" if bits else "")
+
+
+def parse_std_cell_count(lines: List[str]) -> Optional[int]:
+    """Standard-cell count from the LAST OpenROAD "Cell type report" table.
+
+    Sums every row except Macro / Fill cell / Tap cell / Endcap cell / Total
+    (i.e. sequential + combinational + buffers + inverters + tie + clock cells).
+    Returns None when no table is present."""
+    last: Optional[int] = None
+    i, n = 0, len(lines)
+    while i < n:
+        if _RE_CELL_TYPE_HDR.search(lines[i]):
+            total, seen = 0, False
+            j = i + 1
+            while j < n:
+                m = _RE_CELL_TYPE_ROW.match(lines[j])
+                if not m:
+                    break
+                label = m.group(1).strip().lower()
+                if label == "total":
+                    j += 1
+                    break
+                if label not in _NON_STD_CELL_TYPES:
+                    total += int(m.group(2))
+                seen = True
+                j += 1
+            if seen:
+                last = total
+            i = j
+        else:
+            i += 1
+    return last
 
 
 class LogAnalyzer:
@@ -397,7 +442,16 @@ class LogAnalyzer:
         rep.drc_violations = drc
         rep.area = grab(_RE_AREA)
         rep.power = grab(_RE_POWER)
-        rep.utilization = grab(_RE_UTIL)
+        da = None
+        for line in lines:
+            mm = _RE_DESIGN_AREA_UTIL.search(line)
+            if mm:
+                da = mm
+        if da is not None:
+            rep.utilization = float(da.group(2))
+        else:
+            rep.utilization = grab(_RE_UTIL)
+        rep.std_cells = parse_std_cell_count(lines)
 
     # ---- LLM payload --------------------------------------------------------
     def build_llm_excerpt(self, rep: LogReport, byte_budget: int = 5000) -> str:
