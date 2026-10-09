@@ -2442,6 +2442,13 @@ class JANUSAutonomousAgent:
                 return 90  # nonzero -> treated as a build failure, no make run
         cmd = self._make_cmd(block)
         self.ui.debug(f"{block}: cwd={self.flow_dir} cmd={' '.join(cmd)}")
+        if self.manifest is not None and not self.args.dry_run:
+            try:   # §74: lets a later --resume attribute .odb from a killed run
+                self.manifest.mark_inflight(
+                    block, config_path=self._config_path(block),
+                    sdc_path=os.path.join(self.design_root, block, "constraint.sdc"))
+            except Exception as e:
+                self.ui.debug(f"{block}: inflight mark skipped — {e}")
 
         # Shared state updated by the reader loop; read by the heartbeat thread,
         # the optional in-place live console panel, and the web dashboard.
@@ -2994,7 +3001,10 @@ class JANUSAutonomousAgent:
             cfg = self._config_path(block)
             sdc = os.path.join(self.design_root, block, "constraint.sdc")
             plan = self.manifest.resume_plan(block, results_dir,
-                                             config_path=cfg, sdc_path=sdc)
+                                             config_path=cfg, sdc_path=sdc,
+                                             force_from=getattr(self.args, "resume_from", None))
+            for n in plan.notes:
+                self.ui.info(f"{block}: resume — {n}")
             summary = self.manifest.apply_resume_plan(plan, config_path=cfg)
             if plan.full_rebuild:
                 # nothing reused — make must redo from synthesis; no -o flags.
@@ -3414,11 +3424,13 @@ class JANUSAutonomousAgent:
                         if res_dir:
                             pv = self.manifest.resume_plan(
                                 b, res_dir, config_path=self._config_path(b),
-                                sdc_path=os.path.join(self.design_root, b, "constraint.sdc"))
-                            if pv.config_changed and pv.rerun_from:
-                                self.ui.info(f"{b}: was DONE but config changed "
-                                             f"({', '.join(pv.changed_keys)}) — "
-                                             f"re-running from {pv.rerun_from}")
+                                sdc_path=os.path.join(self.design_root, b, "constraint.sdc"),
+                                force_from=getattr(self.args, "resume_from", None))
+                            if pv.rerun_from and (pv.config_changed or pv.remove_paths
+                                                  or getattr(self.args, "resume_from", None)):
+                                self.ui.info(f"{b}: was DONE but needs a rerun from "
+                                             f"{pv.rerun_from} (changed: "
+                                             f"{', '.join(pv.changed_keys) or 'n/a'})")
                                 done = False
                     except Exception as e:
                         self.ui.debug(f"{b}: DONE-vs-config check skipped — {e}")
@@ -3918,6 +3930,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "for --force-blocks <all --blocks>). Wipes their on-disk "
                         "ORFS state + manifest entries so the run starts from "
                         "1_synth. Combine with --blocks to scope it.")
+    p.add_argument("--resume-from", default=None, metavar="STAGE",
+                   choices=["1_synth", "2_floorplan", "3_place", "4_cts", "5_route", "6_final"],
+                   help="implies --resume. Manual override of the automatic "
+                        "detection: TRUST every stage before STAGE on disk and "
+                        "rebuild STAGE onward (its .odb are deleted for you). "
+                        "Use when detection is too conservative, e.g. a killed "
+                        "run left odbs of unknown provenance.")
     p.add_argument("--resume-preview", action="store_true",
                    help="READ-ONLY: show what --resume would do for each --blocks "
                         "block (skip / reused stages / rerun-from / files it "
@@ -4261,15 +4280,19 @@ def _resume_preview(args: argparse.Namespace, fs: FlowState, mpath: str) -> int:
         if not os.path.isfile(cfg):
             print(f"   stamped config missing: {cfg} — run scripts/03 first")
             continue
-        plan = fs.resume_plan(b, res, config_path=cfg, sdc_path=sdc)
-        if fs.is_done(b) and not (plan.config_changed and plan.rerun_from):
+        ff = getattr(args, "resume_from", None)
+        plan = fs.resume_plan(b, res, config_path=cfg, sdc_path=sdc, force_from=ff)
+        for n in plan.notes:
+            print(f"   note         : {n}")
+        if fs.is_done(b) and not (plan.rerun_from and (plan.config_changed or plan.remove_paths or ff)):
             print("   -> SKIP (DONE, no config/sdc change)")
             continue
         print(f"   changed keys : {', '.join(plan.changed_keys) or 'none'}")
         print(f"   reuse        : {', '.join(plan.reuse) or 'nothing'}")
         print(f"   rerun from   : {'1_synth (FULL REBUILD)' if plan.full_rebuild else plan.rerun_from or 'finish'}")
         rm = plan.remove_paths + (plan.touch_paths if plan.full_rebuild else [])
-        print(f"   would delete : {', '.join(os.path.basename(x) for x in rm) or 'nothing'}")
+        print(f"   --resume deletes automatically: "
+              f"{', '.join(os.path.basename(x) for x in rm) or 'nothing'}")
         print(f"   reason       : {plan.reason}")
     print("\n(preview only — nothing touched)")
     return 0
@@ -4495,6 +4518,8 @@ def _relaunch_in_tmux(argv: Optional[List[str]]) -> int:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     _apply_skips(args)
+    if getattr(args, "resume_from", None):
+        args.resume = True
     # --tmux: re-exec detached in a tmux session (inheriting all other args +
     # env) and exit immediately. Done BEFORE any heavy work so nothing runs
     # twice. The child (inside tmux) gets the live dashboard when it has a TTY.
