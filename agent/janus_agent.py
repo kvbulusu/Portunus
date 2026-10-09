@@ -1996,7 +1996,7 @@ class JANUSAutonomousAgent:
         """Per-run sign-off output dir for a block (SPEF / LVS reports)."""
         return os.path.join(self.run_dir, "signoff", block)
 
-    def _run_signoff(self, block: str) -> None:
+    def _run_signoff(self, block: str) -> Optional[str]:
         """Run the ASAP7 sign-off extraction (OpenRCX -> SPEF) — and LVS once its
         collateral lands — on the block's routed .odb. Runs on EVERY completed
         block by default (staff-engineer discipline); skipped only with
@@ -2061,20 +2061,76 @@ class JANUSAutonomousAgent:
                        + glob.glob(os.path.join(out_dir, "*.spef.gz")))
         low = out.lower()
         skip_markers = ("missing", "not ready", "skipped", "not available")
-        if proc.returncode == 0 and spefs:
-            self.results[block].note += "  +signoff-rcx"
-            self.ui.good(f"{block}: sign-off RCX OK — SPEF "
-                         f"{os.path.basename(spefs[0])} "
-                         "(PD-UNVALIDATED: extraction wired, not re-timed here)")
-        elif any(m in low for m in skip_markers):
-            # Asset(s) absent (LVS collateral) or the extractor tool not on PATH:
-            # an honest, expected graceful skip — never a fabricated result.
-            self.ui.info(f"    {block}: sign-off skipped — asset/tool absent "
-                         f"(see {os.path.basename(log_path)}; e.g. LVS collateral "
-                         "is a follow-up)")
-        else:
-            self.ui.warn(f"{block}: sign-off rc={proc.returncode} "
-                         f"(block stays DONE; see {os.path.basename(log_path)})")
+        status = "skip"
+        # --- RCX ---------------------------------------------------------
+        if stage in ("rcx", "both"):
+            rcx_ok = "[rcx] ok" in low and bool(spefs)
+            if rcx_ok:
+                self.results[block].note += "  +signoff-rcx"
+                self.ui.good(f"{block}: sign-off RCX OK — SPEF "
+                             f"{os.path.basename(spefs[0])} "
+                             "(PD-UNVALIDATED: extraction wired, not re-timed here)")
+                status = "ok"
+        # --- LVS (interconnect / black-box mode; LVS_INTERCONNECT_<verdict>) -
+        if stage in ("lvs", "both"):
+            rpt = os.path.join(out_dir, "lvs.report")
+            if "LVS_INTERCONNECT_CLEAN" in out:
+                self.results[block].note += "  +signoff-lvs-ic"
+                self.ui.good(f"{block}: interconnect LVS CLEAN (std cells + macros "
+                             f"black-boxed; NOT device-level FinFET) -> {rpt}")
+                status = "ok" if status in ("ok", "skip") else status
+            elif "LVS_INTERCONNECT_MISMATCH" in out:
+                self.results[block].note += "  !lvs-ic-mismatch"
+                self.ui.warn(f"{block}: interconnect LVS MISMATCH (block stays DONE) "
+                             f"-> {rpt}")
+                status = "fail"
+            elif "LVS_INTERCONNECT_INCONCLUSIVE" in out:
+                self.ui.warn(f"{block}: interconnect LVS INCONCLUSIVE (DEF coarser than "
+                             f"tech LEF and tech-unit regen failed) -> {rpt}")
+                status = "fail" if status != "fail" else status
+        if status == "skip":
+            if proc.returncode != 0 and not any(m in low for m in skip_markers):
+                self.ui.warn(f"{block}: sign-off rc={proc.returncode} "
+                             f"(block stays DONE; see {os.path.basename(log_path)})")
+                status = "fail"
+            else:
+                # Asset(s)/tool absent: an honest, expected skip — never fabricated.
+                self.ui.info(f"    {block}: sign-off skipped — asset/tool absent "
+                             f"(see {os.path.basename(log_path)})")
+        elif proc.returncode != 0 and status == "ok":
+            # e.g. stage=both: one half passed, the other skipped/failed.
+            self.ui.info(f"    {block}: sign-off partial (rc={proc.returncode}; "
+                         f"see {os.path.basename(log_path)})")
+        return status
+
+    def _signoff_only(self) -> int:
+        """--signoff-only: run sign-off (--signoff-stage) on each --blocks
+        block's EXISTING routed .odb. No stamp check, no build, no manifest /
+        checkpoint update, no dashboard (mirrors --triage-slew)."""
+        blocks = list(self.args.blocks or [])
+        if not blocks:
+            self.ui.err("--signoff-only needs --blocks <block> (e.g. --blocks agent_domain)")
+            return 2
+        self.args.no_signoff = False
+        os.makedirs(self.run_dir, exist_ok=True)
+        rc_all = 0
+        for b in blocks:
+            if b not in self.results:
+                self.results[b] = BlockResult(block=b)
+            if not self._find_routed_odb(b):
+                self.ui.err(f"{b}: no routed .odb (block must have finished routing)")
+                rc_all = rc_all or 3
+                continue
+            if self.args.dry_run:
+                self.ui.info(f"  (dry-run) would sign off {b} "
+                             f"stage={self.args.signoff_stage}")
+                continue
+            st = self._run_signoff(b)
+            if st == "fail":
+                rc_all = rc_all or 1
+            elif st != "ok":
+                rc_all = rc_all or 4
+        return rc_all
 
     def _archive_golden(self, block: str, res: Optional["BlockResult"] = None) -> None:
         """Snapshot a CONVERGED block's logs/reports/final outputs into the
@@ -3470,6 +3526,8 @@ class JANUSAutonomousAgent:
     def run(self) -> int:
         if getattr(self.args, "triage_slew", False):
             return self._triage_slew()
+        if getattr(self.args, "signoff_only", False):
+            return self._signoff_only()
         self._preflight()
         if self.dashboard is not None:
             try:
@@ -4067,6 +4125,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "NUM_CORES). No stamp check, no build, no manifest update. "
                         "Log -> <run-dir>/slew_triage_<block>.log. Combine with "
                         "--dry-run to only print the make command.")
+    p.add_argument("--signoff-only", action="store_true",
+                   help="READ-ONLY: run sign-off (--signoff-stage rcx|lvs|both) on "
+                        "the EXISTING routed .odb of each --blocks block. No stamp "
+                        "check, no build, no manifest update. Exit 0 = all ok, "
+                        "1 = LVS mismatch/inconclusive or signoff error, "
+                        "3 = no routed odb, 4 = skipped (asset/tool absent).")
     p.add_argument("--post-triage-slew", action="store_true",
                    help="after the build finishes, run the same read-only slew "
                         "triage on every block that ended DONE in this run "
@@ -4186,10 +4250,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "and available now: it runs the staged ASAP7 OpenRCX "
                         "model to write a sign-off SPEF distinct from — and "
                         "higher fidelity than — the flow's built-in 6_final.spef "
-                        "estimate. 'lvs'/'both' also attempt device-LVS, which "
-                        "GRACEFULLY SKIPS until its collateral (golden CDL, "
-                        "BSIM-CMG models, KLayout FinFET runset) + engine are "
-                        "staged — it never fabricates a result.")
+                        "estimate. 'lvs'/'both' run device-level FinFET LVS if its "
+                        "collateral is staged, otherwise INTERCONNECT LVS: routed "
+                        "metal of the GDS vs 6_final.v with std cells + macros "
+                        "black-boxed (KLayout; DEF/GDS regenerated from the .odb "
+                        "at tech units). Never fabricates a result.")
     p.add_argument("--signoff-timeout", type=int, default=1800,
                    help="per-block sign-off wall-clock budget in seconds "
                         "(default 1800). On timeout the block stays DONE.")
