@@ -217,9 +217,90 @@ def parse_make_vars(path: str) -> Dict[str, str]:
     return out
 
 
+CONFIG_FMT = "2"   # §74: include-following + $(VAR)-expanded snapshot
+_REF_RX = re.compile(r"\$[({]([A-Za-z_][A-Za-z0-9_]*)[)}]")
+_INC_RX = re.compile(r"^\s*-?include\s+(.+?)\s*$")
+_ASSIGN_RX = re.compile(
+    r"^\s*(?:export\s+|override\s+)*([A-Za-z_][A-Za-z0-9_]*)\s*(:{1,2}=|\?=|\+=|=)\s*(.*?)\s*$")
+
+
+def parse_config_vars(path: str) -> Dict[str, str]:
+    """Like parse_make_vars, but (a) follows ``-include``/``include`` lines (so
+    vars set in e.g. user_core_ara_local.mk are VISIBLE to the resume diff),
+    honouring make's ``?=`` / ``+=`` / ``:=`` order semantics, and (b) expands
+    ``$(VAR)`` references against the final values, so
+    ``HOLD_SLACK_MARGIN = $(JANUS_ARA_HOLD_MARGIN_PS)`` diffs as its real value.
+    Conditionals (ifeq/ifdef) are not evaluated — every branch is read, which
+    can only make the diff MORE conservative. Unknown refs stay literal.
+    Adds ``__fmt`` and ``__refd`` (vars referenced by other vars) metadata."""
+    vals: Dict[str, str] = {}
+    refd: set = set()
+    seen: set = set()
+
+    def _read(fp: str, depth: int = 0) -> None:
+        fp = os.path.abspath(fp)
+        if depth > 4 or fp in seen or not os.path.isfile(fp):
+            return
+        seen.add(fp)
+        here = os.path.dirname(fp) + "/"
+        try:
+            lines = open(fp).read().splitlines()
+        except OSError:
+            return
+        for raw in lines:
+            line = raw.split("#", 1)[0].rstrip()
+            if not line.strip():
+                continue
+            mi = _INC_RX.match(line)
+            if mi:
+                tgt = mi.group(1).replace("$(dir $(lastword $(MAKEFILE_LIST)))", here)
+                if "$" not in tgt:
+                    _read(tgt if os.path.isabs(tgt) else os.path.join(here, tgt), depth + 1)
+                continue
+            m = _ASSIGN_RX.match(line)
+            if not m:
+                continue
+            k, op, v = m.group(1), m.group(2), m.group(3).strip()
+            refd.update(_REF_RX.findall(v))
+            if op == "?=":
+                vals.setdefault(k, v)
+            elif op == "+=":
+                vals[k] = (vals[k] + " " + v).strip() if k in vals else v
+            else:
+                vals[k] = v
+
+    if not path or not os.path.isfile(path):
+        return {}
+    _read(path)
+
+    def _expand(v: str, depth: int = 0) -> str:
+        if depth > 8 or "$" not in v:
+            return v
+        return _REF_RX.sub(
+            lambda mm: _expand(vals[mm.group(1)], depth + 1)
+            if mm.group(1) in vals else mm.group(0), v)
+
+    out = {k: _expand(v) for k, v in vals.items()}
+    out["__fmt"] = CONFIG_FMT
+    out["__refd"] = " ".join(sorted(refd & set(vals)))
+    return out
+
+
+def _is_mapped_key(k: str) -> bool:
+    return k in _KEY_STAGE_EXACT or any(k.upper().startswith(p.upper())
+                                        for p, _ in _KEY_STAGE_PREFIX)
+
+
 def _changed_keys(old: Dict[str, str], new: Dict[str, str]) -> List[str]:
-    keys = set(old) | set(new)
-    return sorted(k for k in keys if old.get(k) != new.get(k))
+    """Semantically changed keys. ``__*`` metadata is ignored. In fmt-2
+    snapshots a var that is only an INPUT to other vars (in ``__refd``) and
+    has no stage mapping of its own is skipped: its effect already shows up in
+    the expanded value of the var that references it, which maps precisely."""
+    refd = set((new.get("__refd") or "").split()) | set((old.get("__refd") or "").split())
+    keys = (set(old) | set(new))
+    return sorted(k for k in keys
+                  if not k.startswith("__") and old.get(k) != new.get(k)
+                  and not (k in refd and not _is_mapped_key(k)))
 
 
 def _earliest_stage_for_keys(keys: List[str]) -> Optional[str]:
@@ -254,6 +335,7 @@ class ResumePlan:
     remove_paths: List[str] = field(default_factory=list)  # .odb to delete
     reason: str = ""
     full_rebuild: bool = False
+    notes: List[str] = field(default_factory=list)       # per-stage provenance
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -261,6 +343,7 @@ class ResumePlan:
             "config_changed": self.config_changed, "changed_keys": self.changed_keys,
             "touch": self.touch_paths, "remove": self.remove_paths,
             "reason": self.reason, "full_rebuild": self.full_rebuild,
+            "notes": self.notes,
         }
 
 
@@ -387,7 +470,7 @@ class FlowState:
         if top_qor:
             rec["final_qor"] = top_qor
         if config_path is not None:
-            rec["config_vars"] = parse_make_vars(config_path)
+            rec["config_vars"] = parse_config_vars(config_path)
             rec["config_path"] = os.path.abspath(config_path)
         if sdc_path is not None:
             rec["sdc_vars"] = parse_make_vars(sdc_path)
@@ -412,6 +495,19 @@ class FlowState:
         rec["status"] = status
         if note is not None:
             rec["note"] = note[:240]
+        self.save()
+
+    def mark_inflight(self, block: str, config_path: Optional[str] = None,
+                      sdc_path: Optional[str] = None) -> None:
+        """§74: record the config a make is ABOUT to build with. If the run is
+        killed before the end-of-block snapshot, resume_plan can still tell
+        which on-disk .odb were produced by it (mtime >= ts) and with what."""
+        rec = self._block(block)
+        rec["inflight"] = {
+            "ts": time.time(),
+            "config_vars": parse_config_vars(config_path) if config_path else {},
+            "sdc_vars": parse_make_vars(sdc_path) if sdc_path else {},
+        }
         self.save()
 
     def last_completed_stage(self, block: str) -> Optional[str]:
@@ -480,10 +576,20 @@ class FlowState:
     # ---- resume planning ----------------------------------------------------
     def resume_plan(self, block: str, results_dir: str,
                     config_path: Optional[str] = None,
-                    sdc_path: Optional[str] = None) -> ResumePlan:
+                    sdc_path: Optional[str] = None,
+                    force_from: Optional[str] = None) -> ResumePlan:
         """Compute how to resume ``block`` given what is on disk now vs what the
-        manifest recorded.  See module docstring for the model."""
+        manifest recorded.  See module docstring for the model.
+
+        §74 provenance: every present stage .odb is also fingerprinted against
+        the manifest record. One that changed since it was recorded came from a
+        run that never snapshotted (killed): if an ``inflight`` record covers
+        it, that run's config is diffed instead; otherwise its config is
+        UNKNOWN and it is rebuilt. ``force_from`` (``--resume-from``) overrides
+        all detection: trust every stage before it, rebuild it and after."""
         plan = ResumePlan(block=block)
+        if force_from:
+            force_from = _canonical_stage(force_from)
         present = self.scan_stage_odbs(results_dir)
         if not present:
             plan.full_rebuild = True
@@ -498,23 +604,77 @@ class FlowState:
         rec = self.state.get("blocks", {}).get(block, {})
         old_cfg = rec.get("config_vars")
         old_sdc = rec.get("sdc_vars")
-        cur_cfg = parse_make_vars(config_path) if config_path else {}
         cur_sdc = parse_make_vars(sdc_path) if sdc_path else {}
+
+        def _cur_cfg_for(snapshot: Optional[Dict[str, str]]) -> Dict[str, str]:
+            # legacy (pre-§74) snapshots were single-file + unexpanded: compare
+            # like with like, else every $(..) value would look "changed".
+            if not config_path:
+                return {}
+            if snapshot is not None and snapshot.get("__fmt") == CONFIG_FMT:
+                return parse_config_vars(config_path)
+            return parse_make_vars(config_path)
+
+        def _diff(cfg_old, sdc_old) -> Tuple[List[str], Optional[str]]:
+            ck = _changed_keys(cfg_old, _cur_cfg_for(cfg_old))
+            sk = _changed_keys(sdc_old or {}, cur_sdc) if sdc_old is not None else []
+            cands = [x for x in (_earliest_stage_for_keys(ck), "1_synth" if sk else None) if x]
+            first = sorted(cands, key=_stage_key)[0] if cands else None
+            return ck + [f"SDC:{k}" for k in sk], first
+
+        def _earlier(a: Optional[str], b: Optional[str]) -> Optional[str]:
+            if not a or not b:
+                return a or b
+            return a if _stage_key(a) <= _stage_key(b) else b
 
         earliest_invalid: Optional[str] = None
         if old_cfg is not None:
-            ck = _changed_keys(old_cfg, cur_cfg)
-            sk = _changed_keys(old_sdc or {}, cur_sdc) if (old_sdc is not None) else []
-            plan.changed_keys = ck + [f"SDC:{k}" for k in sk]
-            plan.config_changed = bool(ck or sk)
-            stage_cfg = _earliest_stage_for_keys(ck)
-            stage_sdc = "1_synth" if sk else None
-            cands = [s for s in (stage_cfg, stage_sdc) if s]
-            if cands:
-                earliest_invalid = sorted(cands, key=_stage_key)[0]
+            keys, earliest_invalid = _diff(old_cfg, old_sdc)
+            plan.changed_keys = keys
+            plan.config_changed = bool(keys)
         else:
             # no prior semantic snapshot — trust what's on disk but say so
             plan.reason = "no stored config snapshot; reusing on-disk stages as-is. "
+
+        # §74 per-stage provenance (only meaningful once a snapshot exists)
+        if old_cfg is not None:
+            stages_rec = rec.get("stages", {})
+            infl = rec.get("inflight") or {}
+            for s in present_canon:
+                p = path_by_canon.get(s)
+                want = (stages_rec.get(s) or {}).get("sha")
+                if not p or (want and _sha256_file(p) == want):
+                    continue
+                try:
+                    mt = os.stat(p).st_mtime
+                except OSError:
+                    continue
+                if infl and mt >= infl.get("ts", 1e18) - 1:
+                    keys, first = _diff(infl.get("config_vars", {}), infl.get("sdc_vars"))
+                    if first and _stage_key(first) <= _stage_key(s):
+                        plan.notes.append(f"{s}: built by an interrupted run whose config "
+                                          f"differs ({', '.join(keys)}) -> rebuild")
+                        earliest_invalid = _earlier(earliest_invalid, s)
+                        plan.config_changed = True
+                    else:
+                        plan.notes.append(f"{s}: built by an interrupted run with a "
+                                          "compatible config -> reuse")
+                else:
+                    plan.notes.append(f"{s}: .odb changed since the manifest recorded it "
+                                      "and no in-flight record covers it (config UNKNOWN) "
+                                      "-> rebuild (override with --resume-from)")
+                    earliest_invalid = _earlier(earliest_invalid, s)
+                    plan.config_changed = True
+                # later stages are judged on their own, but anything after an
+                # invalid stage is invalid anyway; stop hashing past it.
+                if earliest_invalid and _stage_key(earliest_invalid) <= _stage_key(s):
+                    break
+
+        if force_from:
+            if earliest_invalid and _stage_key(earliest_invalid) < _stage_key(force_from):
+                plan.notes.append(f"--resume-from {force_from} OVERRIDES detection "
+                                  f"(which said rebuild from {earliest_invalid})")
+            earliest_invalid = force_from
 
         # reuse = present canonical stages strictly before earliest_invalid
         for s in present_canon:
