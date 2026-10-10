@@ -1195,10 +1195,23 @@ class JANUSAutonomousAgent:
         # was untimed (slack INF) — never timing-repaired, never in WNS.
         # The macro .libs are single-corner; reading the same file into both
         # corners is the standard academic-PDK practice (ihp/sky130 do this).
+        #
+        # §99 FIX — PER-CORNER CHILD ABSTRACTS. A hardened child that emits
+        # BOTH <blk>_fast.lib and <blk>_slow.lib (e.g. user_core_ara) was
+        # globbed into BOTH corners. OpenSTA keeps the LAST same-named library
+        # read into a corner (Sta::readLibertyAfter -> makeSceneMap overwrites
+        # the corner cell; STA-1140 "library ... already exists"), and the
+        # wildcard order is _fast then _slow, so the FAST (hold) corner timed
+        # the child with its SLOW arcs (user_core log 2026-10-09: fast corner
+        # reads user_core_ara_fast.lib then user_core_ara_slow.lib). Filter
+        # the opposite-corner file out of each list; single-corner libs
+        # (fakeram*, <blk>_typ.lib) still land in both corners unchanged.
         if os.environ.get("JANUS_MULTICORNER", "1") != "0":
             cmd += ["CORNERS=slow fast",
-                    "SLOW_LIB_FILES=$(WC_NLDM_LIB_FILES) $(ADDITIONAL_LIBS)",
-                    "FAST_LIB_FILES=$(BC_NLDM_LIB_FILES) $(ADDITIONAL_LIBS)"]
+                    "SLOW_LIB_FILES=$(WC_NLDM_LIB_FILES) "
+                    "$(filter-out %_fast.lib,$(ADDITIONAL_LIBS))",
+                    "FAST_LIB_FILES=$(BC_NLDM_LIB_FILES) "
+                    "$(filter-out %_slow.lib,$(ADDITIONAL_LIBS))"]
 
         # ---- enable scan flops in the cell library (DFT) ---------------------
         # The ASAP7 platform FORBIDS the scan flops by default:
@@ -2461,7 +2474,7 @@ class JANUSAutonomousAgent:
             self.ui.warn(f"fakeram OBS guard: skipped ({e})")
 
     def _ensure_lane_abstract_obs_fixed(self, block: str) -> None:
-        """Pre-flight guard against the lane-abstract M6-OBS gotcha (ara only).
+        """Pre-flight guard against the child-abstract power-pin OBS gotcha.
 
         ORFS generates every block's abstract with
             write_abstract_lef -bloat_occupied_layers   (generate_abstract.tcl)
@@ -2479,41 +2492,72 @@ class JANUSAutonomousAgent:
         Right before hardening user_core_ara (by which point its hard dependency
         user_core_ara_lane has already produced its abstract), scan the lane
         .lef and strip the OBS on whichever layer carries the VDD/VSS pins, using
-        the shared, deterministic, idempotent scripts/fix_abstract_obs.py. Only
-        fires for user_core_ara; a no-op if the lane .lef is absent (flat build)
-        or already stripped. Never raises — a guard must not break the flow.
+        the shared, deterministic, idempotent scripts/fix_abstract_obs.py. Fires
+        for user_core_ara (lane child) and, since §101, user_core (Ara + CVA6
+        children); a no-op if a child .lef is absent (flat build) or already
+        stripped. Never raises — a guard must not break the flow.
         """
-        if block != "user_core_ara":
+        # §101: generalised from user_core_ara-only to every parent that
+        # consumes hardened child abstracts. strip_above=True also removes OBS
+        # on layers ABOVE the pin layer (PDN-0006: Ara's M7-M9 mesh / CVA6's
+        # M7 signals bloat into OBS that fully covers the M6 power pins); the
+        # parent's POST_PDN hook restore_macro_route_obs.tcl re-blocks those
+        # layers for signal routing after pdngen. The lane keeps the original
+        # behaviour (it is capped at M6, nothing above to strip). For user_core
+        # the pin layer's own OBS is KEPT (keep_pin_layer) so the parent M6
+        # straps stay off the macros; set JANUS_OBS_STRIP_PIN_LAYER=1 to fall
+        # back to also stripping it (the lane's on-box-proven behaviour) if
+        # this OpenROAD build ever reports PDN-0232 on the macros.
+        children = {
+            "user_core_ara": (("user_core_ara_lane",), False),
+            "user_core": (("user_core_ara", "user_core_cva6"), True),
+        }.get(block)
+        if not children:
             return
+        for child in children[0]:
+            self._strip_child_abstract_obs(
+                block, child, children[1],
+                keep_pin_layer=children[1] and os.environ.get(
+                    "JANUS_OBS_STRIP_PIN_LAYER", "0") != "1")
+
+    def _strip_child_abstract_obs(self, block: str, child: str,
+                                  strip_above: bool,
+                                  keep_pin_layer: bool = False) -> None:
+        """Run fix_abstract_obs on one child's abstract .lef(s) (see above)."""
         try:
-            lef = self._find_abstract("user_core_ara_lane", ".lef")
-            if not lef or not os.path.isfile(lef):
-                return  # flat ara build (no lane macro) or not yet generated
+            lefs = []
+            for base in self._abstract_base_dirs(child):
+                lefs = sorted(glob.glob(os.path.join(base, "*.lef")))
+                if lefs:
+                    break
+            if not lefs:
+                return  # flat build (no child macro) or not yet generated
             scripts_dir = os.path.join(_ROOT, "scripts")
             if scripts_dir not in sys.path:
                 sys.path.insert(0, scripts_dir)
             try:
                 from fix_abstract_obs import fix_lef  # type: ignore
             except Exception as e:  # noqa
-                self.ui.warn(f"lane-abstract OBS guard: cannot load "
+                self.ui.warn(f"child-abstract OBS guard: cannot load "
                              f"fix_abstract_obs ({e}); skipping pre-flight check")
                 return
-            try:
-                changed, msg = fix_lef(lef)
-            except Exception as e:  # noqa
-                self.ui.warn(f"lane-abstract OBS guard: {os.path.basename(lef)}: "
-                             f"{e}")
-                return
-            if changed:
-                self.ui.warn(
-                    "lane-abstract OBS guard: power-pin-layer OBS auto-stripped "
-                    "from %s before hardening user_core_ara — %s. The bloated "
-                    "abstract OBS would otherwise blanket the lane's M6 power "
-                    "pins and recur as PDN-0232/PDN-0233." % (
-                        os.path.basename(lef), msg)
-                )
+            for lef in lefs:
+                try:
+                    changed, msg = fix_lef(lef, strip_above=strip_above,
+                                           keep_pin_layer=keep_pin_layer)
+                except Exception as e:  # noqa
+                    self.ui.warn(f"child-abstract OBS guard: "
+                                 f"{os.path.basename(lef)}: {e}")
+                    continue
+                if changed:
+                    self.ui.warn(
+                        "child-abstract OBS guard: power-pin OBS auto-stripped "
+                        "from %s before hardening %s — %s. The bloated "
+                        "abstract OBS would otherwise block the parent PDN "
+                        "(PDN-0232/0233 or PDN-0006)." % (
+                            os.path.basename(lef), block, msg))
         except Exception as e:  # noqa — a guard must never break the flow
-            self.ui.warn(f"lane-abstract OBS guard: skipped ({e})")
+            self.ui.warn(f"child-abstract OBS guard: skipped ({e})")
 
     def _render_live_panel(self, block, state, state_lock, t_start, log_path):
         """Build the in-place rich renderable for a serial-TTY live run.
