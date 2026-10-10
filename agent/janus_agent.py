@@ -1195,10 +1195,23 @@ class JANUSAutonomousAgent:
         # was untimed (slack INF) — never timing-repaired, never in WNS.
         # The macro .libs are single-corner; reading the same file into both
         # corners is the standard academic-PDK practice (ihp/sky130 do this).
+        #
+        # §99 FIX — PER-CORNER CHILD ABSTRACTS. A hardened child that emits
+        # BOTH <blk>_fast.lib and <blk>_slow.lib (e.g. user_core_ara) was
+        # globbed into BOTH corners. OpenSTA keeps the LAST same-named library
+        # read into a corner (Sta::readLibertyAfter -> makeSceneMap overwrites
+        # the corner cell; STA-1140 "library ... already exists"), and the
+        # wildcard order is _fast then _slow, so the FAST (hold) corner timed
+        # the child with its SLOW arcs (user_core log 2026-10-09: fast corner
+        # reads user_core_ara_fast.lib then user_core_ara_slow.lib). Filter
+        # the opposite-corner file out of each list; single-corner libs
+        # (fakeram*, <blk>_typ.lib) still land in both corners unchanged.
         if os.environ.get("JANUS_MULTICORNER", "1") != "0":
             cmd += ["CORNERS=slow fast",
-                    "SLOW_LIB_FILES=$(WC_NLDM_LIB_FILES) $(ADDITIONAL_LIBS)",
-                    "FAST_LIB_FILES=$(BC_NLDM_LIB_FILES) $(ADDITIONAL_LIBS)"]
+                    "SLOW_LIB_FILES=$(WC_NLDM_LIB_FILES) "
+                    "$(filter-out %_fast.lib,$(ADDITIONAL_LIBS))",
+                    "FAST_LIB_FILES=$(BC_NLDM_LIB_FILES) "
+                    "$(filter-out %_slow.lib,$(ADDITIONAL_LIBS))"]
 
         # ---- enable scan flops in the cell library (DFT) ---------------------
         # The ASAP7 platform FORBIDS the scan flops by default:
