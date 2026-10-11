@@ -92,6 +92,8 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     # §107 GRT pre-hook (sourced at the start of global_route.tcl): changing it
     # only invalidates routing, not synthesis.
     "PRE_GLOBAL_ROUTE_TCL": "5_route",
+    # §108 only consumed by global_route.tcl (-resistance_aware)
+    "ENABLE_RESISTANCE_AWARE": "5_route",
 }
 _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("SYNTH_", "1_synth"),
