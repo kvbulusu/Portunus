@@ -94,6 +94,8 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     "PRE_GLOBAL_ROUTE_TCL": "5_route",
     # §108 only consumed by global_route.tcl (-resistance_aware)
     "ENABLE_RESISTANCE_AWARE": "5_route",
+    # §109 read only by the PRE_GLOBAL_ROUTE hook
+    "JANUS_GRT_INCR_ALLOW_CONGESTION": "5_route",
 }
 _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("SYNTH_", "1_synth"),
