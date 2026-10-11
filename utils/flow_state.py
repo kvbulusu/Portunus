@@ -684,6 +684,32 @@ class FlowState:
                                   f"(which said rebuild from {earliest_invalid})")
             earliest_invalid = force_from
 
+        # §113 stale-SDC guard (overrides --resume-from). ORFS freezes the SDC at
+        # synthesis: `cp $(SDC_FILE) 1_2_yosys.sdc` -> 1_synth.sdc -> 2_floorplan.sdc,
+        # and every later stage reads THAT copy, never constraint.sdc. So resuming
+        # past 1_synth after an SDC edit silently runs the OLD constraints (run
+        # 20261011: §111 set_max_transition never reached 3_place..6_final —
+        # 1_2_yosys.sdc sha == pre-§111 SDC). The semantic sdc_vars diff above only
+        # sees `set var value` lines, not commands, so compare bytes instead.
+        # Escape hatch: JANUS_ALLOW_STALE_SDC=1.
+        frozen_sdc = os.path.join(results_dir, "1_2_yosys.sdc")
+        if (sdc_path and os.path.isfile(sdc_path) and os.path.isfile(frozen_sdc)
+                and _sha256_file(sdc_path) != _sha256_file(frozen_sdc)
+                and not (earliest_invalid and earliest_invalid == "1_synth")):
+            if os.environ.get("JANUS_ALLOW_STALE_SDC") == "1":
+                plan.notes.append("constraint.sdc differs from the SDC frozen at synth "
+                                  "(1_2_yosys.sdc) but JANUS_ALLOW_STALE_SDC=1 — reusing "
+                                  "stages WITH THE OLD CONSTRAINTS")
+            else:
+                plan.notes.append("constraint.sdc differs from the SDC frozen at synth "
+                                  f"(1_2_yosys.sdc); was rebuild from "
+                                  f"{earliest_invalid or 'nothing'} -> FORCED rebuild from "
+                                  "1_synth (later stages never re-read constraint.sdc). "
+                                  "Override: JANUS_ALLOW_STALE_SDC=1")
+                plan.changed_keys.append("SDC:<bytes>")
+                plan.config_changed = True
+                earliest_invalid = "1_synth"
+
         # reuse = present canonical stages strictly before earliest_invalid
         for s in present_canon:
             if earliest_invalid and _stage_key(s) >= _stage_key(earliest_invalid):
