@@ -89,6 +89,9 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     # `-setup` only; the 3_4 resize call is issued without -hold_margin; the
     # first hold repair (RSZ-0046, 165 endpoints) is in 4_1_cts.
     "HOLD_SLACK_MARGIN": "4_cts",
+    # §107 GRT pre-hook (sourced at the start of global_route.tcl): changing it
+    # only invalidates routing, not synthesis.
+    "PRE_GLOBAL_ROUTE_TCL": "5_route",
 }
 _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("SYNTH_", "1_synth"),
@@ -110,6 +113,7 @@ _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("DETAIL_ROUT", "5_route"),
     ("GRT_", "5_route"),
     ("DRT_", "5_route"),
+    ("JANUS_MACRO_DETOUR", "5_route"),   # §107 detour hook knobs (read in GRT)
 ]
 
 
