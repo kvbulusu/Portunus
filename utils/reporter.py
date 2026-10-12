@@ -26,8 +26,10 @@ _COLUMNS = [
     ("status", "Status"),
     ("attempts", "Attempts"),
     ("last_stage", "Last stage"),
-    ("wns_ns", "WNS (ns)"),
-    ("tns_ns", "TNS (ns)"),
+    # §121: ASAP7 Liberty time_unit = 1ps; the *_ns keys are legacy names
+    # (checkpoint.json compatibility) but the values are picoseconds.
+    ("wns_ns", "WNS (ps)"),
+    ("tns_ns", "TNS (ps)"),
     ("drc_violations", "DRC"),
     ("area", "Area"),
     ("power", "Power"),
