@@ -3796,35 +3796,45 @@ class JANUSAutonomousAgent:
                     stage = self.manifest.last_completed_stage(block) or ""
                 except Exception:
                     stage = ""
-            # Compact QoR summary for the email body.
-            bits = []
-            if res.wns_ns is not None:
-                bits.append(f"WNS(setup)={res.wns_ns} ps")
-            if res.hold_ps is not None:
-                bits.append(f"WNS(hold)={res.hold_ps} ps")
-            if res.tns_ns is not None:
-                bits.append(f"TNS={res.tns_ns} ps")
-            if res.drc_violations is not None:
-                bits.append(f"DRC={res.drc_violations}")
-            if res.area is not None:
-                bits.append(f"area={res.area}")
-            if res.utilization is not None:
-                bits.append(f"util={res.utilization}")
-            if res.tries:
-                bits.append(f"tries={res.tries}")
-            summary = "QoR: " + ", ".join(bits) if bits else ""
-            if res.note:
-                summary = (summary + "\n" if summary else "") + f"Note: {res.note}"
-            self.notifier.notify(
+            # §120: hand the notifier THIS block's dirs only. run_dir is
+            # display-only now — the old code passed the shared agent run dir
+            # and the notifier recursively globbed it, so under --parallel
+            # every block's agent log + signoff/* landed in each tarball.
+            def _leafdir(kind: str, found: Optional[str]) -> Optional[str]:
+                if found:
+                    return found
+                if not self.flow_dir:
+                    return None
+                for nm in (block, f"janus_{block}"):
+                    d = os.path.join(self.flow_dir, kind, "asap7", nm, self._leaf())
+                    if os.path.isdir(d):
+                        return d
+                return None
+            reports_dir = _leafdir("reports", self._reports_dir(block))
+            signoff = os.path.join(self.run_dir, "signoff", block)
+            # §121: the email QoR (path groups, DRV counts, DRC from
+            # 5_route_drc.rpt, skew, clock/fmax, triage) is rebuilt from the
+            # reports by utils/report_bundle.py with the dashboard's parsers;
+            # qor.json lands in the reports dir and inside the bundle.
+            qor = self.notifier.notify(
                 block=block,
                 status=res.status,
                 stage=stage,
                 run_dir=self.run_dir,
-                results_dir=self._results_dir(block),
-                reports_dir=self._reports_dir(block),
+                results_dir=_leafdir("results", self._results_dir(block)),
+                reports_dir=reports_dir,
+                logs_dir=_leafdir("logs", self._logs_dir(block)),
                 log_path=res.log_path or self._block_log(block),
-                summary=summary,
+                signoff_dir=signoff if os.path.isdir(signoff) else None,
+                tries=res.tries or None,
+                note=res.note or "",
+                qor_out_dir=reports_dir,
+                bundle_dir=os.path.join(self.run_dir, "bundles", block),
             )
+            if qor and qor.get("triage"):
+                tr = qor["triage"]
+                self.ui.warn(f"{block}: triage {tr.get('category')}: "
+                             f"{(tr.get('first_error') or '')[:160]}")
         except Exception as e:  # never let notification affect the run
             self.ui.debug(f"{block}: notification hook error (ignored): {e}")
 

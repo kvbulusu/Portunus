@@ -49,7 +49,9 @@ named  JANUS_runs/<block>_<timestamp>.
 from __future__ import annotations
 
 import glob
+import json
 import os
+import sys
 import smtplib
 import ssl
 import tarfile
@@ -67,6 +69,9 @@ from typing import Callable, List, Optional
 _DEFAULT_MAX_TAR_BYTES = 50 * 1024 * 1024
 _HEAVY_EXTS = (".odb", ".def", ".gds", ".gds.gz", ".spef", ".spef.gz",
                ".lef", ".lib", ".v.gz", ".cdl")
+_UTILS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _UTILS_DIR not in sys.path:
+    sys.path.insert(0, _UTILS_DIR)
 _DEFAULT_GDRIVE_CREDS = os.path.expanduser("~/.config/janus_gdrive_credentials.json")
 
 
@@ -134,11 +139,21 @@ class NotificationManager:
         stage: str = "",
         reports_dir: Optional[str] = None,
         out_dir: Optional[str] = None,
+        logs_dir: Optional[str] = None,
+        block_log: Optional[str] = None,
     ) -> Optional[str]:
-        """Tar+gzip the run logs and key reports for *block*.
+        """LEGACY fallback tarball (used only if report_bundle cannot import).
+
+        Per-block since §120: only *block_log* (or ``run_dir/<block>.log``),
+        the ORFS ``logs_dir`` / ``reports_dir`` / ``results_dir`` leaf dirs of
+        THIS block, non-recursive, critical reports first, and an oversize file
+        is skipped instead of ending collection.
+
+        Tar+gzip the run logs and key reports for *block*.
 
         Includes:
-          * every ``*.log`` under ``run_dir`` (the agent + ORFS console logs)
+          * the block's own agent log (never other blocks' logs)
+          * ORFS ``*.log``/``*.json`` under ``logs_dir``
           * every ``*.rpt`` / ``*.json`` / ``*.txt`` under ``reports_dir``
             (2_floorplan ... 6_finish stage reports, incl. 6_finish.rpt)
           * lightweight text results (``*.rpt``/``*.log``/``*.json``) under
@@ -158,11 +173,13 @@ class NotificationManager:
             members: List[tuple] = []  # (abs_path, arcname)
 
             def _add_glob(root: Optional[str], patterns, sub: str) -> None:
+                # NON-recursive (§120): reports/results/logs leaf dirs are
+                # flat; recursing into the shared agent run dir is what pulled
+                # every parallel block's log + signoff/* into one tarball.
                 if not root or not os.path.isdir(root):
                     return
                 for pat in patterns:
-                    for fp in glob.glob(os.path.join(root, "**", pat),
-                                        recursive=True):
+                    for fp in sorted(glob.glob(os.path.join(root, pat))):
                         if not os.path.isfile(fp):
                             continue
                         low = fp.lower()
@@ -172,10 +189,20 @@ class NotificationManager:
                                            os.path.relpath(fp, root))
                         members.append((fp, arc))
 
-            _add_glob(run_dir, ("*.log", "*.txt", "*.json", "manifest*"), "logs")
-            _add_glob(reports_dir, ("*.rpt", "*.json", "*.txt"), "reports")
+            # Only THIS block's agent log from the (shared) run dir.
+            blog = block_log or (os.path.join(run_dir, f"{block}.log")
+                                 if run_dir else None)
+            if blog and os.path.isfile(blog):
+                members.append((blog, os.path.join(block + safe_stage, "logs",
+                                                   os.path.basename(blog))))
+            _add_glob(logs_dir, ("*.log", "*.json"), "orfs_logs")
+            # final/critical reports first so the cap can never starve them
+            _add_glob(reports_dir, ("6_finish.rpt", "5_route_drc.rpt",
+                                    "4_cts_final.rpt", "*.rpt", "*.log",
+                                    "*.json", "*.txt"), "reports")
             # results dir: text artifacts only (skip .odb/.def/... via _HEAVY_EXTS)
-            _add_glob(results_dir, ("*.rpt", "*.log", "*.json", "*.txt"), "results")
+            _add_glob(results_dir, ("*.sdc", "*.rpt", "*.log", "*.json",
+                                    "*.txt", "*.tcl"), "results")
 
             if not members:
                 self.log(f"notification: nothing to tar for {block} "
@@ -196,10 +223,14 @@ class NotificationManager:
                     except OSError:
                         continue
                     if total + sz > self.max_tar_bytes:
-                        self.log(f"notification: tar size budget "
-                                 f"({self.max_tar_bytes} B) reached; "
-                                 f"{added} file(s) included, skipping the rest")
-                        break
+                        # skip THIS file and keep going (§120): the old
+                        # `break` dropped everything after the first big file
+                        # (results/ and the final reports were lost to ~45 MB
+                        # of janus_*_paths.rpt).
+                        self.log(f"notification: skipping {os.path.basename(fp)} "
+                                 f"({sz} B) -- tar size budget "
+                                 f"({self.max_tar_bytes} B) would be exceeded")
+                        continue
                     try:
                         tar.add(fp, arcname=arc)
                         total += sz
@@ -407,41 +438,101 @@ class NotificationManager:
         reports_dir: Optional[str] = None,
         log_path: Optional[str] = None,
         summary: str = "",
-    ) -> None:
-        """Build the tarball, email it, and (optionally) upload to Drive.
+        logs_dir: Optional[str] = None,
+        signoff_dir: Optional[str] = None,
+        tries: Optional[int] = None,
+        note: str = "",
+        qor_out_dir: Optional[str] = None,
+        bundle_dir: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Build the per-block bundle, email it, and (optionally) upload to Drive.
 
         Fully best-effort: swallows every error. Does nothing if no channel is
         enabled. *status* is the block's settled status (e.g. DONE / FAILED /
-        NEEDS_MANUAL); *stage* is the failing stage for failures.
+        NEEDS_MANUAL); *stage* is the manifest's last completed stage (hint
+        for the failing stage). *run_dir* is DISPLAY ONLY (§120): only
+        *log_path* (this block's agent log) is read from it.
+
+        §120/§121: uses report_bundle (stage-aware selection, INDEX.md,
+        qor.json, dashboard-parser QoR + failure triage in the body). qor.json
+        is also written to *qor_out_dir* (the block's ORFS reports dir) for
+        the adaptive flow. Falls back to the legacy tarball if report_bundle
+        cannot be imported. Returns the qor dict (or None).
         """
         if not self.enabled:
-            return
+            return None
+        qor = None
         try:
+            tarball = None
+            body = ""
+            failed_stage = stage
+            try:
+                import report_bundle as rb  # same dir (utils/)
+            except Exception as e:  # pragma: no cover
+                rb = None
+                self.log(f"notification: report_bundle unavailable ({e}); legacy tarball")
+            if rb is not None:
+                out = bundle_dir or os.path.join(
+                    run_dir or os.getcwd(), "bundles", block)
+                res = rb.build_bundle(
+                    block, status, out, logs_dir=logs_dir,
+                    reports_dir=reports_dir, results_dir=results_dir,
+                    agent_log=log_path, signoff_dir=signoff_dir,
+                    manifest_stage=stage, cap_bytes=self.max_tar_bytes,
+                    tries=tries, note=note)
+                qor = res["qor"]
+                tarball = res["tar"]
+                body = res["body"]
+                failed_stage = qor.get("failed_stage") or stage
+                if qor_out_dir and os.path.isdir(qor_out_dir):
+                    try:
+                        with open(os.path.join(qor_out_dir, "qor.json"), "w") as fh:
+                            json.dump(qor, fh, indent=2, default=str)
+                    except OSError as e:
+                        self.log(f"notification: cannot write qor.json to {qor_out_dir}: {e}")
+                self.log(f"notification: bundle {tarball} "
+                         f"({len(res['included'])} included, {len(res['skipped'])} skipped)")
+
             is_ok = str(status).upper() == "DONE"
             if is_ok:
                 subject = f"JANUS {block} completed"
             else:
-                where = f" at {stage}" if stage else ""
+                where = f" at {failed_stage}" if failed_stage else ""
                 subject = f"JANUS {block} {status}{where}"
+            if qor:
+                t = qor.get("timing") or {}
+                ws = t.get("setup_worst_slack")
+                if ws is not None:
+                    subject += f" | setup WS {ws:.1f} ps"
+                hs = t.get("hold_worst_slack")
+                if hs is not None:
+                    subject += f" hold WS {hs:.1f} ps"
 
-            lines = [
-                f"Block   : {block}",
-                f"Status  : {status}",
-            ]
-            if stage:
-                lines.append(f"Stage   : {stage}")
-            lines.append(f"Time    : {datetime.now().isoformat(timespec='seconds')}")
+            if not body:
+                lines = [f"Block   : {block}", f"Status  : {status}"]
+                if stage:
+                    lines.append(f"Stage   : {stage}")
+                lines.append(f"Time    : {datetime.now().isoformat(timespec='seconds')}")
+                body = "\n".join(lines)
+            extra = []
             if run_dir:
-                lines.append(f"Run dir : {run_dir}")
-            if summary:
-                lines += ["", summary]
-            body = "\n".join(lines)
+                extra.append(f"Run dir      : {run_dir}")
+            if reports_dir:
+                extra.append(f"Reports dir  : {reports_dir}")
+            if summary and not qor:
+                extra += ["", summary]
+            if tarball:
+                extra.append(f"Attachment   : {os.path.basename(tarball)} "
+                             "(see INDEX.md inside for what was included/skipped and why)")
+            body = body + ("\n\n" + "\n".join(extra) if extra else "")
 
-            tarball = self.collect_logs_and_reports(
-                run_dir=run_dir, results_dir=results_dir,
-                reports_dir=reports_dir, block=block,
-                stage=("" if is_ok else stage),
-            )
+            if tarball is None:
+                tarball = self.collect_logs_and_reports(
+                    run_dir=run_dir, results_dir=results_dir,
+                    reports_dir=reports_dir, block=block,
+                    stage=("" if is_ok else stage), logs_dir=logs_dir,
+                    block_log=log_path,
+                )
             attachments = [tarball] if tarball else []
             # If we somehow have no tarball but do have a single log, attach it
             # (bounded — only if it is under the size budget).
@@ -452,6 +543,7 @@ class NotificationManager:
                 except OSError:
                     pass
 
+            self.last_subject, self.last_body = subject, body
             self.send_email(subject, body, attachments)
 
             if self.gdrive_enabled and tarball:
@@ -459,3 +551,4 @@ class NotificationManager:
                 self.upload_to_drive([tarball], f"{block}_{ts}")
         except Exception as e:  # never propagate
             self.log(f"notification: notify() failed for {block}: {e}")
+        return qor
