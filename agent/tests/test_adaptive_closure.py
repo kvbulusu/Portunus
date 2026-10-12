@@ -68,3 +68,96 @@ def test_real_finish_rpt():
     r = ac.classify(q)
     print(q, r)
     assert r["class"] in ac.CLASSES
+
+
+# ---- §126: report_bundle qor.json -> classifier, knobs, SPEF STA parse ----
+FIX = os.path.join(os.path.dirname(__file__), "fixtures")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "utils"))
+
+
+def _fq(run):
+    import report_bundle as rb
+    return ac.from_qor(rb.build_qor("user_core_ara", "DONE", None, os.path.join(FIX, run), None))
+
+
+def test_from_qor_real_ara():
+    fq = _fq("ara_finish_run")
+    assert fq["wns_ps"] == -1948.44 and fq["hold_wns_ps"] == 8.95 and fq["tns_ps"] == -85378.1
+    assert fq["groups"]["reg2reg"]["wns_ps"] == -1948.44 and fq["groups"]["reg2out"]["wns_ps"] == 5.24
+    assert (fq["slew_viol"], fq["cap_viol"]) == (471, 8)
+    assert fq["skew_ps"] == 1074.05 and fq["latency_ps"] == 1487.02 and fq["clock_name"] == "core_clk"
+
+
+def test_ara_not_drv_limited():
+    # -1948 ps WNS with 479 DRV used to classify DRV_LIMITED; DRV is secondary.
+    r = ac.classify(_fq("ara_finish_run"))
+    assert r["class"] == "CLOCK_SKEW_LIMITED"
+    assert any("secondary" in e for e in r["evidence"])
+
+
+def test_drv_limited_only_near_met():
+    q = {"period_ps": P, "groups": {"reg2reg": {"wns_ps": -3000}}, "slew_viol": 400}
+    assert ac.classify(q)["class"] != "DRV_LIMITED"
+
+
+def test_from_qor_missing_never_invented():
+    fq = ac.from_qor({})
+    assert "wns_ps" not in fq and "period_ps" not in fq and "skew_ps" not in fq
+    assert ac.classify(fq)["class"] == "UNKNOWN"
+
+
+def test_class_knobs():
+    fq = _fq("ara_finish_run")
+    sdc = "create_clock -name core_clk -period 2857 [get_ports clk]\n"
+    k = ac.class_knobs("CLOCK_SKEW_LIMITED", fq, sdc_text=sdc)
+    assert k["vars"] == [] and "set_clock_latency 1487.020" in k["overlay"]
+    assert "set_clock_uncertainty -setup 428.571" in k["overlay"]  # capped at 15% period
+    assert "set_clock_uncertainty -setup 80.000" in k["restore"]    # original value
+    assert "unset_clock_latency [get_clocks {core_clk}]" in k["restore"]
+    # SDC already sets latency (ORFS gcd does) or SDC unknown -> latency untouched
+    for txt in (sdc + "set_clock_latency 36.2250 [get_clocks {core_clk}]\n", None):
+        k1 = ac.class_knobs("CLOCK_SKEW_LIMITED", fq, sdc_text=txt)
+        assert "set_clock_latency" not in k1["overlay"] and "unset_clock_latency" not in k1["restore"]
+        assert "set_clock_uncertainty -setup 428.571" in k1["overlay"]
+    assert ac.class_knobs("CLOCK_SKEW_LIMITED", {"skew_ps": 500})["overlay"] is None
+    # unknown original uncertainty -> never bump what we cannot restore
+    k2 = ac.class_knobs("CLOCK_SKEW_LIMITED", {"clock_name": "c", "skew_ps": 500, "latency_ps": 300}, sdc_text="")
+    assert "set_clock_uncertainty" not in k2["overlay"] and "unset_clock_latency" in k2["restore"]
+    assert ac.class_knobs("CLOCK_SKEW_LIMITED", {"clock_name": "c", "skew_ps": 500})["overlay"] is None
+    assert ac.class_knobs("MODERATE", {"period_ps": 1000, "wns_ps": -500})["vars"] == ["SETUP_SLACK_MARGIN=50"]
+    c = ac.class_knobs("CONGESTION_LIMITED", {}, 0.6)["vars"]
+    assert "PLACE_DENSITY=0.55" in c and "GPL_ROUTABILITY_DRIVEN=1" in c
+    assert ac.class_knobs("DRV_LIMITED", {})["vars"] == ["SLEW_MARGIN=20", "CAP_MARGIN=20"]
+    for cls in ("EASY", "IO_BUDGET_LIMITED", "LOGIC_DEPTH_LIMITED", "UNKNOWN"):
+        k = ac.class_knobs(cls, fq)
+        assert k["vars"] == [] and k["overlay"] is None
+
+
+def test_sdc_sets_latency():
+    assert ac.sdc_sets_latency("set_clock_latency 36.2 [get_clocks {core_clock}]", "core_clock")
+    assert not ac.sdc_sets_latency("set_clock_latency 36.2 [get_clocks {vclk_core_clock}]", "core_clock")
+    assert not ac.sdc_sets_latency("set_clock_latency -source 5 [get_clocks core_clock]", "core_clock")
+    assert not ac.sdc_sets_latency("# set_clock_latency 1 core_clock", "core_clock")
+
+
+def test_pass_summary_pick_best():
+    base = ac.pass_summary("base", _fq("ara_finish_run"))
+    better = dict(base, name="adapt1", wns_ps=-900.0)
+    assert ac.pick_best([base, better])["name"] == "adapt1"
+
+
+def test_parse_spef_sta():
+    t = "noise\njanus_spef_sta status ok\njanus_spef_sta worst_slack_max -12.5\njanus_spef_sta max_slew_viol 3\n"
+    assert ac.parse_spef_sta(t) == {"status": "ok", "worst_slack_max": -12.5, "max_slew_viol": 3.0}
+    assert ac.parse_spef_sta("") == {}
+
+
+def test_hook_tcl_complete():
+    hooks = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "hooks")
+    if not shutil.which("tclsh"):
+        pytest.skip("no tclsh")
+    for h in ("janus_adaptive_pre.tcl", "janus_adaptive_post.tcl", "janus_spef_sta.tcl"):
+        f = os.path.join(hooks, h)
+        out = subprocess.run(["tclsh"], input=f"set f [open {{{f}}}]; puts [info complete [read $f]]",
+                             capture_output=True, text=True).stdout
+        assert out.strip() == "1", h
