@@ -155,6 +155,7 @@ STAGE_TABLE: Dict[str, List[Tuple[str, str, int, str, int, str]]] = {
         ("reports", "5_route_drc.rpt", 20, "head", 2 << 20, "detail-route DRC"),
         ("reports", "drt_antennas.log", 21, "full", 1 << 20, "post-route antenna check"),
         ("logs", "5_2_*.log", 22, "tail", 1 << 20, "DRT log (iterations, violations, memory)"),
+        ("reports", "janus_08_detail_route_debug.rpt", 24, "head", 4 << 20, "post-route debug report (top-N paths, skew, DRV, histogram)"),
         ("logs", "5_3_*.log", 26, "tail", 1 << 19, "fill-cell log"),
         ("logs", "5_*.json", 40, "full", 1 << 20, "route metrics"),
         ("results", "5_*.sdc", 52, "full", 1 << 20, "route SDC"),
@@ -621,6 +622,28 @@ def triage_failure(texts: List[Tuple[str, str]], failed_stage: str) -> Dict[str,
 GROUPS = ("reg2reg", "reg2out", "in2reg", "in2out")
 
 
+_RE_DBG_GROUP = re.compile(
+    r"^group (\S+)\s+endpoints_sampled (\d+)\s+setup_ws (\S+)\s+violators (\d+)\s+tns (\S+)",
+    re.M)
+
+
+def parse_debug_groups(reports_dir: Optional[str]) -> Tuple[Dict[str, dict], Optional[str]]:
+    """§123: per-class (reg2reg/reg2out/in2reg/in2out) setup stats from the
+    newest janus_NN_*_debug.rpt (section 3, written by janus_debug_reports.tcl
+    via -from/-to class filters). This is the dashboard-style class split even
+    when the SDC's ORFS path groups are clock-named (e.g. gcd: core_clock)."""
+    cands = sorted(glob.glob(os.path.join(reports_dir or "#", "janus_[0-9][0-9]_*_debug.rpt")),
+                   reverse=True)
+    for f in cands:
+        out: Dict[str, dict] = {}
+        for g, n, ws, viol, tns in _RE_DBG_GROUP.findall(_read(f)):
+            out[g] = {"endpoints_sampled": int(n), "setup_ws": _fnum(ws),
+                      "violators": int(viol), "tns": _fnum(tns)}
+        if out:
+            return out, os.path.basename(f)
+    return {}, None
+
+
 def build_qor(block: str, status: str, logs_dir: Optional[str],
               reports_dir: Optional[str], results_dir: Optional[str],
               agent_log: Optional[str] = None, manifest_stage: str = "",
@@ -664,6 +687,13 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
         "wns_note": "ORFS 'wns max' is clamped to 0 when met; setup_worst_slack "
                     "('worst slack max') is the true worst setup slack.",
     }
+    dbg, dbg_src = parse_debug_groups(reports_dir)
+    if dbg:
+        timing["class_split"] = dbg
+        timing["class_split_source"] = dbg_src
+        for gname, gv in dbg.items():
+            if gname in GROUPS and timing["groups"]["setup"].get(gname) is None:
+                timing["groups"]["setup"][gname] = gv.get("setup_ws")
     q["timing"] = timing
     q["drv"] = {"max_slew": counts.get("max_slew"), "max_cap": counts.get("max_cap"),
                 "max_fanout": counts.get("max_fanout")}
@@ -785,9 +815,14 @@ def render_email_body(q: Dict[str, object]) -> str:
     L.append(f"  Hold       : worst slack {_f(t.get('hold_worst_slack'))}  violators {_f(v.get('hold'), '{}')}")
     L.append(f"  Verdict    : {t.get('verdict') or 'UNKNOWN'}")
     g = t.get("groups") or {}
-    L.append("  Path group     setup WS     hold WS")
+    cs = t.get("class_split") or {}
+    L.append("  Path group     setup WS     hold WS   setup viol   setup TNS")
     for name in GROUPS:
-        L.append(f"    {name:<10} {_f(g.get('setup', {}).get(name)):>10}  {_f(g.get('hold', {}).get(name)):>10}")
+        cv = cs.get(name) or {}
+        L.append(f"    {name:<10} {_f(g.get('setup', {}).get(name)):>10}  {_f(g.get('hold', {}).get(name)):>10}"
+                 f"   {_f(cv.get('violators'), '{}'):>10}  {_f(cv.get('tns')):>10}")
+    if cs:
+        L.append(f"    (class split: -from/-to filters, {t.get('class_split_source')})")
     for k, extra in (t.get("other_groups") or {}).items():
         for name, val in extra.items():
             L.append(f"    {name[:24]:<24} ({k}) {_f(val)}")
@@ -922,8 +957,14 @@ def select_files(block: str, status: str, stage_reached: str, failed_stage: str,
                 picks.append(Pick(p, f"{root}/{b}", 55 if near else 75, "head",
                                   2 << 20, "per-stage debug report"))
             elif low.endswith(IMAGE_EXTS):
+                # §123: the bundle is text-only by default (mail size, grep-able);
+                # PNGs stay in the reports dir. JANUS_BUNDLE_IMAGES=1 opts in.
+                if os.environ.get("JANUS_BUNDLE_IMAGES", "0") != "1":
+                    skipped.append((f"{root}/{b}", "image: bundle is text-only "
+                                    "(in reports dir; JANUS_BUNDLE_IMAGES=1 to attach)"))
+                    continue
                 picks.append(Pick(p, f"{root}/{b}", 65 if near else 90, "full",
-                                  4 << 20, "layout / clock-tree image"))
+                                  4 << 20, "layout / clock-tree image (JANUS_BUNDLE_IMAGES=1)"))
             elif low.endswith((".rpt", ".log", ".json", ".txt", ".sdc", ".tcl", ".csv", ".yaml", ".md")):
                 picks.append(Pick(p, f"{root}/{b}", 70, "head" if root == "reports" else "tail",
                                   1 << 20, "other text artifact"))

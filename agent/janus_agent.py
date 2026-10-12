@@ -1404,6 +1404,10 @@ class JANUSAutonomousAgent:
                 "POST_CTS_TCL":          "post_cts.tcl",
                 "POST_GLOBAL_ROUTE_TCL": "post_global_route.tcl",
                 "POST_DETAIL_ROUTE_TCL": "post_detail_route.tcl",
+                # §123: final_outputs.tcl `source_step_tcl POST FINAL_REPORT`
+                # (after report_metrics 6 + SPEF) -> janus_09_final_debug.rpt
+                # + final PNGs (worst path, clock tree, congestion, density).
+                "POST_FINAL_REPORT_TCL": "post_final_report.tcl",
             }
             for env_var, fname in step_wrappers.items():
                 cmd.append(f"{env_var}={os.path.join(hooks_dir, fname)}")
@@ -3812,6 +3816,8 @@ class JANUSAutonomousAgent:
                 return None
             reports_dir = _leafdir("reports", self._reports_dir(block))
             signoff = os.path.join(self.run_dir, "signoff", block)
+            if res.status != "DONE":
+                self._debug_rerun_on_fail(block)
             # §121: the email QoR (path groups, DRV counts, DRC from
             # 5_route_drc.rpt, skew, clock/fmax, triage) is rebuilt from the
             # reports by utils/report_bundle.py with the dashboard's parsers;
@@ -3837,6 +3843,39 @@ class JANUSAutonomousAgent:
                              f"{(tr.get('first_error') or '')[:160]}")
         except Exception as e:  # never let notification affect the run
             self.ui.debug(f"{block}: notification hook error (ignored): {e}")
+
+    def _debug_rerun_on_fail(self, block: str) -> None:
+        """§123: opt-in (JANUS_DEBUG_ON_FAIL=1) debug dump on the last good ODB.
+
+        POST_* hooks never fire for a step that errored, so a failed block has
+        no janus_*_debug.rpt for the failing region. This reruns
+        hooks/janus_debug_rerun.tcl through ORFS's own `make ... run` target
+        (same DESIGN_CONFIG / FLOW_VARIANT / CORNER as the block) under a hard
+        subprocess timeout (JANUS_DEBUG_TIMEOUT_S, default 900 s). Every error
+        and the timeout are swallowed: it can never change the run outcome.
+        """
+        if os.environ.get("JANUS_DEBUG_ON_FAIL", "0") != "1" or not self.flow_dir:
+            return
+        try:
+            timeout = int(os.environ.get("JANUS_DEBUG_TIMEOUT_S", "900"))
+        except ValueError:
+            timeout = 900
+        script = os.path.join(_ROOT, "scripts", "hooks", "janus_debug_rerun.tcl")
+        # _post_build_make_cmd marks every existing results/logs/objects file
+        # old (-o) so the `run` target can never trigger a stage rebuild.
+        cmd = self._post_build_make_cmd(block, [
+            "run", f"RUN_SCRIPT={script}",
+            "RUN_LOG_NAME_STEM=janus_debug_rerun",
+            "JANUS_DUMP_IMAGES=0",
+        ])
+        try:
+            self.ui.debug(f"{block}: debug rerun on last good ODB: {' '.join(cmd)}")
+            subprocess.run(cmd, cwd=self.flow_dir, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.ui.warn(f"{block}: debug rerun timed out after {timeout}s (ignored)")
+        except Exception as e:
+            self.ui.debug(f"{block}: debug rerun error (ignored): {e}")
 
     # ----- kepler-formal shared-library auto-fix -----------------------------
     def _ensure_kepler_libpath(self) -> None:
