@@ -503,10 +503,10 @@ class NotificationManager:
                 t = qor.get("timing") or {}
                 ws = t.get("setup_worst_slack")
                 if ws is not None:
-                    subject += f" | setup WS {ws:.1f} ps"
+                    subject += f" | setup WS {ws:.2f} ps"
                 hs = t.get("hold_worst_slack")
                 if hs is not None:
-                    subject += f" hold WS {hs:.1f} ps"
+                    subject += f" hold WS {hs:.2f} ps"
 
             if not body:
                 lines = [f"Block   : {block}", f"Status  : {status}"]

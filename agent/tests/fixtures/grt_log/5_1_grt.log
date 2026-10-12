@@ -1,0 +1,26 @@
+[INFO GRT-0199] Via filling finished.
+[INFO GRT-0111] Final number of vias: 8386778
+[INFO GRT-0112] Final usage 3D: 34803468
+
+[INFO GRT-0096] Final congestion report:
+Layer         Resource        Demand        Usage (%)    Max H / Max V / Total Congestion
+---------------------------------------------------------------------------------------
+M1                   0             0            0.00%             0 /  0 /  0
+M2             3750918       1921481           51.23%             0 /  0 /  0
+M3             5074093       2348795           46.29%             0 /  0 /  0
+M4             3887906       1659130           42.67%             0 /  0 /  0
+M5             3744132       1235631           33.00%             0 /  0 /  0
+M6             2380474       1314515           55.22%             0 /  0 /  0
+M7             2698760       1163582           43.12%             0 /  0 /  0
+---------------------------------------------------------------------------------------
+Total         21536283       9643134           44.78%             0 /  0 /  0
+
+[INFO GRT-0018] Total wirelength: 6927966 um
+global_route -start_incremental
+global_route -end_incremental -resistance_aware -congestion_report_file ./reports/asap7/user_core_ara/base/congestion_post_recover_power.rpt
+Repair antennas...
+[WARNING GRT-0246] No diode with LEF class CORE ANTENNACELL found.
+[INFO ANT-0002] Found 0 net violations.
+[INFO ANT-0001] Found 0 pin violations.
+Estimate parasitics...
+estimate_parasitics -global_routing
