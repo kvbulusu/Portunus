@@ -32,7 +32,9 @@ USAGE
     python3 janus_agent.py --blocks security noc      # run a subset
     python3 janus_agent.py --parallel 2               # run independent blocks together
     python3 janus_agent.py --resume                   # skip blocks already DONE
-    python3 janus_agent.py --no-llm                   # never call the LLM (manual mode)
+    python3 janus_agent.py --skip llm                 # never call the LLM (manual mode)
+    python3 janus_agent.py --skip golden signoff      # disable optional stages (see --skip)
+    python3 janus_agent.py --adaptive auto            # bounded variant rerun on hard blocks
     python3 janus_agent.py --interactive              # prompt on the shell before LLM/fixes
     python3 janus_agent.py --git-push                 # also push each committed fix to origin
 
@@ -42,12 +44,12 @@ After a block hardens (reaches DONE), the agent runs the ORFS abstract target
 (auto-detected from flow/Makefile; canonically `generate_abstract`) to emit that
 block's <name>.lef + <name>.lib. janus_soc_top consumes those as hard macros for
 bottom-up SoC assembly (peak RAM = the largest single block, not the whole SoC).
-Disable with --no-abstract. The top level itself is skipped (it is not a macro).
+Disable with --skip abstract. The top level itself is skipped (it is not a macro).
 
 SELF-HEALING + GIT (the "fix once, git pull, rerun" loop)
 ---------------------------------------------------------
 On a REAL RTL/config failure the agent asks the LLM, applies a minimal fix, and
-commits it to the CURRENT branch (disable with --no-git-commit; also push with
+commits it to the CURRENT branch (disable with --skip git-commit; also push with
 --git-push). config/SDC fixes are MIRRORED into the repo source
 (asic_flow/configs/...) so they survive a scripts/03 re-stamp — otherwise the
 next re-stamp would silently revert them. Your loop then becomes:
@@ -74,13 +76,14 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from concurrent.futures import (ThreadPoolExecutor, as_completed,
                                 wait, FIRST_COMPLETED)
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # --- make sibling (agent/) and ../utils importable, however we're invoked -----
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -2085,9 +2088,11 @@ class JANUSAutonomousAgent:
             if rcx_ok:
                 self.results[block].note += "  +signoff-rcx"
                 self.ui.good(f"{block}: sign-off RCX OK — SPEF "
-                             f"{os.path.basename(spefs[0])} "
-                             "(PD-UNVALIDATED: extraction wired, not re-timed here)")
+                             f"{os.path.basename(spefs[0])}")
                 status = "ok"
+                # §126: re-time on the sign-off SPEF (opt-out: --skip signoff-sta)
+                if not getattr(self.args, "no_signoff_sta", False):
+                    self._spef_sta(block, spefs[0], out_dir, timeout)
         # --- LVS (interconnect / black-box mode; LVS_INTERCONNECT_<verdict>) -
         if stage in ("lvs", "both"):
             rpt = os.path.join(out_dir, "lvs.report")
@@ -2119,6 +2124,54 @@ class JANUSAutonomousAgent:
             self.ui.info(f"    {block}: sign-off partial (rc={proc.returncode}; "
                          f"see {os.path.basename(log_path)})")
         return status
+
+    def _spef_sta(self, block: str, spef: str, out_dir: str,
+                  timeout: int) -> Optional[dict]:
+        """§126: STA back-annotated with the sign-off RCX SPEF (not the flow's
+        6_final.spef) via hooks/janus_spef_sta.tcl through ORFS `make run` with
+        the block's own corner env (_post_build_make_cmd: every existing stage
+        artifact passed as -o, so nothing is rebuilt). Writes spef_sta.rpt /
+        spef_sta.json in the signoff dir. Best-effort; never flips DONE.
+        >>> PD-UNTESTED <<<"""
+        if not self.flow_dir:
+            return None
+        import adaptive_closure as ac
+        script = os.path.join(_ROOT, "scripts", "hooks", "janus_spef_sta.tcl")
+        rpt = os.path.join(out_dir, "spef_sta.rpt")
+        cmd = self._post_build_make_cmd(block, [
+            "run", f"RUN_SCRIPT={script}", "RUN_LOG_NAME_STEM=janus_spef_sta",
+            f"JANUS_SPEF={os.path.abspath(spef)}", f"JANUS_SPEF_STA_RPT={rpt}",
+        ])
+        if getattr(self.args, "dry_run", False):
+            self.ui.info(f"{block}: [dry-run] SPEF STA: {' '.join(cmd)}")
+            return None
+        try:
+            with open(self._block_log(block), "ab", buffering=0) as logf:
+                logf.write(f"\n===== {block} : spef-sta {' '.join(cmd)} "
+                           f"@ {datetime.now()} =====\n".encode())
+                subprocess.run(cmd, cwd=self.flow_dir, stdout=logf,
+                               stderr=subprocess.STDOUT, timeout=timeout)
+            r = ac.parse_spef_sta(open(rpt, errors="replace").read()) if os.path.isfile(rpt) else {}
+        except subprocess.TimeoutExpired:
+            self.ui.warn(f"{block}: SPEF STA timed out after {timeout}s (ignored)")
+            return None
+        except Exception as e:
+            self.ui.warn(f"{block}: SPEF STA could not run: {e} (ignored)")
+            return None
+        try:
+            with open(os.path.join(out_dir, "spef_sta.json"), "w") as fh:
+                json.dump(r, fh, indent=2)
+        except OSError:
+            pass
+        if r.get("status") == "ok":
+            ws, hs = r.get("worst_slack_max"), r.get("worst_slack_min")
+            self.results[block].note += f"  +spef-sta WS {ws}/{hs}"
+            self.ui.good(f"{block}: SPEF-annotated STA: setup WS {ws} ps, hold WS {hs} "
+                         f"ps, TNS {r.get('tns_max')} -> {rpt}")
+        else:
+            self.ui.warn(f"{block}: SPEF STA status={r.get('status', 'no report')} "
+                         f"(see {os.path.basename(self._block_log(block))})")
+        return r
 
     def _signoff_only(self) -> int:
         """--signoff-only: run sign-off (--signoff-stage) on each --blocks
@@ -3777,10 +3830,20 @@ class JANUSAutonomousAgent:
                     self.results[b].status = "BLOCKED"
                     self.results[b].note = "skipped — a dependency failed"
 
+        # §126 adaptive closure (--adaptive, default advise): classify the
+        # settled QoR and write adaptive.json BEFORE the email so the plan
+        # rides in the agent note. Never raises.
+        adaptive = self._adaptive_advise(block, res)
+
         # Fire the completion/failure notification OUTSIDE the results lock so
         # the (possibly slow) email/Drive I/O never serialises other blocks.
         # Fully best-effort inside notify(); a failure here cannot affect the run.
         self._notify_settled(block, res)
+        if adaptive:
+            # notify() rewrites qor.json; re-attach the plan to it.
+            self._adaptive_write(block, adaptive)
+            # --adaptive auto: bounded variant rerun(s); base leaf untouched.
+            self._adaptive_auto(block, res, adaptive)
 
     def _notify_settled(self, block: str, res: "BlockResult") -> None:
         """Email (and optionally Drive-upload) the settled block's logs+reports.
@@ -3854,7 +3917,9 @@ class JANUSAutonomousAgent:
         subprocess timeout (JANUS_DEBUG_TIMEOUT_S, default 900 s). Every error
         and the timeout are swallowed: it can never change the run outcome.
         """
-        if os.environ.get("JANUS_DEBUG_ON_FAIL", "0") != "1" or not self.flow_dir:
+        on = (getattr(self.args, "debug_on_fail", False)
+              or os.environ.get("JANUS_DEBUG_ON_FAIL", "0") == "1")
+        if not on or not self.flow_dir:
             return
         try:
             timeout = int(os.environ.get("JANUS_DEBUG_TIMEOUT_S", "900"))
@@ -3876,6 +3941,297 @@ class JANUSAutonomousAgent:
             self.ui.warn(f"{block}: debug rerun timed out after {timeout}s (ignored)")
         except Exception as e:
             self.ui.debug(f"{block}: debug rerun error (ignored): {e}")
+
+    # ----- §126 adaptive closure: advise + bounded auto rerun ---------------
+    # adaptive_closure.py is pure (classify / plan / knobs). This section owns
+    # every side effect. Invariants: the base leaf is NEVER cleaned or written
+    # (only read + copied), protected blocks never rerun (plan()), passes are
+    # capped by --adaptive-max-passes, the best pass is REPORTED, never
+    # auto-promoted (promotion = an explicit --variant <leaf> run by kiran).
+    _ADAPT_VARIANT_RE = re.compile(r"[\w.-]*adapt\d+_[a-z_]+")
+
+    def _adaptive_mode(self) -> str:
+        # NB: independent of --no-physical (that only disables the macro-fit
+        # SRAM reshape self-heal); --adaptive off is the sole kill switch.
+        return getattr(self.args, "adaptive", None) or "advise"
+
+    def _adaptive_thresholds(self) -> dict:
+        th: dict = {}
+        spec = getattr(self.args, "adaptive_thresholds", None)
+        if spec:
+            th.update(json.load(open(spec)) if os.path.isfile(spec) else json.loads(spec))
+        mp = getattr(self.args, "adaptive_max_passes", None)
+        if mp is not None:
+            th["max_extra_passes"] = int(mp)
+        return th
+
+    def _adaptive_write(self, block: str, rec: dict,
+                        reports_dir: Optional[str] = None) -> None:
+        """adaptive.json + qor.json['adaptive'] in the block's reports dir."""
+        d = reports_dir or rec.get("_reports_dir")
+        if not d or not os.path.isdir(d):
+            return
+        body = {k: v for k, v in rec.items() if not k.startswith("_")}
+        try:
+            with open(os.path.join(d, "adaptive.json"), "w") as fh:
+                json.dump(body, fh, indent=2, default=str)
+            qp = os.path.join(d, "qor.json")
+            if os.path.isfile(qp):
+                with open(qp) as fh:
+                    q = json.load(fh)
+                q["adaptive"] = body
+                with open(qp, "w") as fh:
+                    json.dump(q, fh, indent=2, default=str)
+        except (OSError, ValueError) as e:
+            self.ui.debug(f"{block}: adaptive.json write failed (ignored): {e}")
+
+    def _adaptive_advise(self, block: str, res: "BlockResult") -> Optional[dict]:
+        """Classify the settled DONE block (qor rebuilt by report_bundle with
+        the dashboard parsers) and plan the next action. Never raises."""
+        mode = self._adaptive_mode()
+        if mode == "off" or res.status != "DONE" or getattr(self.args, "dry_run", False):
+            return None
+        try:
+            import adaptive_closure as ac
+            import report_bundle as rb
+            reports = self._reports_dir(block)
+            if not reports:
+                return None
+            qor = rb.build_qor(block, res.status, self._logs_dir(block), reports,
+                               self._results_dir(block))
+            fq = ac.from_qor(qor)
+            th = self._adaptive_thresholds()
+            rec = ac.plan(block, ac.classify(fq, th), mode, 0, th)
+            rec["input"] = fq
+            rec["passes"] = [ac.pass_summary(self._leaf(), fq)]
+            rec["_reports_dir"] = reports
+            self._adaptive_write(block, rec)
+            conf = rec.get("confidence")
+            tag = f"adaptive[{mode}] {rec['class']}->{rec['action']}"
+            if rec.get("blocked"):
+                tag += f" (blocked: {rec['blocked']})"
+            elif rec.get("rerun"):
+                tag += f" (rerun {rec['flow_variant']})"
+            res.note = (res.note + "  " if res.note else "") + tag
+            self.ui.info(f"{block}: {tag} conf={conf} — "
+                         f"{'; '.join(rec.get('evidence') or [])}")
+            return rec
+        except Exception as e:
+            self.ui.debug(f"{block}: adaptive advise error (ignored): {e}")
+            return None
+
+    @staticmethod
+    def _read_text(path: str) -> Optional[str]:
+        try:
+            with open(path, errors="ignore") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
+    def _place_density(self, block: str) -> Optional[float]:
+        try:
+            txt = open(self._config_path(block)).read()
+        except OSError:
+            return None
+        m = re.findall(r"^\s*(?:export\s+)?PLACE_DENSITY\s*[:?]?=\s*([0-9.]+)\s*$", txt, re.M)
+        try:
+            return float(m[-1]) if m else None
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _adaptive_seedable(sub: str, rel: str) -> bool:
+        """Stage <=2 artifacts (+ non-stage inputs like clock_period.txt) are
+        copied into the variant leaf; 3_* and later are what the pass rebuilds.
+        objects/ (merged libs, LEF caches) is copied whole."""
+        if sub == "objects":
+            return True
+        name = os.path.basename(rel)
+        if name.startswith(("1_", "2_")):
+            return True
+        if sub == "reports":
+            return name == "synth_stat.txt"
+        return not name[:1].isdigit() and not name.startswith(("janus_", "qor.json", "adaptive"))
+
+    def _adaptive_leaf_dirs(self, base_res: str, variant: str) -> Dict[str, tuple]:
+        res_root = os.path.join(self.flow_dir, "results")
+        rel = os.path.relpath(base_res, res_root)          # asap7/<design>/<leaf>
+        if rel.startswith(os.pardir):
+            raise ValueError(f"results dir {base_res} outside {res_root}")
+        parent = os.path.dirname(rel)
+        return {sub: (os.path.join(self.flow_dir, sub, rel),
+                      os.path.join(self.flow_dir, sub, parent, variant))
+                for sub in ("results", "logs", "reports", "objects")}
+
+    def _adaptive_seed(self, base_res: str, variant: str) -> List[str]:
+        """Copy the base leaf's <=2_floorplan state into a FRESH variant leaf.
+        Only the variant leaf (name-validated) is ever deleted. Returns the
+        flow_dir-relative seeded results/logs/objects files (make -o list)."""
+        if not self._ADAPT_VARIANT_RE.fullmatch(variant):
+            raise ValueError(f"refusing non-adaptive variant leaf {variant!r}")
+        seeded: List[str] = []
+        for sub, (src, dst) in self._adaptive_leaf_dirs(base_res, variant).items():
+            if os.path.basename(dst) != variant or os.path.realpath(dst) == os.path.realpath(src):
+                raise ValueError(f"variant leaf {dst} would alias the base leaf")
+            if os.path.isdir(dst):
+                shutil.rmtree(dst)
+            os.makedirs(dst, exist_ok=True)
+            if not os.path.isdir(src):
+                continue
+            for root, _dirs, files in os.walk(src):
+                for fn in sorted(files):
+                    rel = os.path.relpath(os.path.join(root, fn), src)
+                    if not self._adaptive_seedable(sub, rel):
+                        continue
+                    out = os.path.join(dst, rel)
+                    os.makedirs(os.path.dirname(out), exist_ok=True)
+                    shutil.copy2(os.path.join(root, fn), out)
+                    if sub != "reports":
+                        seeded.append(os.path.relpath(out, self.flow_dir))
+        return seeded
+
+    def _adaptive_variant_cmd(self, block: str, variant: str, knobs: dict,
+                              seeded: List[str], overlay: Optional[str],
+                              restore: Optional[str] = None) -> List[str]:
+        """The block's own make line (NUM_CORES / CORNER=WC / CORNERS / libs /
+        DONT_USE / force vars / debug hooks / --extra-make) re-pointed at the
+        variant leaf: base -o's and FLOW_VARIANT dropped, the class knobs and
+        -o for every seeded artifact appended (later command-line assignment
+        wins in GNU make, so knobs override block force vars)."""
+        base = self._make_cmd(block)
+        cmd: List[str] = []
+        skip = False
+        for tok in base:
+            if skip:
+                skip = False
+                continue
+            if tok == "-o":
+                skip = True
+                continue
+            if tok.startswith("FLOW_VARIANT="):
+                continue
+            cmd.append(tok)
+        cmd.append(f"FLOW_VARIANT={variant}")
+        cmd += list(knobs.get("vars") or [])
+        if overlay:
+            hooks = os.path.join(_ROOT, "scripts", "hooks")
+            pre = os.path.join(hooks, "janus_adaptive_pre.tcl")
+            cmd.append(f"JANUS_CLOCK_LATENCY_TCL={overlay}")
+            cmd += [f"{v}={pre}" for v in
+                    ("PRE_GLOBAL_PLACE_TCL", "PRE_RESIZE_TCL", "PRE_DETAIL_PLACE_TCL")]
+            if restore:
+                # detail_place.tcl writes 3_place.sdc right after POST_DETAIL_PLACE
+                # and CTS loads it: undo the uncertainty bump there, chaining
+                # whatever POST_DETAIL_PLACE_TCL (debug hook) the base line set.
+                chain = ""
+                for i, tok in enumerate(cmd):
+                    if tok.startswith("POST_DETAIL_PLACE_TCL="):
+                        chain = tok.split("=", 1)[1]
+                        del cmd[i]
+                        break
+                cmd += [f"JANUS_CLOCK_RESTORE_TCL={restore}",
+                        f"JANUS_ADAPT_CHAIN_POST={chain}",
+                        f"POST_DETAIL_PLACE_TCL={os.path.join(hooks, 'janus_adaptive_post.tcl')}"]
+        for s in seeded:
+            cmd += ["-o", s]
+        return cmd
+
+    def _adaptive_run_variant(self, block: str, base_res: str, variant: str,
+                              knobs: dict) -> dict:
+        """One bounded pass from 3_place in its own FLOW_VARIANT leaf.
+        >>> PD-UNTESTED <<< (seed + make line are unit-tested in the sandbox)."""
+        import adaptive_closure as ac
+        import report_bundle as rb
+        run = {"variant": variant, "knobs": knobs, "status": "NOT_RUN"}
+        seeded = self._adaptive_seed(base_res, variant)
+        dirs = self._adaptive_leaf_dirs(base_res, variant)
+        overlay = None
+        if knobs.get("overlay"):
+            overlay = os.path.join(dirs["results"][1], "janus_adaptive_latency.tcl")
+            with open(overlay, "w") as fh:
+                fh.write(knobs["overlay"])
+        restore = None
+        if overlay and knobs.get("restore"):  # always set alongside an overlay
+            restore = os.path.join(dirs["results"][1], "janus_adaptive_restore.tcl")
+            with open(restore, "w") as fh:
+                fh.write(knobs["restore"])
+        cmd = self._adaptive_variant_cmd(block, variant, knobs, seeded, overlay, restore)
+        run["cmd"] = " ".join(cmd)
+        run["seeded"] = len(seeded)
+        if getattr(self.args, "dry_run", False):
+            self.ui.info(f"{block}: [dry-run] adaptive pass: {run['cmd']}")
+            run["status"] = "DRY_RUN"
+            return run
+        try:
+            timeout = int(os.environ.get("JANUS_ADAPTIVE_TIMEOUT_S", "43200"))
+        except ValueError:
+            timeout = 43200
+        self.ui.step(f"{block}: adaptive pass {variant} ({'; '.join(knobs.get('notes') or [])}) "
+                     f"— {len(seeded)} seeded artifact(s) from {os.path.basename(base_res)}")
+        try:
+            with open(self._block_log(block), "ab", buffering=0) as logf:
+                logf.write(f"\n===== {block} : adaptive {variant} {run['cmd']} "
+                           f"@ {datetime.now()} =====\n".encode())
+                rc = subprocess.run(cmd, cwd=self.flow_dir, stdout=logf,
+                                    stderr=subprocess.STDOUT, timeout=timeout).returncode
+        except subprocess.TimeoutExpired:
+            rc = -1
+            run["error"] = f"timeout {timeout}s"
+        run["rc"] = rc
+        vres, vrep, vlog = dirs["results"][1], dirs["reports"][1], dirs["logs"][1]
+        done = rc == 0 and os.path.isfile(os.path.join(vres, "6_final.odb"))
+        run["status"] = "DONE" if done else "FAILED"
+        qor = rb.build_qor(block, run["status"], vlog, vrep, vres)
+        try:
+            with open(os.path.join(vrep, "qor.json"), "w") as fh:
+                json.dump(qor, fh, indent=2, default=str)
+        except OSError:
+            pass
+        run["input"] = ac.from_qor(qor)
+        return run
+
+    def _adaptive_auto(self, block: str, res: "BlockResult", rec: dict) -> None:
+        """--adaptive auto: run at most max_extra_passes variant passes while
+        plan() says rerun; pick_best over base + passes; report, never promote."""
+        if not rec or rec.get("mode") != "auto" or not rec.get("rerun"):
+            return
+        try:
+            import adaptive_closure as ac
+            th = self._adaptive_thresholds()
+            base_res = self._results_dir(block)
+            if not base_res or not self.flow_dir:
+                return
+            leaf = self._leaf()
+            cur, done_n = rec, 0
+            rec["runs"] = []
+            while cur.get("rerun"):
+                variant = cur["flow_variant"] if leaf == "base" else f"{leaf}_{cur['flow_variant']}"
+                knobs = ac.class_knobs(cur["class"], cur["input"], self._place_density(block),
+                                       self._read_text(os.path.join(base_res, "2_floorplan.sdc")))
+                if not knobs["vars"] and not knobs["overlay"]:
+                    rec["runs"].append({"variant": variant, "status": "SKIPPED",
+                                        "reason": "; ".join(knobs["notes"]) or "no safe knobs"})
+                    break
+                run = self._adaptive_run_variant(block, base_res, variant, knobs)
+                done_n += 1
+                rec["runs"].append(run)
+                if run["status"] != "DONE":
+                    break
+                rec["passes"].append(ac.pass_summary(variant, run["input"]))
+                cur = ac.plan(block, ac.classify(run["input"], th), "auto", done_n, th)
+                cur["input"] = run["input"]
+                run["next"] = {k: cur.get(k) for k in ("class", "action", "rerun", "blocked")}
+            if len(rec["passes"]) > 1:
+                best = ac.pick_best(rec["passes"])
+                rec["best"] = best["name"]
+                if best["name"] != leaf:
+                    res.note += f"  adaptive best={best['name']} (promote: --variant {best['name']})"
+                self.ui.good(f"{block}: adaptive best pass = {best['name']} "
+                             f"(WNS {best.get('wns_ps')} ps, hold {best.get('hold_wns_ps')} ps)")
+            self._adaptive_write(block, rec)
+        except Exception as e:
+            self.ui.warn(f"{block}: adaptive auto error (ignored; base untouched): {e}")
+            self._adaptive_write(block, rec)
 
     # ----- kepler-formal shared-library auto-fix -----------------------------
     def _ensure_kepler_libpath(self) -> None:
@@ -4077,28 +4433,131 @@ class JANUSAutonomousAgent:
 # ---------------------------------------------------------------------------- #
 # CLI
 # ---------------------------------------------------------------------------- #
-# Consolidated --skip token -> the args.<attr> boolean it forces True.
-# Each token is the ergonomic name; the attr is the existing --no-* switch
-# so all downstream code stays unchanged.
+# Consolidated --skip token -> (args.<attr> it forces True, one-line meaning).
+# The attr is the legacy --no-* switch (still accepted, hidden from --help) so
+# all downstream code stays unchanged. This table is the single source of
+# truth for the --skip choices AND its help text.
 _SKIP_MAP = {
-    "sram":           "no_sram_regen",
-    "abstract":       "no_abstract",
-    "physical":       "no_physical",
-    "post-route-opt": "no_post_route_opt",
-    "golden":         "no_golden",
-    "signoff":        "no_signoff",
-    "llm":            "no_llm",
-    "git-commit":     "no_git_commit",
+    "llm":            ("no_llm", "never call the LLM; stop a block on first failure"),
+    "git-commit":     ("no_git_commit", "do not git-commit LLM fixes"),
+    "macro-reshape":  ("no_physical", "no deterministic macro-fit (MPL-0006) SRAM reshape self-heal"),
+    "physical":       ("no_physical", "legacy alias of macro-reshape"),
+    "sram":           ("no_sram_regen", "on reshape, edit 04_setup_srams.sh but do not regenerate macros"),
+    "abstract":       ("no_abstract", "no .lef/.lib abstract after a block hardens"),
+    "post-route-opt": ("no_post_route_opt", "no adaptive post-route hold/setup/DRC ECO (keep-if-better)"),
+    "debug-dump":     ("no_debug_dump", "no per-stage POST_*_TCL debug hooks (timing rpts/netlists/.png)"),
+    "debug-images":   ("no_debug_images", "keep debug rpts/netlists, skip the .png layout/clock-tree images"),
+    "golden":         ("no_golden", "no golden sign-off archiving/commit"),
+    "signoff":        ("no_signoff", "no sign-off (RCX/LVS) on DONE blocks"),
+    "signoff-sta":    ("no_signoff_sta", "no STA re-timing on the sign-off RCX SPEF"),
+    "stamp-check":    ("skip_stamp_check", "bypass the pre-flight stamp-freshness guard"),
 }
+
+# Read-only / exit-early modes: at most one per invocation.
+_EXCLUSIVE_MODES = ("status", "gc", "gc_dry_run", "resume_preview", "estimate",
+                    "signoff_only", "triage_slew")
+_ADAPTIVE_MAX_PASSES_CAP = 5
 
 
 def _apply_skips(args: argparse.Namespace) -> None:
     """Fold the consolidated --skip tokens into the individual --no-* booleans
     (OR-ing, so an explicit --no-* still wins). Idempotent."""
     for tok in (getattr(args, "skip", None) or []):
-        attr = _SKIP_MAP.get(tok)
-        if attr is not None:
-            setattr(args, attr, True)
+        ent = _SKIP_MAP.get(tok)
+        if ent is not None:
+            setattr(args, ent[0], True)
+
+
+def _flag(dest: str) -> str:
+    return "--" + dest.replace("_", "-")
+
+
+def _validate_args(args: argparse.Namespace) -> Tuple[List[str], List[str]]:
+    """Cross-flag consistency check, run after _apply_skips(). Returns
+    (errors, warnings); any error aborts main() with exit code 2 BEFORE any
+    work starts. Warnings flag flags that are silently ignored."""
+    err: List[str] = []
+    warn: List[str] = []
+    g = lambda k, d=None: getattr(args, k, d)  # noqa: E731
+
+    modes = [_flag(m) for m in _EXCLUSIVE_MODES if g(m)]
+    if len(modes) > 1:
+        err.append(f"{' / '.join(modes)} are mutually exclusive (each is a "
+                   "separate read-only/exit-early mode)")
+    if modes and g("post_triage_slew"):
+        err.append(f"--post-triage-slew needs a build; it conflicts with {modes[0]}")
+    if g("resume_from") and (g("clean") or g("force_blocks")):
+        err.append("--resume-from trusts stages before STAGE on disk; it "
+                   "conflicts with --clean/--force-blocks (which wipe them)")
+    if g("clean") and g("force_blocks"):
+        warn.append("--clean already forces every targeted block; "
+                    "--force-blocks is redundant")
+    if g("yes") and not g("gc"):
+        warn.append("--yes only answers the --gc prompt; ignored")
+    if g("no_git_commit") and (g("git_push") or g("git_sync_branches")):
+        err.append("--git-push/--git-sync-branches publish committed fixes; "
+                   "they conflict with --skip git-commit (--no-git-commit)")
+    if g("no_golden") and g("golden_include_heavy"):
+        err.append("--golden-include-heavy conflicts with --skip golden (--no-golden)")
+    if g("no_golden") and g("golden_dir"):
+        warn.append("--golden-dir ignored under --skip golden")
+    if g("signoff_only") and g("no_signoff"):
+        err.append("--signoff-only conflicts with --skip signoff (--no-signoff)")
+    if g("interactive") and g("no_llm"):
+        warn.append("--interactive with --skip llm only prompts before "
+                    "deterministic fixes (no LLM calls will be made)")
+    if g("post_triage_slew") and g("dry_run"):
+        warn.append("--post-triage-slew does nothing under --dry-run")
+    if g("variants") and g("variant", "base") != "base":
+        err.append("--variant sets ONE leaf; --variants fans out and sets each "
+                   "child's leaf itself — use one or the other")
+    for kv in (g("extra_make") or []):
+        if "=" not in kv or not kv.split("=", 1)[0].strip():
+            err.append(f"--extra-make expects VAR=VAL, got {kv!r}")
+
+    # ---- adaptive closure
+    mode = g("adaptive") or "advise"
+    if mode == "off" and (g("adaptive_max_passes") is not None
+                          or g("adaptive_thresholds")):
+        err.append("--adaptive-max-passes/--adaptive-thresholds need "
+                   "--adaptive advise|auto (got off)")
+    if mode == "auto" and g("dry_run"):
+        err.append("--adaptive auto launches real reruns; it conflicts with --dry-run")
+    mp = g("adaptive_max_passes")
+    if mp is not None and not 0 <= mp <= _ADAPTIVE_MAX_PASSES_CAP:
+        err.append(f"--adaptive-max-passes must be 0..{_ADAPTIVE_MAX_PASSES_CAP}, got {mp}")
+    if mp and mode == "advise":
+        warn.append("--adaptive-max-passes only bounds reruns under --adaptive auto")
+    spec = g("adaptive_thresholds")
+    if spec:
+        try:
+            import adaptive_closure as _ac
+            th = (json.load(open(spec)) if os.path.isfile(spec)
+                  else json.loads(spec))
+            if not isinstance(th, dict):
+                raise ValueError("must be a JSON object")
+            bad = sorted(set(th) - set(_ac.DEFAULT_THRESHOLDS))
+            if bad:
+                raise ValueError(f"unknown key(s) {bad}; valid: "
+                                 f"{sorted(_ac.DEFAULT_THRESHOLDS)}")
+            if "max_extra_passes" in th and mp is not None:
+                warn.append("--adaptive-max-passes overrides max_extra_passes "
+                            "in --adaptive-thresholds")
+        except Exception as e:  # noqa: BLE001
+            err.append(f"--adaptive-thresholds: {e}")
+
+    # ---- numeric ranges
+    for dest, lo in (("parallel", 1), ("max_retries", 1), ("num_cores", 1),
+                     ("drc_handful", 0), ("signoff_timeout", 1),
+                     ("variants_reserve_cores", 0), ("llm_retries", 0),
+                     ("golden_wns_margin_ps", 0), ("golden_hold_margin_ps", 0)):
+        v = g(dest)
+        if v is not None and v < lo:
+            err.append(f"{_flag(dest)} must be >= {lo}, got {v}")
+    port = g("dashboard_port")
+    if port is not None and not 0 <= port <= 65535:
+        err.append(f"--dashboard-port must be 0..65535, got {port}")
+    return err, warn
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -4203,12 +4662,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "(never removes anything).")
     p.add_argument("--yes", action="store_true",
                    help="answer 'yes' to the --gc deletion prompt (non-interactive).")
-    p.add_argument("--skip-stamp-check", action="store_true",
-                   help="bypass the pre-flight stamp-freshness guard that aborts "
-                        "a run when the ORFS stamped config.mk/<blk>_local.mk "
-                        "differ from the repo source (i.e. scripts/03 was not "
-                        "re-run after a config edit/pull). Only use when the "
-                        "stamp is intentionally different from source.")
+    p.add_argument("--skip-stamp-check", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--dry-run", action="store_true",
                    help="print the make commands but do not run anything")
     p.add_argument("--triage-slew", action="store_true",
@@ -4231,15 +4685,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "code still reflects the build only.")
     p.add_argument("--estimate", action="store_true",
                    help="print the execution plan + rough cost estimate, then exit")
-    p.add_argument("--no-llm", action="store_true",
-                   help="never call the LLM; stop a block on first failure")
+    p.add_argument("--no-llm", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--interactive", action="store_true",
                    help="prompt on the shell before spending an LLM call and "
                         "before applying fixes (only if stdin is a TTY; "
                         "otherwise runs fully autonomously)")
-    p.add_argument("--no-git-commit", action="store_true",
-                   help="do NOT git-commit LLM fixes (default: commit them to "
-                        "the current branch so you can just `git pull`)")
+    p.add_argument("--no-git-commit", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--git-push", action="store_true",
                    help="after committing a fix, push the current branch to "
                         "origin (default: off; uses your existing git creds)")
@@ -4262,54 +4713,19 @@ def build_parser() -> argparse.ArgumentParser:
                         "cross-stage evidence analyzer (Tier-1). Normally "
                         "auto-detected under $ORFS/flow/reports/...; set this to "
                         "point at a saved reports dir (e.g. to replay a failure).")
-    p.add_argument("--no-physical", action="store_true",
-                   help="disable the deterministic macro-fit (MPL-0006) SRAM "
-                        "reshape self-heal; send such failures to the LLM instead")
-    p.add_argument("--no-sram-regen", action="store_true",
-                   help="when reshaping SRAMs, edit scripts/04_setup_srams.sh but "
-                        "do NOT regenerate the macros in-process (you regenerate "
-                        "manually on `git pull` before --resume)")
-    p.add_argument("--no-abstract", action="store_true",
-                   help="skip generating each block's .lef/.lib abstract after "
-                        "it hardens (default: generate them for hierarchical "
-                        "top-level assembly)")
-    p.add_argument("--no-post-route-opt", action="store_true",
-                   help="disable the adaptive post-route ECO pass. By default, "
-                        "when a hardened block still has a setup/hold violation "
-                        "the agent runs an incremental repair (hold first — it "
-                        "is functionally critical), adopts it ONLY if timing "
-                        "strictly improves, and otherwise discards it. If timing "
-                        "is closed but a handful of DRCs remain it runs a "
-                        "DRC-only cleanup under the same keep/revert policy.")
-    p.add_argument("--no-debug-dump", action="store_true",
-                   help="disable the per-stage debug dumps. By default the "
-                        "agent wires POST_<STEP>_TCL hooks (asic_flow/scripts/"
-                        "hooks/) that, at the end of floorplan / macro-place / "
-                        "place / resize / CTS / route, emit per-stage timing "
-                        "reports (top-100 reg2reg, reg2out, in2reg for both "
-                        "setup(max) and hold(min)), stage netlists (.v/.def) "
-                        "and layout / clock-tree .webp images. Every hook is "
-                        "catch-guarded so it can never abort the flow. This "
-                        "flag suppresses the hook wiring entirely.")
-    p.add_argument("--no-debug-images", action="store_true",
-                   help="keep the per-stage timing reports and netlists but "
-                        "skip the .webp layout / clock-tree images (sets "
-                        "JANUS_DUMP_IMAGES=0). Images need a GUI-compiled "
-                        "openroad; on a non-GUI build they are skipped anyway.")
+    p.add_argument("--no-physical", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--no-sram-regen", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--no-abstract", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--no-post-route-opt", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--no-debug-dump", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--no-debug-images", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--drc-handful", type=int, default=20,
                    help="max residual DRC count the post-route DRC-only ECO will "
                         "attempt to clean (default 20). Above this the failure is "
                         "treated as global congestion needing a floorplan/route "
                         "strategy change, not an ECO.")
     # ----- golden sign-off archiving --------------------------------------
-    p.add_argument("--no-golden", action="store_true",
-                   help="disable golden archiving. By DEFAULT, when a block "
-                        "hardens AND converges (timing met within the golden "
-                        "margins below AND DRC within --drc-handful), the agent "
-                        "snapshots its logs/reports/final outputs + a QoR "
-                        "manifest into the in-repo golden area and commits it "
-                        "surgically (push only if --git-push/--git-sync-branches "
-                        "are on).")
+    p.add_argument("--no-golden", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--golden-dir", default=None,
                    help="root of the golden sign-off area (default "
                         "asic_flow/golden). Snapshots go to "
@@ -4332,11 +4748,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "disk (complete restorable snapshot) but git-ignored to "
                         "protect repo size.")
     # ----- sign-off (parasitic extraction / LVS) --------------------------
-    p.add_argument("--no-signoff", action="store_true",
-                   help="disable sign-off on completed blocks. By DEFAULT, every "
-                        "block that reaches DONE gets a sign-off pass on its "
-                        "routed .odb (staff-engineer discipline). Its outputs are "
-                        "captured into the golden snapshot.")
+    p.add_argument("--no-signoff", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--signoff-stage", choices=["rcx", "lvs", "both"],
                    default="rcx",
                    help="sign-off stage(s) to run (default rcx). 'rcx' is REAL "
@@ -4447,18 +4859,55 @@ def build_parser() -> argparse.ArgumentParser:
                            "localhost-only)")
 
     # ----- consolidated stage toggles ------------------------------------
-    #   One repeatable flag that folds the individual --no-* switches below
-    #   into a single ergonomic interface. The --no-* flags remain fully
-    #   supported (and documented above) as explicit aliases; --skip is just
-    #   the consolidated form, e.g.  --skip sram abstract signoff
-    p.add_argument("--skip", nargs="+", default=None, metavar="STAGE",
-                   choices=sorted(_SKIP_MAP.keys()),
-                   help="consolidated stage-disable switch (repeatable). "
-                        f"choices: {', '.join(sorted(_SKIP_MAP.keys()))}. "
-                        "Each maps to the matching --no-* flag, e.g. "
-                        "`--skip sram abstract signoff` == "
-                        "`--no-sram-regen --no-abstract --no-signoff`. "
-                        "Both forms may be combined; effects are OR-ed.")
+    #   ONE flag replaces the individual --no-* switches. Those remain
+    #   accepted as hidden aliases (scripts/docs keep working) but are no
+    #   longer listed in --help. Effects are OR-ed with any legacy --no-*.
+    p.add_argument("--no-signoff-sta", action="store_true", help=argparse.SUPPRESS)
+    skip = p.add_argument_group(
+        "stage toggles (--skip)",
+        "tokens (legacy --no-* aliases still accepted, hidden from --help):\n"
+        + "\n".join(f"  {k:<15} {v[1]}  [{_flag(v[0])}]"
+                    for k, v in _SKIP_MAP.items()))
+    skip.add_argument("--skip", action="extend", nargs="+", default=None,
+                      metavar="TOKEN", choices=list(_SKIP_MAP),
+                      help="disable optional stages/behaviours; repeatable "
+                           "(`--skip sram abstract` == `--skip sram --skip "
+                           "abstract`). Tokens listed above.")
+
+    # ----- adaptive closure (§126) ----------------------------------------
+    adapt = p.add_argument_group(
+        "adaptive closure",
+        textwrap.fill(
+        "after a block reaches DONE, classify its QoR (EASY / MODERATE / "
+        "CLOCK_SKEW_LIMITED / IO_BUDGET_LIMITED / CONGESTION_LIMITED / "
+        "LOGIC_DEPTH_LIMITED / DRV_LIMITED) and recommend — or, with auto, "
+        "run — a bounded extra pass from 3_place in a NEW FLOW_VARIANT leaf "
+        "(<variant>_adaptN_<class>). The base leaf is never touched, "
+        "protected blocks never rerun, and the best pass is REPORTED "
+        "(adaptive.json / qor.json / email), never auto-promoted.", 78))
+    adapt.add_argument("--adaptive", choices=["off", "advise", "auto"],
+                       default="advise",
+                       help="off = no classification; advise (default) = "
+                            "classify + write the recommendation only; auto = "
+                            "also run up to --adaptive-max-passes variant "
+                            "reruns (CTS latency overlay for "
+                            "CLOCK_SKEW_LIMITED, knob tweaks otherwise).")
+    adapt.add_argument("--adaptive-max-passes", type=int, default=None,
+                       metavar="N",
+                       help="cap on extra passes per block under --adaptive "
+                            f"auto (default 1, max {_ADAPTIVE_MAX_PASSES_CAP}). "
+                            "Env JANUS_ADAPTIVE_TIMEOUT_S bounds each pass "
+                            "(default 43200 s).")
+    adapt.add_argument("--adaptive-thresholds", default=None,
+                       metavar="FILE|JSON",
+                       help="override classifier thresholds with a JSON object "
+                            "(inline or a file path); keys must be from "
+                            "adaptive_closure.DEFAULT_THRESHOLDS.")
+    p.add_argument("--debug-on-fail", action="store_true",
+                   help="on a block FAILURE, rerun hooks/janus_debug_rerun.tcl "
+                        "on the last good ODB to dump debug timing reports "
+                        "for the failing region (same as env "
+                        "JANUS_DEBUG_ON_FAIL=1; JANUS_DEBUG_TIMEOUT_S bounds it).")
     return p
 
 
@@ -4771,8 +5220,17 @@ def _relaunch_in_tmux(argv: Optional[List[str]]) -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     _apply_skips(args)
+    errs, warns = _validate_args(args)
+    for w in warns:
+        print(f"warning: {w}", file=sys.stderr)
+    if errs:
+        for e in errs:
+            print(f"error: {e}", file=sys.stderr)
+        print("(see --help)", file=sys.stderr)
+        return 2
     if getattr(args, "resume_from", None):
         args.resume = True
     # --tmux: re-exec detached in a tmux session (inheriting all other args +
