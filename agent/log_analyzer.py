@@ -273,6 +273,9 @@ class LogReport:
     # Standard logic cells from the LAST "Cell type report" (excludes macros,
     # fill, tap/endcap). None when the log has no such table.
     std_cells: Optional[int] = None
+    # Worst-case IR drop in volts (max over VDD/VSS reports in 6_report).
+    # None when the log has no IR report (ORFS prints it in 6_report only).
+    ir_drop_worst_v: Optional[float] = None
     tail: str = ""   # last N lines, useful context
 
     def to_dict(self) -> Dict:
@@ -295,6 +298,8 @@ class LogReport:
             bits.append(f"hold WS={self.hold_ps:+.3f}ps")
         if self.drc_violations is not None:
             bits.append(f"DRC={self.drc_violations}")
+        if self.ir_drop_worst_v is not None:
+            bits.append(f"IRdrop={self.ir_drop_worst_v*1000:.2f}mV")
         if self.area is not None:
             bits.append(f"area={self.area}")
         return f"{self.block}/{self.stage}: OK" + (f" ({', '.join(bits)})" if bits else "")
@@ -452,6 +457,22 @@ class LogAnalyzer:
         else:
             rep.utilization = grab(_RE_UTIL)
         rep.std_cells = parse_std_cell_count(lines)
+
+        # ---- IR drop (volts) ------------------------------------------------
+        # ORFS 6_report prints e.g. "Worstcase IR drop: 4.54e-03 V" once per
+        # rail (VDD, VSS). Take the max; the pass/fail threshold is applied by
+        # the agent (IR_DROP_MAX_PCT of nominal VDD).
+        worst_ir = None
+        for line in lines:
+            mm = re.search(r"Worstcase IR drop:\s*([0-9.eE+-]+)\s*V", line)
+            if mm:
+                try:
+                    v = float(mm.group(1))
+                    if worst_ir is None or v > worst_ir:
+                        worst_ir = v
+                except ValueError:
+                    pass
+        rep.ir_drop_worst_v = worst_ir
 
     # ---- LLM payload --------------------------------------------------------
     def build_llm_excerpt(self, rep: LogReport, byte_budget: int = 5000) -> str:
