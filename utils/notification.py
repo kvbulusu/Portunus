@@ -118,6 +118,18 @@ class NotificationManager:
                              or os.environ.get("JANUS_GDRIVE_CREDENTIALS")
                              or _DEFAULT_GDRIVE_CREDS)
         self.max_tar_bytes = int(max_tar_bytes)
+        # §137: downstream consumers (e.g. a Google Apps Script mail->Drive
+        # extractor with a 6-min execution limit) need smaller / zip bundles.
+        # Env only (no new CLI flags): JANUS_NOTIFY_BUNDLE_MAX_MB caps the
+        # uncompressed bundle; JANUS_NOTIFY_ARCHIVE=zip|tar.gz picks the format.
+        try:
+            _bmb = float(os.environ.get("JANUS_NOTIFY_BUNDLE_MAX_MB", ""))
+            if _bmb > 0:
+                self.max_tar_bytes = int(_bmb * 1024 * 1024)
+        except ValueError:
+            pass
+        self.archive_fmt = ("zip" if os.environ.get("JANUS_NOTIFY_ARCHIVE", "")
+                            .strip().lower() == "zip" else "tar.gz")
         try:
             self.attach_max_bytes = int(float(
                 os.environ.get("JANUS_NOTIFY_ATTACH_MAX_MB", "")) * 1024 * 1024)
@@ -512,7 +524,7 @@ class NotificationManager:
                     reports_dir=reports_dir, results_dir=results_dir,
                     agent_log=log_path, signoff_dir=signoff_dir,
                     manifest_stage=stage, cap_bytes=self.max_tar_bytes,
-                    tries=tries, note=note)
+                    tries=tries, note=note, archive_fmt=self.archive_fmt)
                 qor = res["qor"]
                 tarball = res["tar"]
                 body = res["body"]

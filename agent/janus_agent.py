@@ -769,7 +769,9 @@ class JANUSAutonomousAgent:
             self._notify_log(f"startup: email -> {self.notifier.recipient} via "
                              f"{self.notifier.smtp_host}:{self.notifier.smtp_port} "
                              f"as {self.notifier.smtp_user}; attach cap "
-                             f"{self.notifier.attach_max_bytes / 1048576:.0f} MB")
+                             f"{self.notifier.attach_max_bytes / 1048576:.0f} MB, "
+                             f"bundle cap {self.notifier.max_tar_bytes / 1048576:.0f} MB "
+                             f"uncompressed, format {self.notifier.archive_fmt}")
 
         # --- GLOBAL flow-state manifest (outside all run-dirs / blocks) ------
         # A single JSON at <asic_flow>/.janus_state/janus_flow_state.json that

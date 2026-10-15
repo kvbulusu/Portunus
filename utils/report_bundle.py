@@ -44,6 +44,7 @@ import re
 import sys
 import tarfile
 import time
+import zipfile
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -999,7 +1000,7 @@ def build_bundle(block: str, status: str, out_dir: str, *,
                  signoff_dir: Optional[str] = None, manifest_stage: str = "",
                  cap_bytes: int = 40 << 20, tries: Optional[int] = None,
                  note: str = "", qor: Optional[Dict] = None,
-                 dry_run: bool = False) -> Dict[str, object]:
+                 dry_run: bool = False, archive_fmt: str = "tar.gz") -> Dict[str, object]:
     """Build qor + INDEX + tar.gz. Returns {tar, qor, qor_path, index, included,
     skipped, body}. Never touches other blocks' files."""
     q = qor or build_qor(block, status, logs_dir, reports_dir, results_dir,
@@ -1042,25 +1043,43 @@ def build_bundle(block: str, status: str, out_dir: str, *,
         fh.write(idx)
     res["qor_path"] = qp
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tar_path = os.path.join(out_dir, f"{root}_{ts}.tar.gz")
+    # §137: "zip" lets a Google Apps Script consumer use the native
+    # Utilities.unzip() (one fast call) instead of a pure-JS tar parser.
+    use_zip = str(archive_fmt).lower() == "zip"
+    tar_path = os.path.join(out_dir, f"{root}_{ts}." + ("zip" if use_zip else "tar.gz"))
+    members = [("INDEX.md", idx.encode(), None), ("qor.json", qor_bytes, None)]
+    for pk, want, trunc in plan:
+        try:
+            members.append((pk.arc, _slice(pk.path, pk.mode, want), None) if trunc
+                           else (pk.arc, None, pk.path))
+        except OSError:
+            continue
+    if use_zip:
+        with zipfile.ZipFile(tar_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for arc, data, path in members:
+                try:
+                    if data is not None:
+                        zf.writestr(f"{root}/{arc}", data)
+                    else:
+                        zf.write(path, f"{root}/{arc}")
+                except OSError:
+                    continue
+    else:
+        def _addbytes(tar, arc, data):
+            ti = tarfile.TarInfo(f"{root}/{arc}")
+            ti.size = len(data)
+            ti.mtime = int(time.time())
+            tar.addfile(ti, io.BytesIO(data))
 
-    def _addbytes(tar, arc, data):
-        ti = tarfile.TarInfo(f"{root}/{arc}")
-        ti.size = len(data)
-        ti.mtime = int(time.time())
-        tar.addfile(ti, io.BytesIO(data))
-
-    with tarfile.open(tar_path, "w:gz") as tar:
-        _addbytes(tar, "INDEX.md", idx.encode())
-        _addbytes(tar, "qor.json", qor_bytes)
-        for pk, want, trunc in plan:
-            try:
-                if trunc:
-                    _addbytes(tar, pk.arc, _slice(pk.path, pk.mode, want))
-                else:
-                    tar.add(pk.path, arcname=f"{root}/{pk.arc}")
-            except OSError:
-                continue
+        with tarfile.open(tar_path, "w:gz") as tar:
+            for arc, data, path in members:
+                try:
+                    if data is not None:
+                        _addbytes(tar, arc, data)
+                    else:
+                        tar.add(path, arcname=f"{root}/{arc}")
+                except OSError:
+                    continue
     res["tar"] = tar_path
     return res
 
