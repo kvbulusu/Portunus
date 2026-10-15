@@ -672,7 +672,10 @@ class NotificationManager:
                 extra.append(f"Reports dir  : {reports_dir}")
             if summary and not qor:
                 extra += ["", summary]
-            if tarball:
+            # §139: with --gdrive-upload the email is a status/QoR summary only;
+            # the bundle lives on Drive (link appended below), never attached.
+            summary_only = self.gdrive_enabled
+            if tarball and not summary_only:
                 extra.append(f"Attachment   : {os.path.basename(tarball)} "
                              "(see INDEX.md inside for what was included/skipped and why)")
             body = body + ("\n\n" + "\n".join(extra) if extra else "")
@@ -684,10 +687,11 @@ class NotificationManager:
                     stage=("" if is_ok else stage), logs_dir=logs_dir,
                     block_log=log_path,
                 )
-            attachments = [tarball] if tarball else []
+            attachments = [tarball] if tarball and not summary_only else []
             # If we somehow have no tarball but do have a single log, attach it
             # (bounded — only if it is under the size budget).
-            if not attachments and log_path and os.path.isfile(log_path):
+            if (not summary_only and not attachments and log_path
+                    and os.path.isfile(log_path)):
                 try:
                     if os.path.getsize(log_path) <= self.max_tar_bytes:
                         attachments = [log_path]
@@ -720,7 +724,8 @@ class NotificationManager:
                              f"{self.gdrive_target_desc(block)}):\n  "
                              + "\n  ".join(self.last_drive_links))
                 elif self.last_drive_outcome:
-                    body += f"\n\nGoogle Drive upload: {self.last_drive_outcome}"
+                    body += (f"\n\nGoogle Drive upload: {self.last_drive_outcome}"
+                             f"\nBundle on EC2 disk: {tarball}")
 
             self.last_subject, self.last_body = subject, body
             ok = self.send_email(subject, body, attachments)

@@ -199,3 +199,43 @@ def test_notify_uploads_before_email_and_links_it(env, monkeypatch):
     assert "[drive: uploaded 1 file(s)" in m.last_outcome
     noc = next(i for i, it in d.items.items() if it["name"] == "noc")
     assert any(it["parents"] == [noc] and it["mimeType"] == "file" for it in d.items.values())
+
+
+def test_gdrive_mode_sends_summary_only_no_attachment(env, monkeypatch):
+    tmp, creds, bundle, logs = env
+    d = FakeDrive({"R": {"name": "janus_ec2_runs", "parents": [], "mimeType": FOLDER}})
+    m = _mgr(creds, logs, d, monkeypatch)
+    m.recipient, m.smtp_host, m.smtp_user, m.smtp_pass = "a@b", "h", "u", "p"
+    sent = {}
+
+    def fake_send(subject, body, att):
+        sent.update(body=body, att=att)
+        return True
+    monkeypatch.setattr(m, "send_email", fake_send)
+    m.notify("security", "DONE", run_dir=str(tmp), bundle_dir=str(tmp / "b"))
+    assert sent["att"] == []
+    assert "Attachment" not in sent["body"]
+    assert "janus_ec2_runs/security/" in sent["body"]
+
+
+def test_drive_failure_still_no_attachment_names_disk_path(env, monkeypatch):
+    tmp, creds, bundle, logs = env
+    m = _mgr(creds, logs, FakeDrive({}), monkeypatch)  # root not visible
+    m.recipient, m.smtp_host, m.smtp_user, m.smtp_pass = "a@b", "h", "u", "p"
+    sent = {}
+    monkeypatch.setattr(m, "send_email",
+                        lambda s, b, a: sent.update(body=b, att=a) or True)
+    m.notify("security", "DONE", run_dir=str(tmp), bundle_dir=str(tmp / "b"))
+    assert sent["att"] == []
+    assert "Google Drive upload: FAILED" in sent["body"]
+    assert "Bundle on EC2 disk:" in sent["body"]
+
+
+def test_without_gdrive_attachment_behaviour_unchanged(env, monkeypatch):
+    tmp, _, _, _ = env
+    m = nt.NotificationManager(recipient="a@b", smtp_host="h", smtp_user="u", smtp_pass="p")
+    sent = {}
+    monkeypatch.setattr(m, "send_email",
+                        lambda s, b, a: sent.update(body=b, att=a) or True)
+    m.notify("security", "DONE", run_dir=str(tmp), bundle_dir=str(tmp / "b"))
+    assert len(sent["att"]) == 1 and "Attachment" in sent["body"]
