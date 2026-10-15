@@ -409,6 +409,18 @@ class DashboardUI:
             post = a._post_step.get(block) if hasattr(a, "_post_step") else None
             if post and status in ("DONE", "FAILED"):
                 stage = post
+            # §134: an --adaptive auto variant pass is rebuilding this block
+            # from 3_place. Show it as ADAPT (counted as running) with the
+            # trigger reason + the variant's live stage; WNS/slew/cells stay
+            # the BASE leaf's numbers (the pass is never auto-promoted).
+            ad = getattr(a, "_adapt_live", {}).get(block)
+            if ad:
+                status = "ADAPT"
+                vst = ad.get("stage") or "3_place"
+                stage = f"{ad.get('tag', 'adapt')}→{vst}"
+                idx = a._stage_major_index(vst)
+                if ad.get("t0"):
+                    elapsed = "+" + a._fmt_elapsed(time.time() - ad["t0"])
             # Per-path-group worst slack (reg2reg/reg2out) for setup AND hold,
             # so the row can show which group closes vs violates.
             pg = r.path_groups if r else None
@@ -474,7 +486,9 @@ class DashboardUI:
     def _counts(rows):
         c = {"DONE": 0, "RUNNING": 0, "FAILED": 0, "WAITING": 0}
         for r in rows:
-            c[r["status"]] = c.get(r["status"], 0) + 1
+            # an adaptive pass is a real make job pinning cores -> running
+            k = "RUNNING" if r["status"] == "ADAPT" else r["status"]
+            c[k] = c.get(k, 0) + 1
         return c
 
     def _total_elapsed(self):
@@ -506,7 +520,8 @@ class DashboardUI:
                     "SLEW/CAP", "CELLS", "UTIL"):
             t.add_column(col)
         style = {"RUNNING": "green", "DONE": "bold green",
-                 "FAILED": "bold red", "WAITING": "yellow"}
+                 "FAILED": "bold red", "WAITING": "yellow",
+                 "ADAPT": "bold magenta"}
         for r in rows:
             idx = max(0, min(self._STAGE_TOTAL, r["idx"]))
             bar = "█" * idx + "░" * (self._STAGE_TOTAL - idx)
@@ -846,6 +861,9 @@ class JANUSAutonomousAgent:
         # once the main build is DONE/FAILED ("abstract", "signoff",
         # "slew triage running", "triage done"...). Absent => "6_final".
         self._post_step: Dict[str, str] = {}
+        # §134: in-flight --adaptive auto pass per block, shown as status ADAPT
+        # with the variant's live stage: {"tag", "stage", "t0"}.
+        self._adapt_live: Dict[str, Dict] = {}
 
         # --- optional web dashboard (browsable live/standalone run view) -----
         # Zero-dep HTTP server (see dashboard.py). Off unless --dashboard. The
@@ -3794,10 +3812,17 @@ class JANUSAutonomousAgent:
 
                 # Wake as soon as the NEXT block finishes (not the whole wave),
                 # free its slot, and loop to refill it immediately.
-                done, _ = wait(set(futs), return_when=FIRST_COMPLETED)
+                # §134: ALSO re-poll every few seconds. _process_and_mark marks a
+                # block DONE (unblocking its dependents) and only THEN runs the
+                # notifier + --adaptive auto pass in the same worker; that pass
+                # can take hours, so waiting purely on future completion left
+                # free slots idle while ampo/agent_domain/cva6 were already
+                # ready (seen: security DONE at 2:12, nothing launched by 3:23).
+                done, _ = wait(set(futs), timeout=5.0, return_when=FIRST_COMPLETED)
                 for f in done:
                     futs.pop(f, None)
-                self._refresh_schedule_ui()
+                if done:  # a timeout tick must not reprint the plain table
+                    self._refresh_schedule_ui()
 
     def _process_and_mark(self, block: str) -> None:
         try:
@@ -4136,8 +4161,51 @@ class JANUSAutonomousAgent:
             cmd += ["-o", s]
         return cmd
 
+    # §134: 1-2 word trigger reason for the dashboard / warn line.
+    _ADAPT_REASON = {"DRV_LIMITED": "slew/cap", "MODERATE": "setup",
+                     "CLOCK_SKEW_LIMITED": "clk skew",
+                     "CONGESTION_LIMITED": "congestion"}
+
+    @classmethod
+    def _adaptive_reason_tag(cls, klass: str, fq: Optional[dict]) -> str:
+        fq = fq or {}
+        word = cls._ADAPT_REASON.get(klass, (klass or "adapt").lower())
+        try:
+            if klass == "DRV_LIMITED":
+                n = int(fq.get("slew_viol") or 0) + int(fq.get("cap_viol") or 0)
+                return f"{word} {n}"
+            if klass == "MODERATE":
+                ws = [float(g["wns_ps"]) for g in (fq.get("groups") or {}).values()
+                      if g.get("wns_ps") is not None]
+                if fq.get("wns_ps") is not None:
+                    ws.append(float(fq["wns_ps"]))
+                if ws:
+                    return f"{word} {min(ws):+.0f}ps"
+        except (TypeError, ValueError):
+            pass
+        return word
+
+    def _adaptive_stage_poll(self, logs_dir: str, live: dict,
+                             stop: threading.Event) -> None:
+        """Track the variant pass's current ORFS stage from the newest
+        <n>_<step>.log in its leaf logs dir (dashboard only; never raises)."""
+        names = {3: "3_place", 4: "4_cts", 5: "5_route", 6: "6_final"}
+        while not stop.wait(5.0):
+            try:
+                logs = [f for f in os.listdir(logs_dir)
+                        if f.endswith(".log") and f[:1].isdigit()]
+                if not logs:
+                    continue
+                newest = max(logs, key=lambda f: os.path.getmtime(os.path.join(logs_dir, f)))
+                n = self._stage_major_index(newest)
+                if n in names:
+                    live["stage"] = names[n]
+            except OSError:
+                continue
+
     def _adaptive_run_variant(self, block: str, base_res: str, variant: str,
-                              knobs: dict) -> dict:
+                              knobs: dict, cls: str = "",
+                              fq: Optional[dict] = None) -> dict:
         """One bounded pass from 3_place in its own FLOW_VARIANT leaf.
         >>> PD-UNTESTED <<< (seed + make line are unit-tested in the sandbox)."""
         import adaptive_closure as ac
@@ -4166,17 +4234,28 @@ class JANUSAutonomousAgent:
             timeout = int(os.environ.get("JANUS_ADAPTIVE_TIMEOUT_S", "43200"))
         except ValueError:
             timeout = 43200
-        self.ui.step(f"{block}: adaptive pass {variant} ({'; '.join(knobs.get('notes') or [])}) "
+        tag = self._adaptive_reason_tag(cls, fq)
+        self.ui.warn(f"{block}: adaptive auto kicked in [{tag}] -> pass {variant} "
+                     f"({'; '.join(knobs.get('notes') or [])}) "
                      f"— {len(seeded)} seeded artifact(s) from {os.path.basename(base_res)}")
+        live = {"tag": tag, "stage": "3_place", "t0": time.time()}
+        self._adapt_live[block] = live
+        stop = threading.Event()
+        poller = threading.Thread(target=self._adaptive_stage_poll,
+                                  args=(dirs["logs"][1], live, stop), daemon=True)
+        poller.start()
         try:
             with open(self._block_log(block), "ab", buffering=0) as logf:
-                logf.write(f"\n===== {block} : adaptive {variant} {run['cmd']} "
+                logf.write(f"\n===== {block} : adaptive [{tag}] {variant} {run['cmd']} "
                            f"@ {datetime.now()} =====\n".encode())
                 rc = subprocess.run(cmd, cwd=self.flow_dir, stdout=logf,
                                     stderr=subprocess.STDOUT, timeout=timeout).returncode
         except subprocess.TimeoutExpired:
             rc = -1
             run["error"] = f"timeout {timeout}s"
+        finally:
+            stop.set()
+            self._adapt_live.pop(block, None)
         run["rc"] = rc
         vres, vrep, vlog = dirs["results"][1], dirs["reports"][1], dirs["logs"][1]
         done = rc == 0 and os.path.isfile(os.path.join(vres, "6_final.odb"))
@@ -4212,7 +4291,8 @@ class JANUSAutonomousAgent:
                     rec["runs"].append({"variant": variant, "status": "SKIPPED",
                                         "reason": "; ".join(knobs["notes"]) or "no safe knobs"})
                     break
-                run = self._adaptive_run_variant(block, base_res, variant, knobs)
+                run = self._adaptive_run_variant(block, base_res, variant, knobs,
+                                                 cur.get("class", ""), cur.get("input"))
                 done_n += 1
                 rec["runs"].append(run)
                 if run["status"] != "DONE":
