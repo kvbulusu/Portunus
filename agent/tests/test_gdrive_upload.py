@@ -239,3 +239,19 @@ def test_without_gdrive_attachment_behaviour_unchanged(env, monkeypatch):
                         lambda s, b, a: sent.update(body=b, att=a) or True)
     m.notify("security", "DONE", run_dir=str(tmp), bundle_dir=str(tmp / "b"))
     assert len(sent["att"]) == 1 and "Attachment" in sent["body"]
+
+
+def test_folder_failure_outcome_carries_api_error(env, monkeypatch):
+    """§142: 'could not find/create <block>/' must include Google's error."""
+    _, creds, bundle, logs = env
+    monkeypatch.setenv("JANUS_GDRIVE_ROOT_ID", "BADID?usp=sharing")
+    d = FakeDrive({})
+
+    def boom(**kw):
+        raise RuntimeError("<HttpError 404 ... File not found: BADID?usp=sharing.>")
+    monkeypatch.setattr(d, "list", boom)
+    m = _mgr(creds, logs, d, monkeypatch)
+    assert m.upload_to_drive([bundle], "ampo") == []
+    o = m.last_drive_outcome
+    assert "could not find/create ampo/" in o
+    assert "File not found" in o and "JANUS_GDRIVE_ROOT_ID" in o
