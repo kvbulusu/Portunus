@@ -67,6 +67,11 @@ from typing import Callable, List, Optional
 # providers cap ~25-50 MB. We aim for 50 MB of compressed logs/reports max and
 # never tar heavy PD binaries (.odb/.def/.gds/.spef).
 _DEFAULT_MAX_TAR_BYTES = 50 * 1024 * 1024
+# §136: the 50 MB above is the UNCOMPRESSED bundle budget. What the mail server
+# sees is the compressed tar after base64 (+33%), and Gmail/most relays reject
+# a message > 25 MB with a 552 that used to be swallowed silently. Attach only
+# if the .tar.gz is <= this; otherwise email without it and name the path.
+_DEFAULT_ATTACH_MAX_BYTES = 18 * 1024 * 1024
 _HEAVY_EXTS = (".odb", ".def", ".gds", ".gds.gz", ".spef", ".spef.gz",
                ".lef", ".lib", ".v.gz", ".cdl")
 _UTILS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -113,6 +118,38 @@ class NotificationManager:
                              or os.environ.get("JANUS_GDRIVE_CREDENTIALS")
                              or _DEFAULT_GDRIVE_CREDS)
         self.max_tar_bytes = int(max_tar_bytes)
+        # §137: downstream consumers (e.g. a Google Apps Script mail->Drive
+        # extractor with a 6-min execution limit) need smaller / zip bundles.
+        # Env only (no new CLI flags): JANUS_NOTIFY_BUNDLE_MAX_MB caps the
+        # uncompressed bundle; JANUS_NOTIFY_ARCHIVE=zip|tar.gz picks the format.
+        try:
+            _bmb = float(os.environ.get("JANUS_NOTIFY_BUNDLE_MAX_MB", ""))
+            if _bmb > 0:
+                self.max_tar_bytes = int(_bmb * 1024 * 1024)
+        except ValueError:
+            pass
+        self.archive_fmt = ("zip" if os.environ.get("JANUS_NOTIFY_ARCHIVE", "")
+                            .strip().lower() == "zip" else "tar.gz")
+        try:
+            self.attach_max_bytes = int(float(
+                os.environ.get("JANUS_NOTIFY_ATTACH_MAX_MB", "")) * 1024 * 1024)
+        except ValueError:
+            self.attach_max_bytes = _DEFAULT_ATTACH_MAX_BYTES
+        if self.attach_max_bytes <= 0:
+            self.attach_max_bytes = _DEFAULT_ATTACH_MAX_BYTES
+        # §136: one-line outcome of the last notify()/send_email(), so the
+        # agent can surface it (it used to exist only at --verbose debug level).
+        self.last_outcome = ""
+
+    def config_problem(self) -> str:
+        """Why email cannot be sent ('' if it can). Names missing pieces only,
+        never their values."""
+        if not self.recipient:
+            return "no recipient (--notify-email / $NOTIFY_EMAIL)"
+        missing = [n for n, v in (("SMTP_HOST", self.smtp_host),
+                                  ("SMTP_USER", self.smtp_user),
+                                  ("SMTP_PASS", self.smtp_pass)) if not v]
+        return ("SMTP not configured, missing: " + ", ".join(missing)) if missing else ""
 
     # ------------------------------------------------------------------ #
     # capability probes
@@ -266,13 +303,10 @@ class NotificationManager:
         Returns True on success, False otherwise (never raises).
         """
         attachments = attachments or []
-        if not self.recipient:
-            self.log("notification: no recipient set; skipping email")
-            return False
-        if not self.email_configured:
-            self.log("notification: SMTP not fully configured "
-                     "(need host/user/pass); skipping email. See "
-                     "notification.py header for setup.")
+        problem = self.config_problem()
+        if problem:
+            self.last_outcome = f"email SKIPPED: {problem}"
+            self.log(f"notification: {self.last_outcome}")
             return False
         try:
             msg = MIMEMultipart()
@@ -314,11 +348,21 @@ class NotificationManager:
                     srv.login(self.smtp_user, self.smtp_pass)
                     srv.sendmail(self.smtp_user, [self.recipient],
                                  msg.as_string())
-            self.log(f"notification: email sent to {self.recipient} "
-                     f"({len(attachments)} attachment(s))")
+            sizes = []
+            for p in attachments:
+                try:
+                    sizes.append(f"{os.path.basename(p)} {os.path.getsize(p) / 1048576:.1f} MB")
+                except OSError:
+                    pass
+            self.last_outcome = (f"email SENT to {self.recipient} "
+                                 f"({len(attachments)} attachment(s)"
+                                 + (": " + ", ".join(sizes) if sizes else "") + ")")
+            self.log(f"notification: {self.last_outcome}")
             return True
         except Exception as e:  # never propagate
-            self.log(f"notification: send_email failed: {e}")
+            self.last_outcome = (f"email FAILED via {self.smtp_host}:{self.smtp_port}: "
+                                 f"{type(e).__name__}: {e}")[:300]
+            self.log(f"notification: {self.last_outcome}")
             return False
 
     # ------------------------------------------------------------------ #
@@ -462,6 +506,7 @@ class NotificationManager:
         if not self.enabled:
             return None
         qor = None
+        self.last_outcome = ""
         try:
             tarball = None
             body = ""
@@ -479,7 +524,7 @@ class NotificationManager:
                     reports_dir=reports_dir, results_dir=results_dir,
                     agent_log=log_path, signoff_dir=signoff_dir,
                     manifest_stage=stage, cap_bytes=self.max_tar_bytes,
-                    tries=tries, note=note)
+                    tries=tries, note=note, archive_fmt=self.archive_fmt)
                 qor = res["qor"]
                 tarball = res["tar"]
                 body = res["body"]
@@ -543,12 +588,46 @@ class NotificationManager:
                 except OSError:
                     pass
 
+            # §136: never let an oversize attachment cost the whole email.
+            kept, withheld = [], []
+            for p in attachments:
+                try:
+                    sz = os.path.getsize(p)
+                except OSError:
+                    continue
+                if sz > self.attach_max_bytes:
+                    body += (f"\n\nNOT ATTACHED (too large for email, "
+                             f"{sz / 1048576:.1f} MB > "
+                             f"{self.attach_max_bytes / 1048576:.0f} MB): {p}")
+                    self.log(f"notification: {p} is {sz} B > attach cap "
+                             f"{self.attach_max_bytes} B; sending without it")
+                    withheld.append(os.path.basename(p))
+                else:
+                    kept.append(p)
+            attachments = kept
+
             self.last_subject, self.last_body = subject, body
-            self.send_email(subject, body, attachments)
+            ok = self.send_email(subject, body, attachments)
+            if not ok and attachments and self.email_configured:
+                # Rejected WITH the attachment (size/policy 552, timeout on a
+                # slow upload, ...): retry once text-only so a mail still lands.
+                first = self.last_outcome
+                body += ("\n\nThe attachment was dropped because the send with it "
+                         f"failed ({first}). Bundle on disk: "
+                         + ", ".join(attachments))
+                self.last_body = body
+                if self.send_email(subject, body, []):
+                    self.last_outcome = (f"{self.last_outcome} [text-only retry; "
+                                         f"with-attachment send failed: {first}]")[:400]
+            elif ok and withheld:
+                self.last_outcome += (f" [bundle NOT attached, over "
+                                      f"{self.attach_max_bytes / 1048576:.0f} MB cap: "
+                                      + ", ".join(withheld) + "]")
 
             if self.gdrive_enabled and tarball:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 self.upload_to_drive([tarball], f"{block}_{ts}")
         except Exception as e:  # never propagate
+            self.last_outcome = f"notify() FAILED before/while sending: {type(e).__name__}: {e}"[:300]
             self.log(f"notification: notify() failed for {block}: {e}")
         return qor

@@ -768,13 +768,25 @@ class JANUSAutonomousAgent:
             smtp_pass=getattr(args, "smtp_pass", None),
             gdrive_enabled=getattr(args, "gdrive_upload", False),
             gdrive_creds=getattr(args, "gdrive_creds", None),
-            logger=self.ui.debug,
+            logger=self._notify_log,
         )
-        if self.notifier.enabled and not self.notifier.email_configured \
-                and getattr(args, "notify_email", None):
-            self.ui.warn("--notify-email set but SMTP is not fully configured "
-                         "(need host/user/pass via flags or env); emails will "
-                         "be skipped. See asic_flow/utils/notification.py.")
+        # §136: always state the notification config at startup — loudly, and
+        # in <run_dir>/notify.log — so "no email" is diagnosable from a file
+        # instead of only at --verbose (which is how it used to be).
+        _np = self.notifier.config_problem()
+        if not self.notifier.enabled:
+            self._notify_log("notifications OFF (no --notify-email / $NOTIFY_EMAIL)")
+        elif _np:
+            self.ui.warn(f"email notifications will be SKIPPED: {_np}. Export them "
+                         "in the shell that launches the agent (or pass --smtp-*).")
+            self._notify_log(f"startup: email will be SKIPPED: {_np}")
+        else:
+            self._notify_log(f"startup: email -> {self.notifier.recipient} via "
+                             f"{self.notifier.smtp_host}:{self.notifier.smtp_port} "
+                             f"as {self.notifier.smtp_user}; attach cap "
+                             f"{self.notifier.attach_max_bytes / 1048576:.0f} MB, "
+                             f"bundle cap {self.notifier.max_tar_bytes / 1048576:.0f} MB "
+                             f"uncompressed, format {self.notifier.archive_fmt}")
 
         # --- GLOBAL flow-state manifest (outside all run-dirs / blocks) ------
         # A single JSON at <asic_flow>/.janus_state/janus_flow_state.json that
@@ -3925,12 +3937,26 @@ class JANUSAutonomousAgent:
                 qor_out_dir=reports_dir,
                 bundle_dir=os.path.join(self.run_dir, "bundles", block),
             )
+            out = getattr(self.notifier, "last_outcome", "") or "no outcome recorded"
+            (self.ui.good if out.startswith("email SENT") and "[" not in out
+             else self.ui.warn)(f"{block}: {out}")
             if qor and qor.get("triage"):
                 tr = qor["triage"]
                 self.ui.warn(f"{block}: triage {tr.get('category')}: "
                              f"{(tr.get('first_error') or '')[:160]}")
         except Exception as e:  # never let notification affect the run
-            self.ui.debug(f"{block}: notification hook error (ignored): {e}")
+            self.ui.warn(f"{block}: notification hook error (ignored): {e}")
+            self._notify_log(f"{block}: notification hook error: {e}")
+
+    def _notify_log(self, msg: str) -> None:
+        """§136: every notification line -> <run_dir>/notify.log (+ debug UI).
+        Never raises."""
+        self.ui.debug(msg)
+        try:
+            with open(os.path.join(self.run_dir, "notify.log"), "a") as fh:
+                fh.write(f"{datetime.now().isoformat(timespec='seconds')} {msg}\n")
+        except Exception:
+            pass
 
     def _debug_rerun_on_fail(self, block: str) -> None:
         """§123: opt-in (JANUS_DEBUG_ON_FAIL=1) debug dump on the last good ODB.
@@ -5287,9 +5313,28 @@ def _relaunch_in_tmux(argv: Optional[List[str]]) -> int:
     child_argv = [a for a in base_argv if a != "--tmux"]
     session = "janus-agent-" + datetime.now().strftime("%Y%m%d_%H%M%S")
     inner = [sys.executable, os.path.abspath(__file__)] + child_argv
-    cmd = ["tmux", "new-session", "-d", "-s", session, shlex.join(inner)]
+    # §136: if a tmux server is ALREADY running, new-session takes the
+    # server's global env, not ours, so `export SMTP_*` done after that server
+    # started was silently lost (-> "no email"). Forward those vars with -e.
+    fwd = []
+    for k, v in os.environ.items():
+        if k.startswith(("SMTP_", "NOTIFY_", "JANUS_")):
+            fwd += ["-e", f"{k}={v}"]
+    cmd = ["tmux", "new-session", "-d", "-s", session] + fwd + [shlex.join(inner)]
     try:
-        subprocess.run(cmd, check=True, env=os.environ.copy())
+        try:
+            subprocess.run(cmd, check=True, env=os.environ.copy(),
+                           stderr=subprocess.DEVNULL if fwd else None)
+        except subprocess.CalledProcessError:
+            if not fwd:
+                raise
+            # tmux < 3.0 has no -e: launch anyway, but say what is at risk.
+            print("warning: this tmux does not support -e; SMTP_*/NOTIFY_* may "
+                  "not reach the session if a tmux server was already running. "
+                  "Pass --smtp-host/--smtp-user/--smtp-pass instead.",
+                  file=sys.stderr)
+            subprocess.run(["tmux", "new-session", "-d", "-s", session,
+                            shlex.join(inner)], check=True, env=os.environ.copy())
     except (subprocess.SubprocessError, OSError) as e:
         print(f"error: failed to launch tmux session {session!r}: {e}",
               file=sys.stderr)
