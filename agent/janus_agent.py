@@ -3711,12 +3711,17 @@ class JANUSAutonomousAgent:
                         done = self.manifest.is_done(b)
                     except Exception:
                         done = self.ckpt.is_done(b)
+                why_skip = ""
                 if done and self.manifest is not None:
                     # §73: a DONE block whose stamped config/sdc changed since its
                     # last run (e.g. HOLD_SLACK_MARGIN) must be STAGE-resumed, not
                     # skipped — otherwise --resume silently ignores the edit.
                     try:
                         res_dir = self._results_dir(b)
+                        if not res_dir:
+                            # §143: used to be silent -> "already DONE" with no hint
+                            why_skip = ("no ORFS results dir with .odb found, so the "
+                                        "config-change check could NOT run")
                         if res_dir:
                             pv = self.manifest.resume_plan(
                                 b, res_dir, config_path=self._config_path(b),
@@ -3728,13 +3733,19 @@ class JANUSAutonomousAgent:
                                              f"{pv.rerun_from} (changed: "
                                              f"{', '.join(pv.changed_keys) or 'n/a'})")
                                 done = False
+                            elif not why_skip:
+                                why_skip = (f"stamped {self._config_path(b)} matches the "
+                                            "last DONE run (no config/sdc change); "
+                                            "re-stamp with scripts/03 if you edited "
+                                            "configs/*.mk")
                     except Exception as e:
-                        self.ui.debug(f"{b}: DONE-vs-config check skipped — {e}")
+                        why_skip = f"config-change check FAILED: {e}"
                 if done:
                     self.dep.mark(b, Status.DONE)
                     self.results[b].status = "DONE"
                     self.results[b].note = "resumed (already DONE)"
-                    self.ui.info(f"{b}: skipped (resume — already DONE)")
+                    self.ui.info(f"{b}: skipped (resume — already DONE)"
+                                 + (f" — {why_skip}" if why_skip else ""))
                     continue
                 self._plan_stage_resume(b)
 
