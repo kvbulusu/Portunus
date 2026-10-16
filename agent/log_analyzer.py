@@ -148,6 +148,19 @@ _NON_STD_CELL_TYPES = {"macro", "fill cell", "tap cell", "endcap cell", "total"}
 # Each entry: (compiled regex, category, human-readable manual fix message).
 # =============================================================================
 _TRIAGE_RULES = [
+    # §140: OpenROAD's exec of the kepler-formal LEC child, when the OS kills it
+    # (OOM), prints exactly "child killed: kill signal" and 4_1_cts fails.
+    # Seen on user_core_ara (flat Ara) 2026-10-15: KeplerFormal reached
+    # "Found top design" then was killed on the ~248 GB box.
+    (re.compile(r"child killed: kill signal"), "env-oom-lec",
+     "A child process of OpenROAD was killed by the OS (almost always out of "
+     "memory). In 4_1_cts this child is the kepler-formal logic-equivalence "
+     "check (LEC_CHECK=1), which does not fit in RAM for very large flat blocks "
+     "such as user_core_ara. The LEC is a verification extra; the layout is "
+     "unaffected. Fix: set  export LEC_CHECK ?= 0  in the block .mk (already "
+     "the default for user_core_ara since §140), re-run "
+     "scripts/03_setup_janus_configs.sh <block>, then --resume (continues at "
+     "4_cts, no re-synthesis). Not an RTL/config bug."),
     # --- missing shared libraries (OpenROAD / OR-Tools runtime) -------------
     (re.compile(r"libortools\S*\.so", re.I), "env-openroad-ortools",
      "OpenROAD binary cannot load OR-Tools (libortools.so.*). The OpenROAD "
