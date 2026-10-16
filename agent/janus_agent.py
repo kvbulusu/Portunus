@@ -787,6 +787,16 @@ class JANUSAutonomousAgent:
                              f"{self.notifier.attach_max_bytes / 1048576:.0f} MB, "
                              f"bundle cap {self.notifier.max_tar_bytes / 1048576:.0f} MB "
                              f"uncompressed, format {self.notifier.archive_fmt}")
+        # §138: Drive channel state (independent of email).
+        if self.notifier.gdrive_enabled:
+            _gp = self.notifier.gdrive_problem()
+            if _gp:
+                self.ui.warn(f"Google Drive upload will be SKIPPED: {_gp}")
+                self._notify_log(f"startup: gdrive will be SKIPPED: {_gp}")
+            else:
+                self._notify_log(
+                    "startup: gdrive -> " + self.notifier.gdrive_target_desc()
+                    + f" (creds {self.notifier.gdrive_creds})")
 
         # --- GLOBAL flow-state manifest (outside all run-dirs / blocks) ------
         # A single JSON at <asic_flow>/.janus_state/janus_flow_state.json that
@@ -4931,8 +4941,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "Prefer the env var so it stays out of shell "
                             "history / ps.")
     notif.add_argument("--gdrive-upload", action="store_true",
-                       help="also upload the log/report tarball to Google "
-                            "Drive (folder JANUS_runs/<block>_<timestamp>). "
+                       help="also upload each block's bundle to Google Drive "
+                            "at janus_ec2_runs/<block>/ (root must already "
+                            "exist and be shared with the credential; "
+                            "$JANUS_GDRIVE_ROOT / $JANUS_GDRIVE_ROOT_ID "
+                            "override it). "
                             "Needs google-api-python-client + a credentials "
                             "file at ~/.config/janus_gdrive_credentials.json "
                             "(or --gdrive-creds / $JANUS_GDRIVE_CREDENTIALS); "

@@ -31,19 +31,32 @@ and is auto-detected.
 ------------------------------------------------------------------------------
 CONFIGURING GOOGLE DRIVE (optional)
 ------------------------------------------------------------------------------
-Pass --gdrive-upload to also push the tarball to Drive. This needs the Google
-client libraries and a credentials file; if either is missing the upload is
-skipped with a warning (the email still goes out):
+Pass --gdrive-upload to also push each block's bundle straight to Drive
+(no mail->Drive Apps Script needed). The email is still sent, and now carries
+the Drive link. If anything is missing the upload is skipped with a logged
+reason in <run_dir>/notify.log; the email still goes out.
 
     pip install google-api-python-client google-auth
-    # place a SERVICE-ACCOUNT key json (preferred for headless EC2 runs) at:
-    ~/.config/janus_gdrive_credentials.json
-    # (override the path with --gdrive-creds or $JANUS_GDRIVE_CREDENTIALS)
+    # credentials json at ~/.config/janus_gdrive_credentials.json
+    # (override with --gdrive-creds or $JANUS_GDRIVE_CREDENTIALS)
 
-A service account is preferred for headless runs (no browser OAuth consent).
-Share a Drive folder with the service account's email if you want the uploads
-to appear in a human's "Shared with me". The tarball is placed in a folder
-named  JANUS_runs/<block>_<timestamp>.
+Destination (§138):  janus_ec2_runs/<block>/<block>_<stage>_<ts>.tar.gz
+  * janus_ec2_runs must ALREADY exist and be shared (Editor) with the
+    credential's identity; it is never created. Override the name with
+    $JANUS_GDRIVE_ROOT or pin the exact folder with $JANUS_GDRIVE_ROOT_ID
+    (the id is the last segment of the folder URL).
+  * <block>/ is reused if present, otherwise created.
+
+Credential options:
+  a) Service account key (type=service_account). Share janus_ec2_runs with
+     its client_email. NOTE: service accounts have no storage quota, so this
+     only works when janus_ec2_runs lives in a SHARED DRIVE (add the SA as
+     Content manager). In a plain My-Drive folder uploads fail with
+     storageQuotaExceeded.
+  b) OAuth user token (type=authorized_user) — works with a plain My-Drive
+     folder; files are owned by you. Generate it once on a machine with a
+     browser:  python3 asic_flow/utils/gdrive_auth.py client_secret.json
+     then copy the output json to the EC2 box at the path above.
 """
 
 from __future__ import annotations
@@ -78,6 +91,7 @@ _UTILS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _UTILS_DIR not in sys.path:
     sys.path.insert(0, _UTILS_DIR)
 _DEFAULT_GDRIVE_CREDS = os.path.expanduser("~/.config/janus_gdrive_credentials.json")
+_DEFAULT_GDRIVE_ROOT = "janus_ec2_runs"
 
 
 def _noop(_msg: str) -> None:
@@ -117,6 +131,13 @@ class NotificationManager:
         self.gdrive_creds = (gdrive_creds
                              or os.environ.get("JANUS_GDRIVE_CREDENTIALS")
                              or _DEFAULT_GDRIVE_CREDS)
+        # §138: bundles go to <root>/<block>/ inside an existing, shared folder.
+        self.gdrive_root = (os.environ.get("JANUS_GDRIVE_ROOT", "").strip()
+                            or _DEFAULT_GDRIVE_ROOT)
+        self.gdrive_root_id = os.environ.get("JANUS_GDRIVE_ROOT_ID", "").strip()
+        self.gdrive_identity = ""
+        self.last_drive_links: List[str] = []
+        self.last_drive_outcome = ""
         self.max_tar_bytes = int(max_tar_bytes)
         # §137: downstream consumers (e.g. a Google Apps Script mail->Drive
         # extractor with a 6-min execution limit) need smaller / zip bundles.
@@ -368,105 +389,190 @@ class NotificationManager:
     # ------------------------------------------------------------------ #
     # google drive (optional)
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _q(name: str) -> str:
+        """Escape a value for a Drive v3 query string literal."""
+        return name.replace("\\", "\\\\").replace("'", "\\'")
+
+    def gdrive_problem(self) -> str:
+        """Why a Drive upload cannot happen ('' if it looks possible). Cheap,
+        no network: checks the flag, the creds file and the client library."""
+        if not self.gdrive_enabled:
+            return "off (no --gdrive-upload)"
+        if not os.path.isfile(self.gdrive_creds):
+            return f"credentials file not found: {self.gdrive_creds}"
+        try:
+            import googleapiclient.discovery  # type: ignore  # noqa: F401
+        except Exception as e:
+            return (f"google-api-python-client not importable ({e}); "
+                    "pip install google-api-python-client google-auth")
+        return ""
+
+    def gdrive_target_desc(self, block: str = "<block>") -> str:
+        root = (f"id={self.gdrive_root_id}" if self.gdrive_root_id
+                else self.gdrive_root)
+        return f"{root}/{block}/"
+
     def upload_to_drive(
         self,
         files: List[str],
-        folder_name: str,
+        block_name: str,
     ) -> List[str]:
-        """Upload *files* to Google Drive under ``JANUS_runs/<folder_name>``.
+        """§138: upload *files* to ``<gdrive_root>/<block_name>/`` on Drive.
 
-        Prefers a service account (headless). Gracefully skips (returns []) if
-        the flag is off, the client libraries are absent, or the credentials
-        file is missing. Never raises.
+        ``gdrive_root`` is an EXISTING folder the user owns and has shared with
+        the credential's identity (default name ``janus_ec2_runs``, override
+        with $JANUS_GDRIVE_ROOT, or pin it by id with $JANUS_GDRIVE_ROOT_ID).
+        The root is never created (a service account would create it in its
+        own invisible drive); the per-block subfolder is reused if present,
+        else created. Bundle filenames already carry a timestamp, so repeated
+        runs accumulate side by side in the block folder.
+
+        Shared Drives and plain shared My-Drive folders are both handled
+        (supportsAllDrives). Records webViewLinks in ``self.last_drive_links``.
+        Returns uploaded file ids; [] on any skip/failure. Never raises.
         """
+        self.last_drive_links = []
         if not self.gdrive_enabled:
             return []
         files = [f for f in (files or []) if f and os.path.isfile(f)]
         if not files:
             self.log("notification: gdrive upload requested but no files")
             return []
-        if not os.path.isfile(self.gdrive_creds):
-            self.log(f"notification: gdrive credentials not found at "
-                     f"{self.gdrive_creds}; skipping upload (see "
-                     f"notification.py header)")
+        prob = self.gdrive_problem()
+        if prob:
+            self.log(f"notification: gdrive upload SKIPPED: {prob}")
+            self.last_drive_outcome = f"skipped: {prob}"
             return []
         try:
             from googleapiclient.discovery import build  # type: ignore
             from googleapiclient.http import MediaFileUpload  # type: ignore
-        except Exception as e:
-            self.log("notification: google-api-python-client not installed "
-                     f"({e}); skipping gdrive upload "
-                     "(pip install google-api-python-client google-auth)")
-            return []
-        try:
             service = self._gdrive_service(build)
             if service is None:
+                self.last_drive_outcome = "skipped: authentication failed"
                 return []
-            parent = self._gdrive_folder(service, "JANUS_runs", None)
-            target = self._gdrive_folder(service, folder_name, parent)
+            root = self._gdrive_root(service)
+            if not root:
+                self.last_drive_outcome = (
+                    f"FAILED: root folder '{self.gdrive_target_desc('')}' not "
+                    f"visible to {self.gdrive_identity or 'the credential'}")
+                return []
+            target = self._gdrive_folder(service, block_name, root)
+            if not target:
+                self.last_drive_outcome = (f"FAILED: could not find/create "
+                                           f"{block_name}/ under the root")
+                return []
             uploaded: List[str] = []
             for fp in files:
-                meta = {"name": os.path.basename(fp)}
-                if target:
-                    meta["parents"] = [target]
-                media = MediaFileUpload(fp, resumable=False)
+                media = MediaFileUpload(fp, resumable=True,
+                                        chunksize=8 * 1024 * 1024)
                 created = service.files().create(
-                    body=meta, media_body=media, fields="id").execute()
+                    body={"name": os.path.basename(fp), "parents": [target]},
+                    media_body=media, fields="id,webViewLink",
+                    supportsAllDrives=True).execute()
                 fid = created.get("id", "")
                 uploaded.append(fid)
-                self.log(f"notification: uploaded {os.path.basename(fp)} "
-                         f"to Drive (id={fid})")
+                link = created.get("webViewLink", "")
+                if link:
+                    self.last_drive_links.append(link)
+                self.log(f"notification: uploaded {os.path.basename(fp)} to "
+                         f"Drive {self.gdrive_target_desc(block_name)} "
+                         f"(id={fid}) {link}")
+            self.last_drive_outcome = (f"uploaded {len(uploaded)} file(s) to "
+                                       f"{self.gdrive_target_desc(block_name)}")
             return uploaded
         except Exception as e:  # never propagate
-            self.log(f"notification: upload_to_drive failed: {e}")
+            msg = str(e)
+            hint = ""
+            if "storageQuotaExceeded" in msg or "do not have storage quota" in msg:
+                hint = (" -- service accounts have NO Drive storage of their "
+                        "own: put janus_ec2_runs in a Shared Drive (add the "
+                        "service account as Content manager) or use an OAuth "
+                        "user token instead (asic_flow/utils/gdrive_auth.py)")
+            elif "insufficientPermissions" in msg or "403" in msg:
+                hint = (f" -- share {self.gdrive_root} with "
+                        f"{self.gdrive_identity or 'the credential'} as Editor")
+            self.last_drive_outcome = f"FAILED: {msg[:200]}{hint}"
+            self.log(f"notification: upload_to_drive failed: {msg}{hint}")
             return []
 
     def _gdrive_service(self, build):
-        """Build a Drive API client from a service account or OAuth token json."""
-        scopes = ["https://www.googleapis.com/auth/drive.file"]
-        # 1) service account (preferred for headless)
+        """Build a Drive API client from a service account or OAuth token json.
+
+        Full ``drive`` scope is required: ``drive.file`` only sees files this
+        app created, so it could never find the user's existing
+        janus_ec2_runs/<block> folders."""
+        scopes = ["https://www.googleapis.com/auth/drive"]
         try:
-            from google.oauth2 import service_account  # type: ignore
-            creds = service_account.Credentials.from_service_account_file(
-                self.gdrive_creds, scopes=scopes)
+            with open(self.gdrive_creds) as fh:
+                info = json.load(fh)
+        except Exception as e:
+            self.log(f"notification: cannot read {self.gdrive_creds}: {e}")
+            return None
+        try:
+            if info.get("type") == "service_account":
+                from google.oauth2 import service_account  # type: ignore
+                creds = service_account.Credentials.from_service_account_info(
+                    info, scopes=scopes)
+                self.gdrive_identity = info.get("client_email", "")
+            else:  # OAuth2 authorized-user token (gdrive_auth.py output)
+                from google.oauth2.credentials import Credentials  # type: ignore
+                creds = Credentials.from_authorized_user_info(info, scopes)
+                self.gdrive_identity = "OAuth user token"
             return build("drive", "v3", credentials=creds,
                          cache_discovery=False)
-        except Exception as e_sa:
-            self.log(f"notification: service-account auth failed "
-                     f"({e_sa}); trying OAuth token")
-        # 2) OAuth2 authorized-user token json
-        try:
-            from google.oauth2.credentials import Credentials  # type: ignore
-            creds = Credentials.from_authorized_user_file(
-                self.gdrive_creds, scopes)
-            return build("drive", "v3", credentials=creds,
-                         cache_discovery=False)
-        except Exception as e_oauth:
-            self.log(f"notification: OAuth auth also failed ({e_oauth}); "
-                     "skipping gdrive upload")
+        except Exception as e:
+            self.log(f"notification: Drive auth failed ({e}); skipping upload")
             return None
 
-    @staticmethod
-    def _gdrive_folder(service, name: str, parent: Optional[str]) -> Optional[str]:
-        """Return the id of folder *name* (under *parent*), creating it if
-        needed. Returns None on any error so uploads fall back to Drive root."""
+    def _gdrive_root(self, service) -> Optional[str]:
+        """Resolve the EXISTING root folder id (never created)."""
+        if self.gdrive_root_id:
+            return self.gdrive_root_id
         try:
-            q = ("mimeType='application/vnd.google-apps.folder' "
-                 f"and name='{name}' and trashed=false")
-            if parent:
-                q += f" and '{parent}' in parents"
             resp = service.files().list(
-                q=q, spaces="drive", fields="files(id,name)").execute()
+                q=("mimeType='application/vnd.google-apps.folder' and "
+                   f"name='{self._q(self.gdrive_root)}' and trashed=false"),
+                corpora="allDrives", includeItemsFromAllDrives=True,
+                supportsAllDrives=True, fields="files(id,name)").execute()
+            hits = resp.get("files", [])
+        except Exception as e:
+            self.log(f"notification: Drive root lookup failed: {e}")
+            return None
+        if not hits:
+            self.log(f"notification: Drive folder '{self.gdrive_root}' is not "
+                     f"visible to {self.gdrive_identity or 'the credential'} -- "
+                     "share it with that identity as Editor (or set "
+                     "$JANUS_GDRIVE_ROOT_ID)")
+            return None
+        if len(hits) > 1:
+            self.log(f"notification: {len(hits)} folders named "
+                     f"'{self.gdrive_root}' visible; using id={hits[0]['id']} "
+                     "(set $JANUS_GDRIVE_ROOT_ID to pin one)")
+        return hits[0]["id"]
+
+    def _gdrive_folder(self, service, name: str, parent: str) -> Optional[str]:
+        """Return the id of folder *name* under *parent*, creating it if
+        needed. None on error."""
+        try:
+            resp = service.files().list(
+                q=("mimeType='application/vnd.google-apps.folder' and "
+                   f"name='{self._q(name)}' and '{parent}' in parents and "
+                   "trashed=false"),
+                corpora="allDrives", includeItemsFromAllDrives=True,
+                supportsAllDrives=True, fields="files(id,name)").execute()
             hits = resp.get("files", [])
             if hits:
                 return hits[0]["id"]
-            meta = {"name": name,
-                    "mimeType": "application/vnd.google-apps.folder"}
-            if parent:
-                meta["parents"] = [parent]
-            created = service.files().create(body=meta, fields="id").execute()
+            created = service.files().create(
+                body={"name": name, "parents": [parent],
+                      "mimeType": "application/vnd.google-apps.folder"},
+                fields="id", supportsAllDrives=True).execute()
+            self.log(f"notification: created Drive folder {name}/ under root")
             return created.get("id")
-        except Exception:
+        except Exception as e:
+            self.log(f"notification: Drive folder '{name}' lookup/create "
+                     f"failed: {e}")
             return None
 
     # ------------------------------------------------------------------ #
@@ -566,7 +672,10 @@ class NotificationManager:
                 extra.append(f"Reports dir  : {reports_dir}")
             if summary and not qor:
                 extra += ["", summary]
-            if tarball:
+            # §139: with --gdrive-upload the email is a status/QoR summary only;
+            # the bundle lives on Drive (link appended below), never attached.
+            summary_only = self.gdrive_enabled
+            if tarball and not summary_only:
                 extra.append(f"Attachment   : {os.path.basename(tarball)} "
                              "(see INDEX.md inside for what was included/skipped and why)")
             body = body + ("\n\n" + "\n".join(extra) if extra else "")
@@ -578,10 +687,11 @@ class NotificationManager:
                     stage=("" if is_ok else stage), logs_dir=logs_dir,
                     block_log=log_path,
                 )
-            attachments = [tarball] if tarball else []
+            attachments = [tarball] if tarball and not summary_only else []
             # If we somehow have no tarball but do have a single log, attach it
             # (bounded — only if it is under the size budget).
-            if not attachments and log_path and os.path.isfile(log_path):
+            if (not summary_only and not attachments and log_path
+                    and os.path.isfile(log_path)):
                 try:
                     if os.path.getsize(log_path) <= self.max_tar_bytes:
                         attachments = [log_path]
@@ -606,6 +716,17 @@ class NotificationManager:
                     kept.append(p)
             attachments = kept
 
+            # §138: Drive first, so the email can carry the link.
+            if self.gdrive_enabled and tarball:
+                self.upload_to_drive([tarball], block)
+                if self.last_drive_links:
+                    body += ("\n\nBundle on Google Drive ("
+                             f"{self.gdrive_target_desc(block)}):\n  "
+                             + "\n  ".join(self.last_drive_links))
+                elif self.last_drive_outcome:
+                    body += (f"\n\nGoogle Drive upload: {self.last_drive_outcome}"
+                             f"\nBundle on EC2 disk: {tarball}")
+
             self.last_subject, self.last_body = subject, body
             ok = self.send_email(subject, body, attachments)
             if not ok and attachments and self.email_configured:
@@ -623,10 +744,9 @@ class NotificationManager:
                 self.last_outcome += (f" [bundle NOT attached, over "
                                       f"{self.attach_max_bytes / 1048576:.0f} MB cap: "
                                       + ", ".join(withheld) + "]")
-
-            if self.gdrive_enabled and tarball:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.upload_to_drive([tarball], f"{block}_{ts}")
+            if self.gdrive_enabled and self.last_drive_outcome:
+                self.last_outcome = (f"{self.last_outcome} [drive: "
+                                     f"{self.last_drive_outcome}]")[:500]
         except Exception as e:  # never propagate
             self.last_outcome = f"notify() FAILED before/while sending: {type(e).__name__}: {e}"[:300]
             self.log(f"notification: notify() failed for {block}: {e}")
