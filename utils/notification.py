@@ -138,6 +138,7 @@ class NotificationManager:
         self.gdrive_identity = ""
         self.last_drive_links: List[str] = []
         self.last_drive_outcome = ""
+        self.last_drive_error = ""  # §142: raw API error behind a FAILED outcome
         self.max_tar_bytes = int(max_tar_bytes)
         # §137: downstream consumers (e.g. a Google Apps Script mail->Drive
         # extractor with a 6-min execution limit) need smaller / zip bundles.
@@ -433,6 +434,7 @@ class NotificationManager:
         Returns uploaded file ids; [] on any skip/failure. Never raises.
         """
         self.last_drive_links = []
+        self.last_drive_error = ""
         if not self.gdrive_enabled:
             return []
         files = [f for f in (files or []) if f and os.path.isfile(f)]
@@ -455,12 +457,14 @@ class NotificationManager:
             if not root:
                 self.last_drive_outcome = (
                     f"FAILED: root folder '{self.gdrive_target_desc('')}' not "
-                    f"visible to {self.gdrive_identity or 'the credential'}")
+                    f"visible to {self.gdrive_identity or 'the credential'}"
+                    + self._drive_err_suffix())
                 return []
             target = self._gdrive_folder(service, block_name, root)
             if not target:
                 self.last_drive_outcome = (f"FAILED: could not find/create "
-                                           f"{block_name}/ under the root")
+                                           f"{block_name}/ under the root"
+                                           + self._drive_err_suffix())
                 return []
             uploaded: List[str] = []
             for fp in files:
@@ -495,6 +499,26 @@ class NotificationManager:
             self.last_drive_outcome = f"FAILED: {msg[:200]}{hint}"
             self.log(f"notification: upload_to_drive failed: {msg}{hint}")
             return []
+
+    def _drive_err_suffix(self) -> str:
+        """§142: append the Google API error (trimmed) + a hint for common
+        causes, so the email/dashboard line is diagnosable on its own."""
+        e = self.last_drive_error
+        if not e:
+            return ""
+        hint = ""
+        if "File not found" in e or "notFound" in e or "404" in e:
+            hint = (" -- root id not found/visible: check $JANUS_GDRIVE_ROOT_ID "
+                    "is just the id from the folder URL (after /folders/, no "
+                    "?usp=...)")
+        elif ("insufficientFilePermissions" in e or "insufficientPermissions" in e
+              or "403" in e):
+            hint = (" -- the logged-in account can see the folder but cannot "
+                    "write to it (needs Editor), or the Drive scope was not "
+                    "granted at consent (re-run gdrive_auth.py and tick Drive)")
+        elif "invalid_grant" in e or "invalid_client" in e:
+            hint = " -- token revoked/expired: re-run gdrive_auth.py"
+        return f" [{e[:240]}]{hint}"
 
     def _gdrive_service(self, build):
         """Build a Drive API client from a service account or OAuth token json.
@@ -537,6 +561,7 @@ class NotificationManager:
                 supportsAllDrives=True, fields="files(id,name)").execute()
             hits = resp.get("files", [])
         except Exception as e:
+            self.last_drive_error = str(e)
             self.log(f"notification: Drive root lookup failed: {e}")
             return None
         if not hits:
@@ -571,6 +596,7 @@ class NotificationManager:
             self.log(f"notification: created Drive folder {name}/ under root")
             return created.get("id")
         except Exception as e:
+            self.last_drive_error = str(e)
             self.log(f"notification: Drive folder '{name}' lookup/create "
                      f"failed: {e}")
             return None
