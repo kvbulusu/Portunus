@@ -196,7 +196,7 @@ def test_notify_uploads_before_email_and_links_it(env, monkeypatch):
     m.notify("noc", "DONE", run_dir=str(tmp), bundle_dir=str(tmp / "bundles"))
     assert "https://drive/" in sent["body"]
     assert "janus_ec2_runs/noc/" in sent["body"]
-    assert "[drive: uploaded 1 file(s)" in m.last_outcome
+    assert "[drive: uploaded 4 file(s)" in m.last_outcome  # §145: bundle+qor+INDEX+SUMMARY
     noc = next(i for i, it in d.items.items() if it["name"] == "noc")
     assert any(it["parents"] == [noc] and it["mimeType"] == "file" for it in d.items.values())
 
@@ -255,3 +255,39 @@ def test_folder_failure_outcome_carries_api_error(env, monkeypatch):
     o = m.last_drive_outcome
     assert "could not find/create ampo/" in o
     assert "File not found" in o and "JANUS_GDRIVE_ROOT_ID" in o
+
+
+# ----- §145: timestamped run subfolder + all-blocks table --------------------
+def test_upload_into_timestamped_subfolder(env, monkeypatch):
+    _, creds, bundle, logs = env
+    d = FakeDrive({"R": {"name": "janus_ec2_runs", "parents": [], "mimeType": FOLDER},
+                   "B": {"name": "noc", "parents": ["R"], "mimeType": FOLDER}})
+    m = _mgr(creds, logs, d, monkeypatch)
+    m.upload_to_drive([bundle], "noc", subfolder="2026-10-11_12-44-32")
+    sub = [i for i, it in d.items.items() if it["name"] == "2026-10-11_12-44-32"]
+    assert len(sub) == 1 and d.items[sub[0]]["parents"] == ["B"]
+    up = [c for c in d.calls if c[0] == "create" and c[1]["body"]["name"].endswith(".tar.gz")]
+    assert up[0][1]["body"]["parents"] == sub
+    m.upload_to_drive([bundle], "noc", subfolder="2026-10-11_12-44-32")   # reused
+    assert len([i for i, it in d.items.items() if it["name"] == "2026-10-11_12-44-32"]) == 1
+
+
+def test_notify_body_has_all_blocks_table(env, monkeypatch):
+    tmp, creds, bundle, logs = env
+    m = nt.NotificationManager(logger=logs.append)
+    m.recipient, m.smtp_host, m.smtp_user, m.smtp_pass = "a@b", "h", "u", "p"
+    sent = {}
+
+    def fake_send(subject, body, att, html=None):
+        sent.update(body=body, html=html)
+        return True
+    monkeypatch.setattr(m, "send_email", fake_send)
+    rows = [{"block": "noc", "status": "DONE", "setup_ps": 12.5, "hold_ps": 3.0,
+             "drc": 0, "slew": 0},
+            {"block": "user_core_ara", "status": "PENDING"}]
+    m.notify("noc", "DONE", run_dir=str(tmp), bundle_dir=str(tmp / "b"), run_table=rows)
+    assert "ALL BLOCKS" in sent["body"] and "user_core_ara" in sent["body"]
+    assert "PENDING" in sent["body"] and "+12.50" in sent["body"]
+    assert "<table" in sent["html"] and "user_core_ara" in sent["html"]
+    m.send_summary("s", rows, run_dir=str(tmp))
+    assert "ALL BLOCKS (final)" in sent["body"] and "<table" in sent["html"]

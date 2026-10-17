@@ -88,6 +88,23 @@ from typing import Dict, List, Optional, Tuple
 # --- make sibling (agent/) and ../utils importable, however we're invoked -----
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)              # .../asic_flow
+# §145: hardened-block abstract outputs (results leaf); never seeded/backfilled
+# from a superseded leaf, regenerated after an adaptive promotion.
+_ABSTRACT_EXTS = (".lef", ".lib", ".lib.gz")
+# §145: default per-pass bound for --adaptive auto. A pass re-runs 3_place ->
+# 6_final; detailed route alone takes 24-48 h on the big blocks, so 72 h.
+# JANUS_ADAPTIVE_TIMEOUT_S overrides (seconds; 0 = no limit).
+_ADAPTIVE_TIMEOUT_DEFAULT_S = 72 * 3600
+
+
+def adaptive_timeout_s() -> Optional[int]:
+    """Per-pass timeout in seconds, or None for no limit."""
+    raw = os.environ.get("JANUS_ADAPTIVE_TIMEOUT_S", "").strip()
+    try:
+        v = int(float(raw)) if raw else _ADAPTIVE_TIMEOUT_DEFAULT_S
+    except ValueError:
+        v = _ADAPTIVE_TIMEOUT_DEFAULT_S
+    return v if v > 0 else None
 for _p in (_HERE, os.path.join(_ROOT, "utils")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -412,7 +429,7 @@ class DashboardUI:
             # §134: an --adaptive auto variant pass is rebuilding this block
             # from 3_place. Show it as ADAPT (counted as running) with the
             # trigger reason + the variant's live stage; WNS/slew/cells stay
-            # the BASE leaf's numbers (the pass is never auto-promoted).
+            # the BASE leaf's numbers until the pass is promoted (§145).
             ad = getattr(a, "_adapt_live", {}).get(block)
             if ad:
                 status = "ADAPT"
@@ -3865,6 +3882,13 @@ class JANUSAutonomousAgent:
             res.status = "FAILED"
             res.note = f"agent exception: {e}"[:160]
             self.ui.err(f"{block}: agent exception: {e}")
+        # §145: adaptive closure runs BEFORE the block is marked DONE: under
+        # --adaptive auto the extra pass may be PROMOTED to become the block's
+        # result, so dependents must not start on (and the email/Drive bundle
+        # must not report) the pre-promotion base. advise is instant.
+        adaptive = self._adaptive_advise(block, res)
+        if adaptive:
+            self._adaptive_auto(block, res, adaptive)
         status = Status.DONE if res.status == "DONE" else Status.FAILED
         # Push the settled QoR to the dashboard (final status + measured slacks,
         # DRC, area, util, tries) and the artifact dirs so its detail view / the
@@ -3888,11 +3912,6 @@ class JANUSAutonomousAgent:
                     self.results[b].status = "BLOCKED"
                     self.results[b].note = "skipped — a dependency failed"
 
-        # §126 adaptive closure (--adaptive, default advise): classify the
-        # settled QoR and write adaptive.json BEFORE the email so the plan
-        # rides in the agent note. Never raises.
-        adaptive = self._adaptive_advise(block, res)
-
         # Fire the completion/failure notification OUTSIDE the results lock so
         # the (possibly slow) email/Drive I/O never serialises other blocks.
         # Fully best-effort inside notify(); a failure here cannot affect the run.
@@ -3900,8 +3919,6 @@ class JANUSAutonomousAgent:
         if adaptive:
             # notify() rewrites qor.json; re-attach the plan to it.
             self._adaptive_write(block, adaptive)
-            # --adaptive auto: bounded variant rerun(s); base leaf untouched.
-            self._adaptive_auto(block, res, adaptive)
 
     def _notify_settled(self, block: str, res: "BlockResult") -> None:
         """Email (and optionally Drive-upload) the settled block's logs+reports.
@@ -3957,6 +3974,8 @@ class JANUSAutonomousAgent:
                 note=res.note or "",
                 qor_out_dir=reports_dir,
                 bundle_dir=os.path.join(self.run_dir, "bundles", block),
+                run_table=self._run_table(),
+                drive_subfolder=self._drive_run_stamp(),
             )
             out = getattr(self.notifier, "last_outcome", "") or "no outcome recorded"
             (self.ui.good if out.startswith("email SENT") and "[" not in out
@@ -4018,8 +4037,9 @@ class JANUSAutonomousAgent:
     # adaptive_closure.py is pure (classify / plan / knobs). This section owns
     # every side effect. Invariants: the base leaf is NEVER cleaned or written
     # (only read + copied), protected blocks never rerun (plan()), passes are
-    # capped by --adaptive-max-passes, the best pass is REPORTED, never
-    # auto-promoted (promotion = an explicit --variant <leaf> run by kiran).
+    # capped by --adaptive-max-passes. §145: a pass that beats the base with
+    # no signoff regression is PROMOTED in place (_adaptive_promote) BEFORE
+    # the block is marked DONE / emailed; the old leaf is kept, renamed.
     _ADAPT_VARIANT_RE = re.compile(r"[\w.-]*adapt\d+_[a-z_]+")
 
     def _adaptive_mode(self) -> str:
@@ -4123,6 +4143,8 @@ class JANUSAutonomousAgent:
             return True
         if sub == "reports":
             return name == "synth_stat.txt"
+        if sub == "results" and name.endswith(_ABSTRACT_EXTS):
+            return False  # §145: the base's abstract describes the BASE layout
         return not name[:1].isdigit() and not name.startswith(("janus_", "qor.json", "adaptive"))
 
     def _adaptive_leaf_dirs(self, base_res: str, variant: str) -> Dict[str, tuple]:
@@ -4277,10 +4299,7 @@ class JANUSAutonomousAgent:
             self.ui.info(f"{block}: [dry-run] adaptive pass: {run['cmd']}")
             run["status"] = "DRY_RUN"
             return run
-        try:
-            timeout = int(os.environ.get("JANUS_ADAPTIVE_TIMEOUT_S", "43200"))
-        except ValueError:
-            timeout = 43200
+        timeout = adaptive_timeout_s()
         tag = self._adaptive_reason_tag(cls, fq)
         self.ui.warn(f"{block}: adaptive auto kicked in [{tag}] -> pass {variant} "
                      f"({'; '.join(knobs.get('notes') or [])}) "
@@ -4318,7 +4337,8 @@ class JANUSAutonomousAgent:
 
     def _adaptive_auto(self, block: str, res: "BlockResult", rec: dict) -> None:
         """--adaptive auto: run at most max_extra_passes variant passes while
-        plan() says rerun; pick_best over base + passes; report, never promote."""
+        plan() says rerun; if a pass beats the base (pick_promotion: no
+        signoff regression + a strict improvement) it is PROMOTED (§145)."""
         if not rec or rec.get("mode") != "auto" or not rec.get("rerun"):
             return
         try:
@@ -4349,16 +4369,179 @@ class JANUSAutonomousAgent:
                 cur["input"] = run["input"]
                 run["next"] = {k: cur.get(k) for k in ("class", "action", "rerun", "blocked")}
             if len(rec["passes"]) > 1:
-                best = ac.pick_best(rec["passes"])
-                rec["best"] = best["name"]
-                if best["name"] != leaf:
-                    res.note += f"  adaptive best={best['name']} (promote: --variant {best['name']})"
-                self.ui.good(f"{block}: adaptive best pass = {best['name']} "
-                             f"(WNS {best.get('wns_ps')} ps, hold {best.get('hold_wns_ps')} ps)")
+                best, why = ac.pick_promotion(rec["passes"])
+                rec["best"] = best["name"] if best else leaf
+                rec["promotion"] = {"pass": best["name"] if best else None, "reason": why}
+                if best:
+                    self._adaptive_promote(block, res, rec, best, why)
+                else:
+                    res.note += f"  adaptive: kept base ({why[:120]})"
+                    self.ui.info(f"{block}: adaptive: base kept — {why}")
             self._adaptive_write(block, rec)
         except Exception as e:
             self.ui.warn(f"{block}: adaptive auto error (ignored; base untouched): {e}")
             self._adaptive_write(block, rec)
+
+    def _adaptive_promote(self, block: str, res: "BlockResult", rec: dict,
+                          best: dict, why: str) -> bool:
+        """§145: make pass *best* the block's result IN PLACE.
+
+        The pass leaf is swapped into the run's leaf (results/logs/reports/
+        objects) and the old leaf is kept as <leaf>_superseded_<ts>, so every
+        consumer that keys on the leaf — --status, the manifest/--resume,
+        dependents' hier inputs, the email and Drive bundle, the dashboard —
+        sees the promoted pass with no --variant rerun. Stage 1-2 artifacts the
+        pass did not rebuild are backfilled from the old leaf first (mtimes
+        preserved). The abstract is regenerated. All-or-nothing: a failed
+        rename is rolled back and the base stays the result."""
+        import adaptive_closure as ac
+        variant = best["name"]
+        base_res = self._results_dir(block)
+        if not base_res or not self._ADAPT_VARIANT_RE.fullmatch(variant):
+            return False
+        leaf = self._leaf()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        keep = f"{leaf}_superseded_{ts}"
+        dirs = self._adaptive_leaf_dirs(base_res, variant)
+        try:
+            for sub, (src, dst) in dirs.items():
+                if not os.path.isdir(src) or not os.path.isdir(dst):
+                    continue
+                for root, _d, files in os.walk(src):
+                    for fn in files:
+                        if not fn.startswith(("1_", "2_")) and not (
+                                sub == "reports" and fn.startswith("synth")):
+                            continue
+                        rel = os.path.relpath(os.path.join(root, fn), src)
+                        out = os.path.join(dst, rel)
+                        if not os.path.exists(out):
+                            os.makedirs(os.path.dirname(out), exist_ok=True)
+                            shutil.copy2(os.path.join(root, fn), out)
+                if sub == "results":  # stale (base-layout) abstract, if any
+                    for fn in os.listdir(dst):
+                        if fn.endswith(_ABSTRACT_EXTS) and not fn[:1].isdigit():
+                            os.remove(os.path.join(dst, fn))
+        except OSError as e:
+            self.ui.warn(f"{block}: adaptive promote backfill failed ({e}); base kept")
+            res.note += f"  adaptive: promote of {variant} FAILED (backfill: {e})"
+            return False
+        moved: List[tuple] = []
+        try:
+            for sub, (src, dst) in dirs.items():
+                if not os.path.isdir(dst):
+                    continue
+                if os.path.isdir(src):
+                    arch = os.path.join(os.path.dirname(src), keep)
+                    os.rename(src, arch)
+                    moved.append((arch, src))
+                os.rename(dst, src)
+                moved.append((src, dst))
+        except OSError as e:
+            for a, b in reversed(moved):   # roll back
+                try:
+                    os.rename(a, b)
+                except OSError:
+                    pass
+            self.ui.warn(f"{block}: adaptive promote rename failed ({e}); base kept")
+            res.note += f"  adaptive: promote of {variant} FAILED (rename: {e})"
+            return False
+        rec["promotion"].update({"promoted": True, "superseded_leaf": keep,
+                                 "at": datetime.now().isoformat(timespec="seconds")})
+        # refresh the block's QoR from the promoted leaf (same parser as the
+        # main flow), DRC from the pass qor.
+        auth = self._authoritative_timing_from_rpt(block)
+        if auth:
+            res.wns_ns = auth.get("setup_ws", res.wns_ns)
+            res.hold_ps = auth.get("hold_ws", res.hold_ps)
+            res.tns_ns = auth.get("setup_tns", res.tns_ns)
+            res.timing_source = auth.get("source")
+            counts = auth.get("counts") or {}
+            res.max_slew_violations = counts.get("max_slew")
+            res.max_cap_violations = counts.get("max_cap")
+            pg = auth.get("path_groups") or {}
+            if pg.get("setup") or pg.get("hold"):
+                res.path_groups = pg
+        else:
+            res.wns_ns = best.get("wns_ps")
+            res.hold_ps = best.get("hold_wns_ps")
+            res.tns_ns = best.get("tns_ps")
+            res.max_slew_violations = best.get("slew_viol")
+        if best.get("drc") is not None:
+            res.drc_violations = best.get("drc")
+        res.note += f"  adaptive PROMOTED {variant} ({why[:120]}); old leaf -> {keep}"
+        self.ui.good(f"{block}: adaptive pass {variant} PROMOTED to {leaf} — {why} "
+                     f"(previous result kept as {keep})")
+        try:
+            with open(os.path.join(dirs["reports"][0], "adaptive_promoted.json"), "w") as fh:
+                json.dump({"block": block, "promoted": variant, "reason": why,
+                           "superseded_leaf": keep, "passes": rec.get("passes")},
+                          fh, indent=2, default=str)
+        except OSError:
+            pass
+        self._run_abstract(block)
+        return True
+
+    # ----- §145 run-wide status table (every email) -------------------------
+    def _drive_run_stamp(self) -> str:
+        """Drive subfolder for THIS run: YYYY-MM-DD_HH-MM-SS of the run start
+        (parsed from the run dir name, else first use)."""
+        if getattr(self, "_drive_stamp", None):
+            return self._drive_stamp
+        m = re.search(r"(\d{8})_(\d{6})", os.path.basename(str(self.run_dir or "")))
+        if m:
+            d, t = m.groups()
+            st = f"{d[:4]}-{d[4:6]}-{d[6:]}_{t[:2]}-{t[2:4]}-{t[4:]}"
+        else:
+            st = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self._drive_stamp = st
+        return st
+
+    def _run_table(self) -> List[dict]:
+        """One row per block in the run graph with the latest state:
+        DONE/FAILED/BLOCKED rows carry QoR, in-flight rows show RUNNING or
+        ADAPT (<stage>), not-started rows PENDING. Never raises."""
+        rows: List[dict] = []
+        try:
+            dep = {}
+            try:
+                dep = self.dep.summary()
+            except Exception:
+                pass
+            live = getattr(self, "_adapt_live", {}) or {}
+            for b in self.dep.graph:
+                r = self.results.get(b)
+                st = (r.status if r else "PENDING") or "PENDING"
+                if st in ("PENDING", "RUNNING") and dep.get(b) == Status.RUNNING.value:
+                    st = "RUNNING"
+                if b in live:
+                    st = f"ADAPT ({live[b].get('stage', '?')})"
+                settled = st in ("DONE", "FAILED", "NEEDS_MANUAL", "ABORTED")
+                rows.append({
+                    "block": b, "status": st,
+                    "setup_ps": r.wns_ns if (r and settled) else None,
+                    "hold_ps": r.hold_ps if (r and settled) else None,
+                    "drc": r.drc_violations if (r and settled) else None,
+                    "slew": r.max_slew_violations if (r and settled) else None,
+                    "note": ("adaptive PROMOTED" if r and "PROMOTED" in (r.note or "")
+                             else ""),
+                })
+        except Exception as e:
+            self.ui.debug(f"run table error (ignored): {e}")
+        return rows
+
+    def _notify_run_summary(self) -> None:
+        """§145: one final email at run end with the full block table."""
+        try:
+            if not getattr(self, "notifier", None) or not self.notifier.email_configured:
+                return
+            rows = self._run_table()
+            ok = sum(1 for r in rows if r["status"] == "DONE")
+            self.notifier.send_summary(
+                f"JANUS run complete: {ok}/{len(rows)} DONE ({os.path.basename(self.run_dir)})",
+                rows, run_dir=self.run_dir)
+            self._notify_log(f"run summary: {self.notifier.last_outcome}")
+        except Exception as e:
+            self._notify_log(f"run summary email error: {e}")
 
     # ----- kepler-formal shared-library auto-fix -----------------------------
     def _ensure_kepler_libpath(self) -> None:
@@ -4527,6 +4710,7 @@ class JANUSAutonomousAgent:
         }
         paths = self.reporter.write_all(rows, usage, meta)
         self.ui.table(rows)
+        self._notify_run_summary()
         done = sum(1 for r in self.results.values() if r.status == "DONE")
         # stamp final run meta into the dashboard so a post-run browse is exact
         if self.dash_state is not None:
@@ -5012,9 +5196,12 @@ def build_parser() -> argparse.ArgumentParser:
         "CLOCK_SKEW_LIMITED / IO_BUDGET_LIMITED / CONGESTION_LIMITED / "
         "LOGIC_DEPTH_LIMITED / DRV_LIMITED) and recommend — or, with auto, "
         "run — a bounded extra pass from 3_place in a NEW FLOW_VARIANT leaf "
-        "(<variant>_adaptN_<class>). The base leaf is never touched, "
-        "protected blocks never rerun, and the best pass is REPORTED "
-        "(adaptive.json / qor.json / email), never auto-promoted.", 78))
+        "(<variant>_adaptN_<class>). Protected blocks never rerun. If a pass "
+        "improves QoR with no signoff regression (setup/hold into violation, "
+        "more DRC or slew) it is PROMOTED: it becomes the block's result "
+        "(--status, reports, dependents, email, Drive) and the old leaf is "
+        "kept as <leaf>_superseded_<ts>. The block is marked DONE and emailed "
+        "only after its passes finish.", 78))
     adapt.add_argument("--adaptive", choices=["off", "advise", "auto"],
                        default="advise",
                        help="off = no classification; advise (default) = "
@@ -5027,7 +5214,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="cap on extra passes per block under --adaptive "
                             f"auto (default 1, max {_ADAPTIVE_MAX_PASSES_CAP}). "
                             "Env JANUS_ADAPTIVE_TIMEOUT_S bounds each pass "
-                            "(default 43200 s).")
+                            "in seconds (default 259200 = 72 h; 0 = no limit).")
     adapt.add_argument("--adaptive-thresholds", default=None,
                        metavar="FILE|JSON",
                        help="override classifier thresholds with a JSON object "

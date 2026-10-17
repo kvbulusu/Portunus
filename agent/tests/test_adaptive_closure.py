@@ -161,3 +161,30 @@ def test_hook_tcl_complete():
         out = subprocess.run(["tclsh"], input=f"set f [open {{{f}}}]; puts [info complete [read $f]]",
                              capture_output=True, text=True).stdout
         assert out.strip() == "1", h
+
+
+# ----- §145 promotion verdict ------------------------------------------------
+def test_promotion_verdict_cases():
+    b = {"name": "base", "wns_ps": -20.0, "hold_wns_ps": 5.0, "tns_ps": -300.0, "drc": 0,
+         "slew_viol": 4}
+    ok, why = ac.promotion_verdict(b, dict(b, name="p", wns_ps=-5.0, tns_ps=-50.0))
+    assert ok and "wns_ps" in why
+    assert not ac.promotion_verdict(b, dict(b, wns_ps=-5.0, drc=2))[0]        # more DRC
+    assert not ac.promotion_verdict(b, dict(b, wns_ps=-5.0, hold_wns_ps=-1))[0]  # hold neg
+    assert not ac.promotion_verdict(b, dict(b, wns_ps=None))[0]               # missing
+    assert not ac.promotion_verdict(b, dict(b))[0]                             # no change
+    assert not ac.promotion_verdict(b, dict(b, slew_viol=9, wns_ps=0.0))[0]   # slew worse
+    pos = dict(b, wns_ps=30.0, tns_ps=0.0)
+    assert ac.promotion_verdict(pos, dict(pos, wns_ps=10.0, slew_viol=0))[0]  # margin shrink ok
+
+
+def test_pick_promotion():
+    b = {"name": "base", "wns_ps": -20.0, "hold_wns_ps": 5.0, "drc": 0, "slew_viol": 0}
+    p1 = dict(b, name="adapt1_a", wns_ps=-10.0)
+    p2 = dict(b, name="adapt2_b", wns_ps=-2.0)
+    bad = dict(b, name="adapt3_c", wns_ps=5.0, drc=10)
+    best, _ = ac.pick_promotion([b, p1, bad, p2])
+    assert best["name"] == "adapt2_b"
+    assert ac.pick_promotion([b])[0] is None
+    none, why = ac.pick_promotion([b, bad])
+    assert none is None and "adapt3_c" in why
