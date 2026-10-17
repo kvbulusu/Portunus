@@ -257,3 +257,19 @@ def test_drive_stamp_from_run_dir(tmp_path):
     a = _agent(tmp_path)
     a.run_dir = "/x/runs/20261011_124432"
     assert a._drive_run_stamp() == "2026-10-11_12-44-32"
+
+
+def test_resumed_block_qor_loaded(tmp_path):
+    a = _agent(tmp_path)
+    rep = tmp_path / "rep"
+    rep.mkdir()
+    (rep / "5_route_drc.rpt").write_text("violation type: Short\nviolation type: Short\n")
+    a._reports_dir = lambda b: str(rep)
+    a._authoritative_timing_from_rpt = lambda b: {"setup_ws": 45.69, "hold_ws": 8.9,
+                                                   "setup_tns": 0.0, "counts": {"max_slew": 0}}
+    a.results = {"cva6": types.SimpleNamespace(note="resumed", wns_ns=None, hold_ps=None,
+                                               tns_ns=None, drc_violations=None,
+                                               max_slew_violations=None)}
+    a._load_resumed_qor("cva6")
+    r = a.results["cva6"]
+    assert (r.wns_ns, r.hold_ps, r.drc_violations, r.max_slew_violations) == (45.69, 8.9, 2, 0)
