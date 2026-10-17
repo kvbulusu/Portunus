@@ -157,8 +157,8 @@ _TRIAGE_RULES = [
      "memory). In 4_1_cts this child is the kepler-formal logic-equivalence "
      "check (LEC_CHECK=1), which does not fit in RAM for very large flat blocks "
      "such as user_core_ara. The LEC is a verification extra; the layout is "
-     "unaffected. Fix: set  export LEC_CHECK ?= 0  in the block .mk (already "
-     "the default for user_core_ara since §140), re-run "
+     "unaffected. Fix: set  export LEC_CHECK = 0  (plain '=', not '?=', which "
+     "yields to an inherited env/_local.mk value; user_core_ara since §144), re-run "
      "scripts/03_setup_janus_configs.sh <block>, then --resume (continues at "
      "4_cts, no re-synthesis). Not an RTL/config bug."),
     # --- missing shared libraries (OpenROAD / OR-Tools runtime) -------------
