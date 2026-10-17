@@ -94,6 +94,63 @@ _DEFAULT_GDRIVE_CREDS = os.path.expanduser("~/.config/janus_gdrive_credentials.j
 _DEFAULT_GDRIVE_ROOT = "janus_ec2_runs"
 
 
+def _fmt(v, nd: int = 2) -> str:
+    if v is None or v == "":
+        return "-"
+    try:
+        return f"{float(v):+.{nd}f}" if nd else str(int(v))
+    except (TypeError, ValueError):
+        return str(v)
+
+
+_TABLE_COLS = (("Block", "block"), ("Status", "status"), ("Setup WS (ps)", "setup_ps"),
+               ("Hold WS (ps)", "hold_ps"), ("DRC", "drc"), ("Max-slew viol", "slew"),
+               ("Note", "note"))
+
+
+def _cells(r: dict) -> List[str]:
+    return [str(r.get("block") or ""), str(r.get("status") or "PENDING"),
+            _fmt(r.get("setup_ps")), _fmt(r.get("hold_ps")),
+            _fmt(r.get("drc"), 0), _fmt(r.get("slew"), 0), str(r.get("note") or "")]
+
+
+def render_run_table_text(rows: List[dict]) -> str:
+    """§145: fixed-width run-wide block table (plain-text email part)."""
+    if not rows:
+        return ""
+    head = [h for h, _ in _TABLE_COLS]
+    body = [_cells(r) for r in rows]
+    w = [max(len(x[i]) for x in [head] + body) for i in range(len(head))]
+    line = lambda c: "  ".join(c[i].ljust(w[i]) for i in range(len(c))).rstrip()
+    return "\n".join([line(head), line(["-" * n for n in w])] + [line(c) for c in body])
+
+
+def render_run_table_html(rows: List[dict], title: str = "All blocks (latest)") -> str:
+    """§145: same table as HTML (status-coloured)."""
+    import html as _h
+    if not rows:
+        return ""
+    col = {"DONE": "#d4edda", "FAILED": "#f8d7da", "BLOCKED": "#f8d7da",
+           "NEEDS_MANUAL": "#fff3cd", "ABORTED": "#f8d7da"}
+    th = "".join(f'<th style="border:1px solid #999;padding:3px 8px;background:#eee">'
+                 f"{_h.escape(h)}</th>" for h, _ in _TABLE_COLS)
+    trs = []
+    for r in rows:
+        c = _cells(r)
+        st = c[1]
+        bg = col.get(st, "#e2e3e5" if st == "PENDING" else "#cce5ff")
+        tds = "".join(
+            f'<td style="border:1px solid #999;padding:3px 8px;'
+            f'{"text-align:right;" if 2 <= i <= 5 else ""}'
+            f'{"background:" + bg + ";" if i == 1 else ""}'
+            f'{"color:#b00;" if 2 <= i <= 3 and v.startswith("-") and v != "-" else ""}">'
+            f"{_h.escape(v)}</td>" for i, v in enumerate(c))
+        trs.append(f"<tr>{tds}</tr>")
+    return (f"<p><b>{_h.escape(title)}</b></p>"
+            '<table style="border-collapse:collapse;font-family:monospace;font-size:13px">'
+            f"<tr>{th}</tr>{''.join(trs)}</table>")
+
+
 def _noop(_msg: str) -> None:
     pass
 
@@ -319,8 +376,10 @@ class NotificationManager:
         subject: str,
         body: str,
         attachments: Optional[List[str]] = None,
+        html: Optional[str] = None,
     ) -> bool:
-        """Send an SMTP email with optional file attachments.
+        """Send an SMTP email with optional file attachments. *html* (§145)
+        adds a text/html alternative to the plain body.
 
         Returns True on success, False otherwise (never raises).
         """
@@ -335,7 +394,13 @@ class NotificationManager:
             msg["From"] = self.smtp_user
             msg["To"] = self.recipient
             msg["Subject"] = subject
-            msg.attach(MIMEText(body, "plain"))
+            if html:
+                alt = MIMEMultipart("alternative")
+                alt.attach(MIMEText(body, "plain"))
+                alt.attach(MIMEText(html, "html"))
+                msg.attach(alt)
+            else:
+                msg.attach(MIMEText(body, "plain"))
 
             for path in attachments:
                 if not path or not os.path.isfile(path):
@@ -418,8 +483,11 @@ class NotificationManager:
         self,
         files: List[str],
         block_name: str,
+        subfolder: Optional[str] = None,
     ) -> List[str]:
         """§138: upload *files* to ``<gdrive_root>/<block_name>/`` on Drive.
+        §145: with *subfolder* (the run timestamp) they go to
+        ``<gdrive_root>/<block_name>/<subfolder>/`` instead.
 
         ``gdrive_root`` is an EXISTING folder the user owns and has shared with
         the credential's identity (default name ``janus_ec2_runs``, override
@@ -466,6 +534,15 @@ class NotificationManager:
                                            f"{block_name}/ under the root"
                                            + self._drive_err_suffix())
                 return []
+            dest = block_name
+            if subfolder:
+                target = self._gdrive_folder(service, subfolder, target)
+                dest = f"{block_name}/{subfolder}"
+                if not target:
+                    self.last_drive_outcome = (f"FAILED: could not find/create "
+                                               f"{dest}/ under the root"
+                                               + self._drive_err_suffix())
+                    return []
             uploaded: List[str] = []
             for fp in files:
                 media = MediaFileUpload(fp, resumable=True,
@@ -480,10 +557,10 @@ class NotificationManager:
                 if link:
                     self.last_drive_links.append(link)
                 self.log(f"notification: uploaded {os.path.basename(fp)} to "
-                         f"Drive {self.gdrive_target_desc(block_name)} "
+                         f"Drive {self.gdrive_target_desc(dest)} "
                          f"(id={fid}) {link}")
             self.last_drive_outcome = (f"uploaded {len(uploaded)} file(s) to "
-                                       f"{self.gdrive_target_desc(block_name)}")
+                                       f"{self.gdrive_target_desc(dest)}")
             return uploaded
         except Exception as e:  # never propagate
             msg = str(e)
@@ -601,6 +678,15 @@ class NotificationManager:
                      f"failed: {e}")
             return None
 
+    def send_summary(self, subject: str, rows: List[dict],
+                     run_dir: Optional[str] = None) -> bool:
+        """§145: run-end email with just the all-blocks table."""
+        txt = "ALL BLOCKS (final)\n" + render_run_table_text(rows)
+        if run_dir:
+            txt += f"\n\nRun dir: {run_dir}"
+        html = render_run_table_html(rows, "All blocks (final)")
+        return self.send_email(subject, txt, [], html=html)
+
     # ------------------------------------------------------------------ #
     # orchestrator
     # ------------------------------------------------------------------ #
@@ -620,6 +706,8 @@ class NotificationManager:
         note: str = "",
         qor_out_dir: Optional[str] = None,
         bundle_dir: Optional[str] = None,
+        run_table: Optional[List[dict]] = None,
+        drive_subfolder: Optional[str] = None,
     ) -> Optional[dict]:
         """Build the per-block bundle, email it, and (optionally) upload to Drive.
 
@@ -705,6 +793,13 @@ class NotificationManager:
                 extra.append(f"Attachment   : {os.path.basename(tarball)} "
                              "(see INDEX.md inside for what was included/skipped and why)")
             body = body + ("\n\n" + "\n".join(extra) if extra else "")
+            # §145: every email carries the run-wide table (latest state of
+            # every block; not-yet-run ones PENDING) at the top.
+            table_txt = render_run_table_text(run_table or [])
+            if table_txt:
+                body = ("ALL BLOCKS (latest)\n" + table_txt + "\n\n"
+                        + "=" * 72 + f"\nTHIS BLOCK: {block}\n" + "=" * 72
+                        + "\n" + body)
 
             if tarball is None:
                 tarball = self.collect_logs_and_reports(
@@ -744,17 +839,42 @@ class NotificationManager:
 
             # §138: Drive first, so the email can carry the link.
             if self.gdrive_enabled and tarball:
-                self.upload_to_drive([tarball], block)
+                # §145: bundle + its qor.json / INDEX.md / SUMMARY.txt (the
+                # email body) into <block>/<run timestamp>/ -- readable on
+                # Drive with no extraction (no Apps Script needed).
+                up = [tarball]
+                bdir = os.path.dirname(tarball)
+                for nm in ("qor.json", "INDEX.md"):
+                    if os.path.isfile(os.path.join(bdir, nm)):
+                        up.append(os.path.join(bdir, nm))
+                try:
+                    sp = os.path.join(bdir, "SUMMARY.txt")
+                    with open(sp, "w") as fh:
+                        fh.write(f"{subject}\n\n{body}\n")
+                    up.append(sp)
+                except OSError:
+                    pass
+                self.upload_to_drive(up, block, **({"subfolder": drive_subfolder}
+                                                   if drive_subfolder else {}))
+                dest = f"{block}/{drive_subfolder}" if drive_subfolder else block
                 if self.last_drive_links:
                     body += ("\n\nBundle on Google Drive ("
-                             f"{self.gdrive_target_desc(block)}):\n  "
+                             f"{self.gdrive_target_desc(dest)}):\n  "
                              + "\n  ".join(self.last_drive_links))
                 elif self.last_drive_outcome:
                     body += (f"\n\nGoogle Drive upload: {self.last_drive_outcome}"
                              f"\nBundle on EC2 disk: {tarball}")
 
             self.last_subject, self.last_body = subject, body
-            ok = self.send_email(subject, body, attachments)
+            html = None
+            if run_table:
+                import html as _h
+                html = (render_run_table_html(run_table)
+                        + f"<hr><p><b>This block: {_h.escape(block)}</b></p>"
+                        + "<pre style=\"font-size:12px\">"
+                        + _h.escape(body.split("=" * 72 + "\n", 2)[-1]) + "</pre>")
+            hk = {"html": html} if html else {}
+            ok = self.send_email(subject, body, attachments, **hk)
             if not ok and attachments and self.email_configured:
                 # Rejected WITH the attachment (size/policy 552, timeout on a
                 # slow upload, ...): retry once text-only so a mail still lands.
@@ -763,7 +883,7 @@ class NotificationManager:
                          f"failed ({first}). Bundle on disk: "
                          + ", ".join(attachments))
                 self.last_body = body
-                if self.send_email(subject, body, []):
+                if self.send_email(subject, body, [], **hk):
                     self.last_outcome = (f"{self.last_outcome} [text-only retry; "
                                          f"with-attachment send failed: {first}]")[:400]
             elif ok and withheld:

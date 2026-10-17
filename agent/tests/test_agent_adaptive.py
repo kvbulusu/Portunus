@@ -137,3 +137,123 @@ def test_auto_protected_block_never_reruns(tmp_path):
     rec = ac.plan("user_core_ara_lane", {"class": "MODERATE"}, "auto")
     a._adaptive_auto("user_core_ara_lane", types.SimpleNamespace(note=""), rec)
     assert not called and rec.get("blocked")
+
+
+# ----- §145: promotion of a better extra pass in place -----------------------
+def _variant_tree(flow, v="adapt1_clock_skew_limited"):
+    for sub, names in {"results": ["3_place.odb", "6_final.odb", "b.lef"],
+                       "logs": ["3_3_place_gp.log"],
+                       "reports": ["6_finish.rpt"],
+                       "objects": ["klayout.lyt"]}.items():
+        for n in names:
+            p = flow / sub / "asap7" / "b" / v / n
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("V:" + n)
+    return v
+
+
+def _promo_agent(tmp_path):
+    a = _agent(tmp_path, "--adaptive", "auto")
+    base = _tree(tmp_path / "flow")
+    a._results_dir = lambda b: base
+    a._leaf = lambda: "base"
+    a._authoritative_timing_from_rpt = lambda b: None
+    a.abstracts = []
+    a._run_abstract = lambda b: a.abstracts.append(b)
+    return a, base
+
+
+def test_promote_swaps_leaf_keeps_superseded(tmp_path):
+    a, base = _promo_agent(tmp_path)
+    v = _variant_tree(tmp_path / "flow")
+    res = types.SimpleNamespace(note="", wns_ns=-20.0, hold_ps=5.0, tns_ns=-100.0,
+                                drc_violations=3, max_slew_violations=9)
+    rec = {"promotion": {"pass": v}, "passes": []}
+    best = {"name": v, "wns_ps": 4.0, "hold_wns_ps": 6.0, "tns_ps": 0.0, "drc": 0,
+            "slew_viol": 2}
+    assert a._adaptive_promote("b", res, rec, best, "improves: wns")
+    r = tmp_path / "flow" / "results" / "asap7" / "b"
+    assert open(r / "base" / "6_final.odb").read() == "V:6_final.odb"     # promoted
+    assert open(r / "base" / "1_synth.v").read() == "1_synth.v"           # backfilled
+    assert not (r / "base" / "b.lef").exists()                            # stale abstract
+    assert not (r / v).exists()
+    keep = rec["promotion"]["superseded_leaf"]
+    assert keep.startswith("base_superseded_") and rec["promotion"]["promoted"]
+    for sub in ("results", "logs", "reports", "objects"):
+        assert (tmp_path / "flow" / sub / "asap7" / "b" / keep).is_dir()
+    assert open(r / keep / "6_final.odb").read() == "6_final.odb"         # old kept
+    rep = tmp_path / "flow" / "reports" / "asap7" / "b" / "base"
+    assert (rep / "synth_stat.txt").exists() and (rep / "adaptive_promoted.json").exists()
+    assert res.wns_ns == 4.0 and res.drc_violations == 0 and res.max_slew_violations == 2
+    assert "adaptive PROMOTED" in res.note and a.abstracts == ["b"]
+
+
+def test_promote_rollback_on_rename_failure(tmp_path, monkeypatch):
+    a, base = _promo_agent(tmp_path)
+    v = _variant_tree(tmp_path / "flow")
+    real = os.rename
+    n = {"c": 0}
+
+    def flaky(s, d):
+        n["c"] += 1
+        if n["c"] == 4:          # fail mid-way (logs subdir)
+            raise OSError("boom")
+        return real(s, d)
+    monkeypatch.setattr(ja.os, "rename", flaky)
+    res = types.SimpleNamespace(note="", wns_ns=-20.0)
+    assert not a._adaptive_promote("b", res, {"promotion": {}}, {"name": v}, "x")
+    monkeypatch.setattr(ja.os, "rename", real)
+    for sub in ("results", "logs", "reports", "objects"):
+        names = sorted(os.listdir(tmp_path / "flow" / sub / "asap7" / "b"))
+        assert names == ["adapt1_clock_skew_limited", "base"], (sub, names)
+    assert open(tmp_path / "flow" / "results" / "asap7" / "b" / "base" / "6_final.odb").read() == "6_final.odb"
+    assert "FAILED" in res.note and not a.abstracts
+
+
+def test_promote_rejects_non_adaptive_name(tmp_path):
+    a, _ = _promo_agent(tmp_path)
+    assert not a._adaptive_promote("b", types.SimpleNamespace(note=""), {"promotion": {}},
+                                   {"name": "../base"}, "x")
+
+
+@pytest.mark.parametrize("val,exp", [(None, 259200), ("0", None), ("3600", 3600),
+                                     ("junk", 259200)])
+def test_adaptive_timeout_env(monkeypatch, val, exp):
+    if val is None:
+        monkeypatch.delenv("JANUS_ADAPTIVE_TIMEOUT_S", raising=False)
+    else:
+        monkeypatch.setenv("JANUS_ADAPTIVE_TIMEOUT_S", val)
+    assert ja.adaptive_timeout_s() == exp
+
+
+def test_adaptive_runs_before_done_mark():
+    import inspect
+    src = inspect.getsource(ja.JANUSAutonomousAgent._process_and_mark)
+    i_auto = src.index("_adaptive_auto(")
+    assert i_auto < src.index("_notify_settled(") and i_auto < src.index("_dash_update(")
+
+
+def test_run_table_pending_and_done(tmp_path):
+    a = _agent(tmp_path)
+    a.dep = types.SimpleNamespace(graph={"noc": [], "ara": [], "soc": ["noc"]},
+                                  summary=lambda: {"ara": ja.Status.RUNNING.value})
+    a.results = {"noc": types.SimpleNamespace(status="DONE", wns_ns=12.0, hold_ps=3.0,
+                                              drc_violations=0, max_slew_violations=0,
+                                              note="adaptive PROMOTED adapt1_x"),
+                 "ara": types.SimpleNamespace(status="PENDING", wns_ns=None, hold_ps=None,
+                                              drc_violations=None, max_slew_violations=None,
+                                              note="")}
+    a._adapt_live = {}
+    rows = {r["block"]: r for r in a._run_table()}
+    assert rows["noc"]["status"] == "DONE" and rows["noc"]["setup_ps"] == 12.0
+    assert rows["noc"]["note"] == "adaptive PROMOTED"
+    assert rows["ara"]["status"] == "RUNNING" and rows["ara"]["setup_ps"] is None
+    assert rows["soc"]["status"] == "PENDING"
+    a._adapt_live = {"ara": {"stage": "5_route"}}
+    assert {r["block"]: r for r in a._run_table()}["ara"]["status"] == "ADAPT (5_route)"
+
+
+def test_drive_stamp_from_run_dir(tmp_path):
+    a = _agent(tmp_path)
+    a.run_dir = "/x/runs/20261011_124432"
+    assert a._drive_run_stamp() == "2026-10-11_12-44-32"
