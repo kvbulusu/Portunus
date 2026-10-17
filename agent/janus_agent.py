@@ -3761,6 +3761,7 @@ class JANUSAutonomousAgent:
                     self.dep.mark(b, Status.DONE)
                     self.results[b].status = "DONE"
                     self.results[b].note = "resumed (already DONE)"
+                    self._load_resumed_qor(b)
                     self.ui.info(f"{b}: skipped (resume — already DONE)"
                                  + (f" — {why_skip}" if why_skip else ""))
                     continue
@@ -4528,6 +4529,32 @@ class JANUSAutonomousAgent:
         except Exception as e:
             self.ui.debug(f"run table error (ignored): {e}")
         return rows
+
+    def _load_resumed_qor(self, block: str) -> None:
+        """§145: a resume-skipped DONE block still shows its on-disk QoR in the
+        all-blocks table (same parsers as a fresh run; DRC from
+        5_route_drc.rpt). Never raises; missing reports leave fields None."""
+        try:
+            res = self.results[block]
+            auth = self._authoritative_timing_from_rpt(block)
+            if auth:
+                res.wns_ns = auth.get("setup_ws")
+                res.hold_ps = auth.get("hold_ws")
+                res.tns_ns = auth.get("setup_tns")
+                res.timing_source = auth.get("source")
+                counts = auth.get("counts") or {}
+                res.max_slew_violations = counts.get("max_slew")
+                res.max_cap_violations = counts.get("max_cap")
+            rep = self._reports_dir(block)
+            if rep:
+                from report_bundle import parse_route_drc
+                drc = parse_route_drc(os.path.join(rep, "5_route_drc.rpt"))
+                if drc is not None:
+                    res.drc_violations = drc.get("total")
+                if os.path.isfile(os.path.join(rep, "adaptive_promoted.json")):
+                    res.note += "  adaptive PROMOTED (earlier run)"
+        except Exception as e:
+            self.ui.debug(f"{block}: resumed QoR load skipped — {e}")
 
     def _notify_run_summary(self) -> None:
         """§145: one final email at run end with the full block table."""
