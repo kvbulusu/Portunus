@@ -1273,6 +1273,28 @@ class JANUSAutonomousAgent:
                     "FAST_LIB_FILES=$(BC_NLDM_LIB_FILES) "
                     "$(filter-out %_slow.lib,$(ADDITIONAL_LIBS))"]
 
+        # §147 FIX — KEPLER LEC DIES ON PER-CORNER CHILD LIBS. ORFS
+        # formal_check.tcl:write_lec_script hands kepler-formal the single-corner
+        # $LIB_FILES (= WC platform libs + the UNFILTERED ADDITIONAL_LIBS), so a
+        # hierarchical parent with LEC_CHECK=1 passes BOTH <child>_fast.lib and
+        # <child>_slow.lib. Kepler puts every lib cell into one SNL library keyed
+        # by cell name and aborts on the second definition. Proof — user_core run
+        # 20261016_202941, 4_1_cts.log tail:
+        #   Loading library file: .../user_core_cva6/base/user_core_cva6_fast.lib
+        #   Loading library file: .../user_core_cva6/base/user_core_cva6_slow.lib
+        #   [critical] [KeplerFormal.cpp:1047] Netlist loading failed: NLLibrary
+        #   user_core_cva6 contains already a SNLDesign named: user_core_cva6
+        #   ... Peak memory: 2436936KB   (2.4 GB -> NOT the §140 OOM)
+        # ORFS's own knob REMOVE_LIBS_FOR_LEC drops exact LIB_FILES entries from
+        # the kepler list only (STA/resizer/synth unaffected). We drop the
+        # _fast twins (LEC is functional; corner choice is irrelevant, and _slow
+        # matches the setup corner above). Command-line only, so flow_state sees
+        # no config.mk change -> --resume restarts at 4_cts, no re-synthesis.
+        # Applies to every parent consuming per-corner child abstracts
+        # (user_core, user_domain, janus_soc_top). JANUS_LEC_DEDUP_LIBS=0 opts out.
+        if os.environ.get("JANUS_LEC_DEDUP_LIBS", "1") != "0":
+            cmd.append("REMOVE_LIBS_FOR_LEC=$(filter %_fast.lib,$(ADDITIONAL_LIBS))")
+
         # ---- enable scan flops in the cell library (DFT) ---------------------
         # The ASAP7 platform FORBIDS the scan flops by default:
         #     platforms/asap7/config.mk:24  DONT_USE_CELLS  = *x1p*_ASAP7* *xp*_ASAP7*
@@ -4629,12 +4651,38 @@ class JANUSAutonomousAgent:
         else:
             self.ui.debug("kepler-formal lib dir(s) already on LD_LIBRARY_PATH")
 
+    def _check_lec_dedup_support(self) -> None:
+        """§147: confirm this ORFS checkout honours REMOVE_LIBS_FOR_LEC.
+
+        Older formal_check.tcl versions ignore the variable, in which case the
+        duplicate-child-lib Kepler abort comes back. Warn loudly (do not fail):
+        the fallback is LEC_CHECK=0 for that parent block.
+        """
+        if not self.flow_dir or os.environ.get("JANUS_LEC_DEDUP_LIBS", "1") == "0":
+            return
+        fc = os.path.join(self.flow_dir, "scripts", "formal_check.tcl")
+        try:
+            with open(fc, "r", errors="replace") as fh:
+                ok = "REMOVE_LIBS_FOR_LEC" in fh.read()
+        except OSError:
+            return  # no formal_check.tcl -> this ORFS has no Kepler LEC at all
+        if ok:
+            self.ui.debug("ORFS formal_check.tcl supports REMOVE_LIBS_FOR_LEC (§147)")
+        else:
+            self.ui.warn(
+                f"{fc} does not reference REMOVE_LIBS_FOR_LEC: this ORFS will pass "
+                "BOTH <child>_fast.lib and <child>_slow.lib to kepler-formal and "
+                "LEC_CHECK=1 parents (user_core/user_domain/janus_soc_top) will "
+                "abort in 4_1_cts with 'contains already a SNLDesign named'. "
+                "Update ORFS or set LEC_CHECK=0 for those blocks.")
+
     # ----- preflight checks --------------------------------------------------
     def _preflight(self) -> None:
         problems = []
         # Fix the kepler-formal shared-lib path up front so the optional
         # equiv-check loads (or is cleanly skipped) instead of crashing CTS.
         self._ensure_kepler_libpath()
+        self._check_lec_dedup_support()
         if not self.orfs:
             problems.append("ORFS_DIR not set (source ~/janus_asic/janus_asic_env.sh or pass --orfs)")
         elif not os.path.isdir(self.flow_dir):
