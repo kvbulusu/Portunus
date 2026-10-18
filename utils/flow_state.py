@@ -305,16 +305,30 @@ def _is_mapped_key(k: str) -> bool:
                                         for p, _ in _KEY_STAGE_PREFIX)
 
 
+# §148: check-only switches. In ORFS (cts.tcl / final_outputs.tcl / synth_*.tcl)
+# LEC_CHECK only writes *_lec.v side files and runs kepler-formal; it never
+# alters the netlist/odb. So turning it OFF cannot invalidate a stage that was
+# built with it ON (avoids re-running CTS->final on DONE blocks). Turning it ON
+# still maps to 4_cts (the check has not been run yet).
+_CHECK_ONLY_KEYS = frozenset({"LEC_CHECK"})
+
+
+def _is_off(v: Optional[str]) -> bool:
+    return (v or "").strip() in ("", "0")
+
+
 def _changed_keys(old: Dict[str, str], new: Dict[str, str]) -> List[str]:
     """Semantically changed keys. ``__*`` metadata is ignored. In fmt-2
     snapshots a var that is only an INPUT to other vars (in ``__refd``) and
     has no stage mapping of its own is skipped: its effect already shows up in
-    the expanded value of the var that references it, which maps precisely."""
+    the expanded value of the var that references it, which maps precisely.
+    A check-only key (``_CHECK_ONLY_KEYS``) switched OFF is not a change."""
     refd = set((new.get("__refd") or "").split()) | set((old.get("__refd") or "").split())
     keys = (set(old) | set(new))
     return sorted(k for k in keys
                   if not k.startswith("__") and old.get(k) != new.get(k)
-                  and not (k in refd and not _is_mapped_key(k)))
+                  and not (k in refd and not _is_mapped_key(k))
+                  and not (k in _CHECK_ONLY_KEYS and _is_off(new.get(k))))
 
 
 def _earliest_stage_for_keys(keys: List[str]) -> Optional[str]:

@@ -38,7 +38,23 @@ def test_repo_configs():
     ara = flow_state.parse_make_vars(os.path.join(cfg, "user_core_ara.mk"))
     cva6 = flow_state.parse_make_vars(os.path.join(cfg, "user_core_cva6.mk"))
     assert ara["LEC_CHECK"] == "0"
-    assert cva6["LEC_CHECK"] == "1" and cva6["HOLD_SLACK_MARGIN"] == "25"
+    assert cva6["HOLD_SLACK_MARGIN"] == "25"
+    # §148: LEC off for every block config
+    import glob
+    for mk in glob.glob(os.path.join(cfg, "*.mk")):
+        v = flow_state.parse_make_vars(mk)
+        assert v.get("LEC_CHECK", "0") == "0", mk
+
+
+def test_lec_off_does_not_invalidate_done_block():
+    """§148: 1->0 is check-only (no netlist change) -> no rerun; 0->1 still 4_cts."""
+    on = {"LEC_CHECK": "1", "HOLD_SLACK_MARGIN": "25"}
+    off = {"LEC_CHECK": "0", "HOLD_SLACK_MARGIN": "25"}
+    assert flow_state._changed_keys(on, off) == []
+    assert flow_state._changed_keys(on, {"HOLD_SLACK_MARGIN": "25"}) == []
+    assert flow_state._changed_keys(off, on) == ["LEC_CHECK"]
+    both = dict(off, HOLD_SLACK_MARGIN="30")
+    assert flow_state._changed_keys(on, both) == ["HOLD_SLACK_MARGIN"]
 
 
 def test_dup_child_lib_triaged_not_oom():
