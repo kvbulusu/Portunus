@@ -74,6 +74,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import textwrap
@@ -126,7 +127,8 @@ from reporter import Reporter                                           # noqa: 
 from notification import NotificationManager                            # noqa: E402
 from timing_classifier import classify_routed_odb, render as tc_render   # noqa: E402
 from incremental_opt import (run_eco_pass, decide_timing, decide_drc,     # noqa: E402
-                             adopt_odb, discard_odb, ECOResult)
+                             adopt_odb, discard_odb, ECOResult,
+                             parse_eco, parse_eco_pre)
 try:
     from dashboard import Dashboard, DashboardState  # noqa: E402
     _HAS_DASHBOARD = True
@@ -1273,6 +1275,28 @@ class JANUSAutonomousAgent:
                     "FAST_LIB_FILES=$(BC_NLDM_LIB_FILES) "
                     "$(filter-out %_slow.lib,$(ADDITIONAL_LIBS))"]
 
+        # §147 FIX — KEPLER LEC DIES ON PER-CORNER CHILD LIBS. ORFS
+        # formal_check.tcl:write_lec_script hands kepler-formal the single-corner
+        # $LIB_FILES (= WC platform libs + the UNFILTERED ADDITIONAL_LIBS), so a
+        # hierarchical parent with LEC_CHECK=1 passes BOTH <child>_fast.lib and
+        # <child>_slow.lib. Kepler puts every lib cell into one SNL library keyed
+        # by cell name and aborts on the second definition. Proof — user_core run
+        # 20261016_202941, 4_1_cts.log tail:
+        #   Loading library file: .../user_core_cva6/base/user_core_cva6_fast.lib
+        #   Loading library file: .../user_core_cva6/base/user_core_cva6_slow.lib
+        #   [critical] [KeplerFormal.cpp:1047] Netlist loading failed: NLLibrary
+        #   user_core_cva6 contains already a SNLDesign named: user_core_cva6
+        #   ... Peak memory: 2436936KB   (2.4 GB -> NOT the §140 OOM)
+        # ORFS's own knob REMOVE_LIBS_FOR_LEC drops exact LIB_FILES entries from
+        # the kepler list only (STA/resizer/synth unaffected). We drop the
+        # _fast twins (LEC is functional; corner choice is irrelevant, and _slow
+        # matches the setup corner above). Command-line only, so flow_state sees
+        # no config.mk change -> --resume restarts at 4_cts, no re-synthesis.
+        # Applies to every parent consuming per-corner child abstracts
+        # (user_core, user_domain, janus_soc_top). JANUS_LEC_DEDUP_LIBS=0 opts out.
+        if os.environ.get("JANUS_LEC_DEDUP_LIBS", "1") != "0":
+            cmd.append("REMOVE_LIBS_FOR_LEC=$(filter %_fast.lib,$(ADDITIONAL_LIBS))")
+
         # ---- enable scan flops in the cell library (DFT) ---------------------
         # The ASAP7 platform FORBIDS the scan flops by default:
         #     platforms/asap7/config.mk:24  DONT_USE_CELLS  = *x1p*_ASAP7* *xp*_ASAP7*
@@ -1869,7 +1893,12 @@ class JANUSAutonomousAgent:
             env["SDC_FILE"] = sdc
         libs: List[str] = []
         if self.orfs:
-            for pat in ("flow/platforms/asap7/lib/*.lib",
+            # §149: ASAP7 std-cell libs live in lib/NLDM/ (box 6_report.log:
+            # read_liberty -corner slow .../asap7/lib/NLDM/...). The old
+            # lib/*.lib glob matched nothing -> std cells untimed in the ECO.
+            for pat in ("flow/platforms/asap7/lib/NLDM/*.lib",
+                        "flow/platforms/asap7/lib/NLDM/*.lib.gz",
+                        "flow/platforms/asap7/lib/*.lib",
                         "flow/platforms/asap7/lib/*.lib.gz"):
                 libs += sorted(glob.glob(os.path.join(self.orfs, pat)))
         # hardened child-block .lib abstracts + SRAM libs also matter for the top
@@ -1957,9 +1986,26 @@ class JANUSAutonomousAgent:
         orb = self._openroad_bin()
         env = self._orfs_lib_env(block)
         tmpdir = os.path.dirname(odb)
+        res_dir = self._results_dir(block)
+        orfs_ok = bool(self.flow_dir and res_dir
+                       and os.path.isfile(os.path.join(res_dir, "6_final.odb")))
 
-        # ---- Stage 1: timing ECO (only if there is a timing violation) ------
-        if has_setup_viol or has_hold_viol:
+        # ---- Stage 1 (§149, ORFS path): hold ECO, then optional setup ECO ----
+        if (has_setup_viol or has_hold_viol) and orfs_ok:
+            self._eco_log(block, f"post-route ECO start: setup WS {setup} ps, hold WS "
+                                 f"{hold} ps (6_finish RCX)")
+            if has_hold_viol:
+                setup, hold = self._eco_pass_orfs(block, "hold", setup, hold)
+            if setup is not None and setup < 0.0 and (hold is None or hold >= 0.0):
+                setup, hold = self._eco_pass_orfs(block, "setup", setup, hold)
+            elif setup is not None and setup < 0.0:
+                self._eco_log(block, f"setup ECO NOT attempted — hold still {hold} ps "
+                                     "(hold is closed first)")
+            timing_closed = (setup is not None and setup >= 0.0
+                             and hold is not None and hold >= 0.0)
+            drc = res.drc_violations
+        # ---- Stage 1 (legacy: no ORFS results dir): timing ECO ---------------
+        elif has_setup_viol or has_hold_viol:
             crit = "HOLD (functionally critical)" if has_hold_viol else "setup"
             self.ui.step(f"{block}: residual {crit} violation — running post-route "
                          f"timing ECO (hold repaired first)")
@@ -2005,6 +2051,208 @@ class JANUSAutonomousAgent:
             else:
                 discard_odb(eco.out_odb)
                 self.ui.warn(f"{block}: DRC ECO DISCARDED — {why}")
+
+    # ----- §149: post-route timing ECO through ORFS `make run` ---------------
+    # Why: the legacy ECO (openroad + read_liberty $LIB_FILES) globbed
+    # platforms/asap7/lib/*.lib, but ASAP7 libs are in lib/NLDM/, so std cells
+    # were untimed; it also ran on the FILLED 6_final.odb (no room for hold
+    # buffers) with no RCX. ara 20261011 log has no ECO verdict at all and
+    # 6_finish kept hold WS -4.55 ps / 9 violators. Through ORFS `make run` the
+    # Tcl gets the block's real corners/libs/SDC/RCX_RULES/FILL_CELLS.
+    _ECO_TIMEOUT_S = 14400        # ara 5_2_route took 12803 s from scratch
+    _ECO_HOLD_SETUP_TOL_PS = 5.0  # setup give-back allowed when a hold pass closes hold
+
+    def _eco_log(self, block: str, msg: str) -> None:
+        """Verdicts go to the block log too (ui.* may not reach it)."""
+        self.ui.step(f"{block}: {msg}")
+        try:
+            with open(self._block_log(block), "a", encoding="utf-8") as fh:
+                fh.write(f"[janus-eco] {datetime.now():%H:%M:%S} {msg}\n")
+        except OSError:
+            pass
+
+    def _eco_hold_margin(self, block: str) -> str:
+        """ECO hold over-fix (ps). Default 10: the ECO is measured on fresh RCX
+        after an INCREMENTAL reroute, so only new-net erosion remains (the
+        in-flow margin must absorb the full GRT->RCX shift, §149: ~24.5 ps).
+        Override per block with JANUS_ECO_HOLD_MARGIN_PS in config/local.mk."""
+        v = self._janus_knob(block, "JANUS_ECO_HOLD_MARGIN_PS")
+        try:
+            return f"{float(v):g}" if v else "10"
+        except ValueError:
+            return "10"
+
+    def _eco_outputs(self, res_dir: str, mode: str) -> Dict[str, str]:
+        tag = f"janus_eco_{mode}"
+        return {k: os.path.join(res_dir, f"{tag}.{k}") for k in ("odb", "spef", "def", "v")}
+
+    def _run_eco_orfs(self, block: str, mode: str) -> Tuple[ECOResult, Dict[str, str]]:
+        """One ECO pass (hold|setup) via ORFS `make run` on results/6_final.odb.
+        Writes janus_eco_<mode>.{odb,spef,def,v} beside it; never touches the
+        canonical files. Returns (parsed result, output paths)."""
+        r = ECOResult(mode=mode)
+        res_dir = self._results_dir(block)
+        if not (self.flow_dir and res_dir):
+            r.error = "no ORFS results dir"
+            return r, {}
+        outs = self._eco_outputs(res_dir, mode)
+        for p in outs.values():
+            if os.path.exists(p):
+                os.remove(p)                 # stale outputs of an earlier pass
+        rpt_dir = self._reports_dir(block) or res_dir
+        tag = f"janus_eco_{mode}"
+        tcl = os.path.join(_ROOT, "scripts", "post_route_opt.tcl")
+        targets = ["run", f"RUN_SCRIPT={tcl}", f"RUN_LOG_NAME_STEM={tag}",
+                   "JANUS_PR_IN_ODB=6_final.odb", "JANUS_PR_IN_SDC=6_final.sdc",
+                   f"JANUS_PR_MODE={mode}",
+                   f"JANUS_PR_HOLD_MARGIN={self._eco_hold_margin(block)}",
+                   f"JANUS_OUT_ODB={outs['odb']}", f"JANUS_OUT_SPEF={outs['spef']}",
+                   f"JANUS_OUT_DEF={outs['def']}", f"JANUS_OUT_V={outs['v']}",
+                   f"JANUS_PR_RPT={os.path.join(rpt_dir, tag + '.rpt')}",
+                   f"JANUS_PR_DRC_RPT={os.path.join(rpt_dir, tag + '_drc.rpt')}"]
+        spef = os.path.join(res_dir, "6_final.spef")
+        if os.path.isfile(spef):
+            targets.append(f"JANUS_SPEF={spef}")
+        cmd = self._post_build_make_cmd(block, targets)
+        if getattr(self.args, "dry_run", False):
+            self.ui.info(f"{block}: [dry-run] {tag}: {' '.join(cmd)}")
+            r.error = "dry-run"
+            return r, outs
+        keep: List[str] = []
+        try:
+            with open(self._block_log(block), "ab", buffering=0) as logf:
+                logf.write(f"\n===== {block} : {tag} {' '.join(cmd)} "
+                           f"@ {datetime.now()} =====\n".encode())
+                proc = subprocess.Popen(cmd, cwd=self.flow_dir, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, start_new_session=True)
+                killed: List[bool] = []
+
+                def _kill() -> None:
+                    killed.append(True)
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                timer = threading.Timer(self._ECO_TIMEOUT_S, _kill)
+                timer.start()
+                try:
+                    for line in proc.stdout:
+                        logf.write(line)
+                        if line.startswith(b"JANUS_PR"):
+                            keep.append(line.decode(errors="replace").rstrip())
+                    proc.wait()
+                finally:
+                    timer.cancel()
+                timed_out = bool(killed)
+        except Exception as e:                       # never flips DONE
+            r.error = f"could not run: {e}"
+            return r, outs
+        if timed_out:
+            r.error = f"timed out after {self._ECO_TIMEOUT_S}s"
+            return r, outs
+        out = "\n".join(keep) + "\n"
+        parsed = parse_eco(out, mode=mode, out_odb=outs["odb"])
+        parsed.pre_setup, parsed.pre_hold = parse_eco_pre(out)
+        if proc.returncode != 0 and parsed.ok:
+            # e.g. openroad SIGSEGV after printing slacks: never trust it
+            parsed.ok = False
+            parsed.error = f"make rc={proc.returncode}"
+        if not parsed.ok and not parsed.error:
+            parsed.error = f"make rc={proc.returncode}, no JANUS_PR slacks/write"
+        return parsed, outs
+
+    def _adopt_eco_orfs(self, block: str, outs: Dict[str, str]) -> bool:
+        """Swap janus_eco_* over 6_final.{odb,spef,def,v} (backups *.preeco) and
+        re-merge 6_final.gds from the new def (ORFS do-gds-merged), so abstract,
+        sign-off RCX/STA and the parent's GDS all see the ECO'd layout. Any
+        failure restores every backup (all-or-nothing)."""
+        res_dir = self._results_dir(block)
+        missing = [k for k, p in outs.items() if not os.path.isfile(p)]
+        if not res_dir or missing:
+            self._eco_log(block, f"ECO not adopted — missing outputs {missing}")
+            return False
+        pairs = [(outs[k], os.path.join(res_dir, f"6_final.{k}"))
+                 for k in ("odb", "spef", "def", "v")]
+        gds = next((os.path.join(res_dir, f"6_final.{e}") for e in ("gds", "oas")
+                    if os.path.isfile(os.path.join(res_dir, f"6_final.{e}"))), None)
+        backups = [c for _n, c in pairs if os.path.isfile(c)] + ([gds] if gds else [])
+
+        def _restore() -> None:
+            for c in backups:
+                if os.path.isfile(c + ".preeco"):
+                    shutil.copy2(c + ".preeco", c)
+        try:
+            for c in backups:
+                shutil.copy2(c, c + ".preeco")
+            for new, canon in pairs:
+                shutil.move(new, canon)
+            if gds:
+                merged = os.path.join(res_dir, "6_1_merged" + os.path.splitext(gds)[1])
+                if os.path.isfile(merged):
+                    os.remove(merged)
+                cmd = self._post_build_make_cmd(block, ["do-gds-merged"])
+                with open(self._block_log(block), "ab", buffering=0) as logf:
+                    logf.write(f"\n===== {block} : eco gds {' '.join(cmd)} =====\n".encode())
+                    rc = subprocess.run(cmd, cwd=self.flow_dir, stdout=logf,
+                                        stderr=subprocess.STDOUT, timeout=7200).returncode
+                if rc != 0 or not os.path.isfile(merged):
+                    raise RuntimeError(f"do-gds-merged rc={rc}")
+                shutil.copy2(merged, gds)
+            return True
+        except Exception as e:
+            _restore()
+            self._eco_log(block, f"ECO adopt failed ({e}) — restored pre-ECO 6_final.*")
+            return False
+
+    def _eco_pass_orfs(self, block: str, mode: str, setup: Optional[float],
+                       hold: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
+        """Run + judge one pass. Before = JANUS_PR_PRE (same session, same
+        6_final.spef) when present, else the 6_finish numbers. Returns the
+        (setup, hold) in force afterwards."""
+        res = self.results[block]
+        self._eco_log(block, f"{mode} ECO via ORFS make run (hold margin "
+                             f"{self._eco_hold_margin(block)} ps, incremental reroute + RCX)")
+        eco, outs = self._run_eco_orfs(block, mode)
+        b_setup = eco.pre_setup if eco.pre_setup is not None else setup
+        b_hold = eco.pre_hold if eco.pre_hold is not None else hold
+        verdict, why = decide_timing(before_setup=b_setup, before_hold=b_hold, after=eco)
+        # Hold is the must-fix (user rule): a hold pass that CLOSES hold is kept
+        # even if RCX moves setup down by <= _ECO_HOLD_SETUP_TOL_PS (repair_timing
+        # -hold already refuses buffers that would break setup on their path;
+        # the residual is re-extraction shift on neighbouring nets).
+        if (verdict == "discard" and mode == "hold" and eco.ok
+                and b_hold is not None and b_hold < 0.0
+                and eco.hold_wns is not None and eco.hold_wns >= 0.0
+                and b_setup is not None and eco.setup_wns is not None
+                and b_setup - eco.setup_wns <= self._ECO_HOLD_SETUP_TOL_PS):
+            verdict, why = "adopt", (f"hold CLOSED {b_hold:+.3f}->{eco.hold_wns:+.3f} ps; "
+                                     f"setup {b_setup:+.3f}->{eco.setup_wns:+.3f} ps "
+                                     f"(within {self._ECO_HOLD_SETUP_TOL_PS:g} ps tolerance)")
+        # a setup pass must never open hold that was closed (noise band incl.)
+        if (verdict == "adopt" and mode == "setup" and b_hold is not None
+                and b_hold >= 0.0 and (eco.hold_wns is None or eco.hold_wns < 0.0)):
+            verdict, why = "discard", f"setup ECO opened hold ({eco.hold_wns} ps)"
+        # the incremental reroute must not leave new routing DRCs behind
+        b_drc = res.drc_violations or 0
+        if verdict == "adopt" and eco.drc is None:
+            verdict, why = "discard", "ECO reroute DRC count unknown (no JANUS_PR drc)"
+        if verdict == "adopt" and eco.drc is not None and eco.drc > b_drc:
+            verdict, why = "discard", f"ECO reroute left {eco.drc} DRC(s) (before {b_drc})"
+        if verdict == "adopt" and self._adopt_eco_orfs(block, outs):
+            res.wns_ns, res.hold_ps = eco.setup_wns, eco.hold_wns
+            if eco.setup_tns is not None:
+                res.tns_ns = eco.setup_tns
+            res.note += f"  +eco({mode}) RCX WS {eco.setup_wns}/{eco.hold_wns}"
+            self._eco_log(block, f"{mode} ECO ADOPTED — {why} (drc {eco.drc}); "
+                                 "6_final.{odb,spef,def,v,gds} replaced, *.preeco kept")
+            self.ui.good(f"{block}: post-route {mode} ECO ADOPTED — {why}")
+            return eco.setup_wns, eco.hold_wns
+        for p in outs.values():
+            discard_odb(p)
+        if verdict == "adopt":
+            return setup, hold                     # adopt failed; already logged
+        self._eco_log(block, f"{mode} ECO DISCARDED — {why}")
+        return setup, hold
 
     # ----- ORFS logs directory for a block -----------------------------------
     def _logs_dir(self, block: str) -> Optional[str]:
@@ -4629,12 +4877,38 @@ class JANUSAutonomousAgent:
         else:
             self.ui.debug("kepler-formal lib dir(s) already on LD_LIBRARY_PATH")
 
+    def _check_lec_dedup_support(self) -> None:
+        """§147: confirm this ORFS checkout honours REMOVE_LIBS_FOR_LEC.
+
+        Older formal_check.tcl versions ignore the variable, in which case the
+        duplicate-child-lib Kepler abort comes back. Warn loudly (do not fail):
+        the fallback is LEC_CHECK=0 for that parent block.
+        """
+        if not self.flow_dir or os.environ.get("JANUS_LEC_DEDUP_LIBS", "1") == "0":
+            return
+        fc = os.path.join(self.flow_dir, "scripts", "formal_check.tcl")
+        try:
+            with open(fc, "r", errors="replace") as fh:
+                ok = "REMOVE_LIBS_FOR_LEC" in fh.read()
+        except OSError:
+            return  # no formal_check.tcl -> this ORFS has no Kepler LEC at all
+        if ok:
+            self.ui.debug("ORFS formal_check.tcl supports REMOVE_LIBS_FOR_LEC (§147)")
+        else:
+            self.ui.warn(
+                f"{fc} does not reference REMOVE_LIBS_FOR_LEC: this ORFS will pass "
+                "BOTH <child>_fast.lib and <child>_slow.lib to kepler-formal and "
+                "LEC_CHECK=1 parents (user_core/user_domain/janus_soc_top) will "
+                "abort in 4_1_cts with 'contains already a SNLDesign named'. "
+                "Update ORFS or set LEC_CHECK=0 for those blocks.")
+
     # ----- preflight checks --------------------------------------------------
     def _preflight(self) -> None:
         problems = []
         # Fix the kepler-formal shared-lib path up front so the optional
         # equiv-check loads (or is cleanly skipped) instead of crashing CTS.
         self._ensure_kepler_libpath()
+        self._check_lec_dedup_support()
         if not self.orfs:
             problems.append("ORFS_DIR not set (source ~/janus_asic/janus_asic_env.sh or pass --orfs)")
         elif not os.path.isdir(self.flow_dir):

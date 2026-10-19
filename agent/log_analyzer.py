@@ -161,6 +161,17 @@ _TRIAGE_RULES = [
      "yields to an inherited env/_local.mk value; user_core_ara since §144), re-run "
      "scripts/03_setup_janus_configs.sh <block>, then --resume (continues at "
      "4_cts, no re-synthesis). Not an RTL/config bug."),
+    # §147: kepler-formal given two liberty files defining the same cell (the
+    # per-corner <child>_fast.lib + <child>_slow.lib of a hardened macro).
+    # Seen on user_core run 20261016_202941 (peak mem 2.4 GB, so not OOM).
+    (re.compile(r"contains already a SNLDesign named"), "env-lec-dup-lib",
+     "kepler-formal (LEC_CHECK=1) aborted while loading liberty: two .lib files "
+     "define the same cell — almost always a hardened child's per-corner "
+     "<child>_fast.lib AND <child>_slow.lib, both in ORFS $LIB_FILES. Not OOM, "
+     "not an RTL bug. The agent passes REMOVE_LIBS_FOR_LEC=<the _fast twins> on "
+     "the make command line (§147); if you still see this, your ORFS "
+     "formal_check.tcl predates REMOVE_LIBS_FOR_LEC (preflight warns) — update "
+     "ORFS or set LEC_CHECK=0 for this block. --resume restarts at 4_cts."),
     # --- missing shared libraries (OpenROAD / OR-Tools runtime) -------------
     (re.compile(r"libortools\S*\.so", re.I), "env-openroad-ortools",
      "OpenROAD binary cannot load OR-Tools (libortools.so.*). The OpenROAD "
