@@ -60,6 +60,17 @@ class ECOResult:
     wrote: bool = False
     error: str = ""
     raw: str = ""
+    pre_setup: Optional[float] = None      # §149 JANUS_PR_PRE (same session, before)
+    pre_hold: Optional[float] = None
+
+
+_RE_PRE = re.compile(r"^JANUS_PR_PRE\s+(setup|hold)\s+wns\s+(-?\d+(?:\.\d+)?)", re.M)
+
+
+def parse_eco_pre(out: str) -> Tuple[Optional[float], Optional[float]]:
+    """(setup_wns, hold_wns) the ECO Tcl measured BEFORE repairing (§149)."""
+    d = {k: float(v) for k, v in _RE_PRE.findall(out)}
+    return d.get("setup"), d.get("hold")
 
 
 _RE_PR = re.compile(r"^JANUS_PR\s+(setup|hold)\s+(wns|tns)\s+(-?\d+(?:\.\d+)?)", re.M)
