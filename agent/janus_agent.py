@@ -2204,6 +2204,49 @@ class JANUSAutonomousAgent:
             self._eco_log(block, f"ECO adopt failed ({e}) — restored pre-ECO 6_final.*")
             return False
 
+    # §150: an adopted ECO replaces 6_final.* but NOT 6_finish.rpt, so every
+    # 6_finish-based reader (adaptive base pass, resumed-QoR table) saw the
+    # pre-ECO slack. ara 20261018_213427: ECO took setup -61.315 -> -10.837 ps,
+    # adaptive compared its pass (-51.43, no ECO) against the stale -61.32 and
+    # promoted it. The adopted numbers are persisted beside 6_finish.rpt.
+    _ECO_ADOPTED_JSON = "janus_eco_adopted.json"
+
+    def _eco_record_adopted(self, block: str, mode: str, eco: ECOResult) -> None:
+        rep = self._reports_dir(block)
+        if not rep:
+            return
+        body = {"block": block, "mode": mode, "setup_ws": eco.setup_wns,
+                "setup_tns": eco.setup_tns, "hold_ws": eco.hold_wns,
+                "hold_tns": eco.hold_tns, "drc": eco.drc,
+                "source": f"post-route ECO RCX (janus_eco_{mode})",
+                "at": datetime.now().isoformat(timespec="seconds")}
+        try:
+            with open(os.path.join(rep, self._ECO_ADOPTED_JSON), "w") as fh:
+                json.dump(body, fh, indent=2)
+        except OSError as e:
+            self.ui.debug(f"{block}: {self._ECO_ADOPTED_JSON} write failed: {e}")
+
+    def _eco_adopted_timing(self, block: str) -> Optional[dict]:
+        """Timing of the ECO'd 6_final.* in force, or None (no ECO adopted, or
+        6_finish.rpt is NEWER, i.e. the block was re-finished since)."""
+        rep = self._reports_dir(block)
+        if not rep:
+            return None
+        p = os.path.join(rep, self._ECO_ADOPTED_JSON)
+        fin = os.path.join(rep, "6_finish.rpt")
+        if not os.path.isfile(p):
+            return None
+        if os.path.isfile(fin) and os.path.getmtime(fin) > os.path.getmtime(p):
+            return None
+        try:
+            with open(p) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        if d.get("setup_ws") is None and d.get("hold_ws") is None:
+            return None
+        return d
+
     def _eco_pass_orfs(self, block: str, mode: str, setup: Optional[float],
                        hold: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
         """Run + judge one pass. Before = JANUS_PR_PRE (same session, same
@@ -2242,6 +2285,7 @@ class JANUSAutonomousAgent:
             res.wns_ns, res.hold_ps = eco.setup_wns, eco.hold_wns
             if eco.setup_tns is not None:
                 res.tns_ns = eco.setup_tns
+            self._eco_record_adopted(block, mode, eco)
             res.note += f"  +eco({mode}) RCX WS {eco.setup_wns}/{eco.hold_wns}"
             self._eco_log(block, f"{mode} ECO ADOPTED — {why} (drc {eco.drc}); "
                                  "6_final.{odb,spef,def,v,gds} replaced, *.preeco kept")
@@ -4341,10 +4385,17 @@ class JANUSAutonomousAgent:
             qor = rb.build_qor(block, res.status, self._logs_dir(block), reports,
                                self._results_dir(block))
             fq = ac.from_qor(qor)
+            eco = self._eco_adopted_timing(block)   # §150: base = what ships
+            if eco:
+                for k_fq, k_eco in (("wns_ps", "setup_ws"), ("hold_wns_ps", "hold_ws"),
+                                    ("tns_ps", "setup_tns")):
+                    if eco.get(k_eco) is not None:
+                        fq[k_fq] = float(eco[k_eco])
             th = self._adaptive_thresholds()
             rec = ac.plan(block, ac.classify(fq, th), mode, 0, th)
             rec["input"] = fq
             rec["passes"] = [ac.pass_summary(self._leaf(), fq)]
+            rec["passes"][0]["timing_source"] = eco["source"] if eco else "6_finish.rpt"
             rec["_reports_dir"] = reports
             self._adaptive_write(block, rec)
             conf = rec.get("confidence")
@@ -4727,7 +4778,20 @@ class JANUSAutonomousAgent:
                           fh, indent=2, default=str)
         except OSError:
             pass
+        # §150: the promoted leaf is a fresh 6_final with no post-route ECO
+        # (the old base's ECO lives in the superseded leaf). Give it the same
+        # post-route steps a normal DONE block gets — ECO, abstract, signoff —
+        # so the shipped layout, abstract and signoff SPEF all match.
+        try:
+            self._post_route_opt(block)
+        except Exception as e:
+            self.ui.warn(f"{block}: post-promotion ECO error (promoted leaf kept as-is): {e}")
         self._run_abstract(block)
+        try:
+            self._run_signoff(block)
+        except Exception as e:
+            self.ui.warn(f"{block}: post-promotion signoff error (ignored): {e}")
+        self._archive_golden(block, res)   # golden = promoted leaf (never raises)
         return True
 
     # ----- §145 run-wide status table (every email) -------------------------
@@ -4793,6 +4857,15 @@ class JANUSAutonomousAgent:
                 counts = auth.get("counts") or {}
                 res.max_slew_violations = counts.get("max_slew")
                 res.max_cap_violations = counts.get("max_cap")
+            eco = self._eco_adopted_timing(block)   # §150
+            if eco:
+                if eco.get("setup_ws") is not None:
+                    res.wns_ns = eco["setup_ws"]
+                if eco.get("hold_ws") is not None:
+                    res.hold_ps = eco["hold_ws"]
+                if eco.get("setup_tns") is not None:
+                    res.tns_ns = eco["setup_tns"]
+                res.timing_source = eco.get("source")
             rep = self._reports_dir(block)
             if rep:
                 from report_bundle import parse_route_drc

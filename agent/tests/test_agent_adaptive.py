@@ -158,8 +158,11 @@ def _promo_agent(tmp_path):
     a._results_dir = lambda b: base
     a._leaf = lambda: "base"
     a._authoritative_timing_from_rpt = lambda b: None
-    a.abstracts = []
+    a.abstracts, a.ecos, a.signoffs, a.goldens = [], [], [], []
     a._run_abstract = lambda b: a.abstracts.append(b)
+    a._post_route_opt = lambda b: a.ecos.append(b)
+    a._run_signoff = lambda b: a.signoffs.append(b)
+    a._archive_golden = lambda b, r=None: a.goldens.append(b)
     return a, base
 
 
@@ -186,6 +189,8 @@ def test_promote_swaps_leaf_keeps_superseded(tmp_path):
     assert (rep / "synth_stat.txt").exists() and (rep / "adaptive_promoted.json").exists()
     assert res.wns_ns == 4.0 and res.drc_violations == 0 and res.max_slew_violations == 2
     assert "adaptive PROMOTED" in res.note and a.abstracts == ["b"]
+    # §150: promoted leaf gets ECO -> abstract -> signoff -> golden
+    assert a.ecos == ["b"] and a.signoffs == ["b"] and a.goldens == ["b"]
 
 
 def test_promote_rollback_on_rename_failure(tmp_path, monkeypatch):
@@ -207,7 +212,7 @@ def test_promote_rollback_on_rename_failure(tmp_path, monkeypatch):
         names = sorted(os.listdir(tmp_path / "flow" / sub / "asap7" / "b"))
         assert names == ["adapt1_clock_skew_limited", "base"], (sub, names)
     assert open(tmp_path / "flow" / "results" / "asap7" / "b" / "base" / "6_final.odb").read() == "6_final.odb"
-    assert "FAILED" in res.note and not a.abstracts
+    assert "FAILED" in res.note and not a.abstracts and not a.ecos and not a.signoffs
 
 
 def test_promote_rejects_non_adaptive_name(tmp_path):
@@ -273,3 +278,88 @@ def test_resumed_block_qor_loaded(tmp_path):
     a._load_resumed_qor("cva6")
     r = a.results["cva6"]
     assert (r.wns_ns, r.hold_ps, r.drc_violations, r.max_slew_violations) == (45.69, 8.9, 2, 0)
+
+
+# ----- §150: adopted post-route ECO timing is what ships ---------------------
+def _eco(sw=-10.837, st=None, hw=11.176, ht=0.0, drc=0):
+    return types.SimpleNamespace(setup_wns=sw, setup_tns=st, hold_wns=hw, hold_tns=ht,
+                                 drc=drc)
+
+
+def _age(path, secs):
+    t = os.path.getmtime(path) - secs
+    os.utime(path, (t, t))
+
+
+def test_eco_adopted_roundtrip_and_stale(tmp_path):
+    a = _agent(tmp_path)
+    rep = tmp_path / "rep"
+    rep.mkdir()
+    a._reports_dir = lambda b: str(rep)
+    assert a._eco_adopted_timing("b") is None                     # no ECO
+    (rep / "6_finish.rpt").write_text("x")
+    _age(rep / "6_finish.rpt", 100)
+    a._eco_record_adopted("b", "setup", _eco())
+    d = a._eco_adopted_timing("b")
+    assert d["setup_ws"] == -10.837 and d["hold_ws"] == 11.176 and d["mode"] == "setup"
+    assert "janus_eco_setup" in d["source"]
+    os.utime(rep / "6_finish.rpt", None)                          # re-finished later
+    _age(rep / a._ECO_ADOPTED_JSON, 100)
+    assert a._eco_adopted_timing("b") is None
+    (rep / a._ECO_ADOPTED_JSON).write_text("{bad")
+    os.utime(rep / a._ECO_ADOPTED_JSON, None)
+    _age(rep / "6_finish.rpt", 200)
+    assert a._eco_adopted_timing("b") is None                     # unparseable
+    a._eco_record_adopted("b", "hold", _eco(sw=None, hw=None))
+    assert a._eco_adopted_timing("b") is None                     # no numbers
+
+
+def test_eco_pass_records_adopted_json():
+    import inspect
+    src = inspect.getsource(ja.JANUSAutonomousAgent._eco_pass_orfs)
+    assert "_eco_record_adopted(" in src
+
+
+def test_advise_base_uses_eco_timing_blocks_bad_promotion(tmp_path):
+    """ara 20261018_213427: 6_finish -61.32, ECO adopted -10.837; the
+    adapt1_drv_limited pass (-51.43, no ECO) must NOT be promoted."""
+    import json
+    import shutil
+    a = _agent(tmp_path)
+    rep = tmp_path / "rep"
+    shutil.copytree(os.path.join(FIX, "ara_finish_run"), rep)
+    a._reports_dir = lambda b: str(rep)
+    a._logs_dir = lambda b: None
+    a._results_dir = lambda b: None
+    a._leaf = lambda: "base"
+    if (rep / "6_finish.rpt").exists():
+        _age(rep / "6_finish.rpt", 100)
+    a._eco_record_adopted("user_core_ara", "setup", _eco(st=-20.5))
+    rec = a._adaptive_advise("user_core_ara", types.SimpleNamespace(status="DONE", note=""))
+    base = rec["passes"][0]
+    assert base["wns_ps"] == -10.837 and base["tns_ps"] == -20.5
+    assert "janus_eco_setup" in base["timing_source"]
+    assert json.load(open(rep / "adaptive.json"))["passes"][0]["wns_ps"] == -10.837
+    cand = {"name": "adapt1_drv_limited", "wns_ps": -51.43, "hold_wns_ps": 10.83,
+            "tns_ps": -187.56, "drc": 0, "slew_viol": 1435}
+    best, why = ac.pick_promotion([base, cand])
+    assert best is None and "wns_ps" in why
+
+
+def test_resumed_qor_prefers_eco_timing(tmp_path):
+    a = _agent(tmp_path)
+    rep = tmp_path / "rep"
+    rep.mkdir()
+    (rep / "6_finish.rpt").write_text("x")
+    _age(rep / "6_finish.rpt", 100)
+    a._reports_dir = lambda b: str(rep)
+    a._authoritative_timing_from_rpt = lambda b: {"setup_ws": -61.32, "hold_ws": 10.41,
+                                                   "setup_tns": -158.62, "counts": {}}
+    a._eco_record_adopted("ara", "setup", _eco())
+    a.results = {"ara": types.SimpleNamespace(note="resumed", wns_ns=None, hold_ps=None,
+                                              tns_ns=None, drc_violations=None,
+                                              max_slew_violations=None, timing_source=None)}
+    a._load_resumed_qor("ara")
+    r = a.results["ara"]
+    assert (r.wns_ns, r.hold_ps, r.tns_ns) == (-10.837, 11.176, -158.62)
+    assert "janus_eco_setup" in r.timing_source
