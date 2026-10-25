@@ -3661,7 +3661,14 @@ class JANUSAutonomousAgent:
         FLOW_VARIANT leaves. We remove the whole per-block dir under each kind
         (results/reports/logs/objects) — the decisive equivalent of
         `make clean_<block>` — so no stale .odb can make ORFS make short-circuit
-        and no stale report can be mis-read as a fresh pass."""
+        and no stale report can be mis-read as a fresh pass.
+
+        §153: EXACT names only. FLOW_VARIANT leaves live INSIDE <block>/
+        (results/asap7/<block>/<leaf>), so removing <block> already covers
+        them. The old `*{block}*` glob also matched SIBLING blocks —
+        `--force-blocks user_core` wiped user_core_cva6/ user_core_ara/
+        user_core_ara_lane (their .lib/.lef abstracts), and user_core synth
+        then failed with "unknown module 'user_core_cva6'"."""
         if not self.flow_dir:
             return []
         out: List[str] = []
@@ -3673,7 +3680,6 @@ class JANUSAutonomousAgent:
                 os.path.join(base, f"janus_{block}"),
                 os.path.join(base, "janus", block),
             ]
-            cands += glob.glob(os.path.join(base, f"*{block}*"))
             for d in cands:
                 if d not in seen:
                     seen.add(d)
