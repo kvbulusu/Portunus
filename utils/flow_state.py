@@ -84,6 +84,9 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     "PLACE_DENSITY_LB_ADDON": "3_place",
     "GPL_ROUTABILITY_DRIVEN": "3_place",
     "GPL_TIMING_DRIVEN": "3_place",
+    # §156 pin placement (3_2_place_iop) and its PRE hook
+    "PLACE_PINS_ARGS": "3_place",
+    "PRE_IO_PLACEMENT_TCL": "3_place",
     # §73: first stage whose repair_timing actually fixes hold. Verified in the
     # agent_domain 20261007_202416 log: floorplan passes -hold_margin but runs
     # `-setup` only; the 3_4 resize call is issued without -hold_margin; the
@@ -124,6 +127,8 @@ _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("GRT_", "5_route"),
     ("DRT_", "5_route"),
     ("JANUS_MACRO_DETOUR", "5_route"),   # §107 detour hook knobs (read in GRT)
+    ("JANUS_IO_SHADOW", "3_place"),      # §156 IO macro-shadow hook knobs
+    ("JANUS_IO_MACRO_SHADOW", "3_place"),
 ]
 
 
