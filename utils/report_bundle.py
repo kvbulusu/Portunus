@@ -645,6 +645,30 @@ def parse_debug_groups(reports_dir: Optional[str]) -> Tuple[Dict[str, dict], Opt
     return {}, None
 
 
+ECO_ADOPTED_JSON = "janus_eco_adopted.json"   # written by janus_agent._eco_record_adopted
+
+
+def read_eco_adopted(reports_dir: Optional[str]) -> Optional[Dict]:
+    """Adopted-ECO timing beside 6_finish.rpt, or None if absent/unreadable or
+    6_finish.rpt is newer (block re-finished since the ECO)."""
+    if not reports_dir:
+        return None
+    p = os.path.join(reports_dir, ECO_ADOPTED_JSON)
+    fin = os.path.join(reports_dir, "6_finish.rpt")
+    if not os.path.isfile(p):
+        return None
+    if os.path.isfile(fin) and os.path.getmtime(fin) > os.path.getmtime(p):
+        return None
+    try:
+        with open(p) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if d.get("setup_ws") is None and d.get("hold_ws") is None:
+        return None
+    return d
+
+
 def build_qor(block: str, status: str, logs_dir: Optional[str],
               reports_dir: Optional[str], results_dir: Optional[str],
               agent_log: Optional[str] = None, manifest_stage: str = "",
@@ -688,6 +712,30 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
         "wns_note": "ORFS 'wns max' is clamped to 0 when met; setup_worst_slack "
                     "('worst slack max') is the true worst setup slack.",
     }
+    # §154: an adopted post-route ECO replaces 6_final.* but NOT 6_finish.rpt
+    # (§150). Without this the email header showed pre-ECO slack (ara
+    # 20261024: header -61.32 while the ECO'd 6_final in force is -10.84).
+    eco = read_eco_adopted(reports_dir)
+    if eco:
+        timing["pre_eco"] = {"setup_worst_slack": timing["setup_worst_slack"],
+                             "setup_tns": timing["setup_tns"],
+                             "hold_worst_slack": timing["hold_worst_slack"],
+                             "violators": dict(timing["violators"])}
+        sw, hw = eco.get("setup_ws"), eco.get("hold_ws")
+        if sw is not None:
+            timing["setup_worst_slack"] = sw
+            timing["setup_wns"] = min(sw, 0.0)
+            timing["setup_tns"] = eco.get("setup_tns")
+            timing["violators"]["setup"] = None if sw < 0 else 0
+        if hw is not None:
+            timing["hold_worst_slack"] = hw
+            timing["violators"]["hold"] = None if hw < 0 else 0
+        timing["source"] = "post-route ECO RCX"
+        timing["source_file"] = ECO_ADOPTED_JSON
+        timing["eco"] = eco
+        timing["verdict"] = (_la.timing_verdict(timing["setup_worst_slack"],
+                                                timing["hold_worst_slack"])
+                             if _la else None)
     dbg, dbg_src = parse_debug_groups(reports_dir)
     if dbg:
         timing["class_split"] = dbg
@@ -815,6 +863,13 @@ def render_email_body(q: Dict[str, object]) -> str:
              f"TNS {_f(t.get('setup_tns'))}  violators {_f(v.get('setup'), '{}')}")
     L.append(f"  Hold       : worst slack {_f(t.get('hold_worst_slack'))}  violators {_f(v.get('hold'), '{}')}")
     L.append(f"  Verdict    : {t.get('verdict') or 'UNKNOWN'}")
+    pe = t.get("pre_eco")
+    if pe:
+        pv = pe.get("violators") or {}
+        L.append(f"  Pre-ECO    : 6_finish.rpt setup WS {_f(pe.get('setup_worst_slack'))}  "
+                 f"TNS {_f(pe.get('setup_tns'))}  viol {_f(pv.get('setup'), '{}')}  "
+                 f"hold WS {_f(pe.get('hold_worst_slack'))}  "
+                 f"(path groups / fmax / DRV below are pre-ECO)")
     g = t.get("groups") or {}
     cs = t.get("class_split") or {}
     L.append("  Path group     setup WS     hold WS   setup viol   setup TNS")

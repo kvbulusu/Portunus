@@ -79,3 +79,37 @@ def test_no_flow_dir(tmp_path):
     a = _agent(tmp_path, [])
     a.flow_dir = None
     assert a._orfs_state_dirs("user_core") == []
+
+
+# §154: report/result/log dir lookup must not fall back to a sibling block.
+def test_dir_lookup_never_picks_sibling(tmp_path):
+    flow = tmp_path / "flow"
+    for kind, f in (("reports", "6_finish.rpt"), ("results", "6_final.odb"),
+                    ("logs", "1_2_yosys.log")):
+        d = flow / kind / "asap7" / "user_core_ara" / "base"
+        d.mkdir(parents=True)
+        (d / f).write_text("x")
+    a = _agent(tmp_path, [])
+    a.args = types.SimpleNamespace(reports_dir=None, variant=None)
+    a._leaf = types.MethodType(lambda self: "base", a)
+    assert a._reports_dir("user_core") is None
+    assert a._results_dir("user_core") is None
+    assert a._logs_dir("user_core") is None
+    assert a._reports_dir("user_core_ara").endswith("user_core_ara/base")
+    # own dir still found once it exists
+    own = flow / "reports" / "asap7" / "user_core" / "base"
+    own.mkdir(parents=True)
+    (own / "1_synth.rpt").write_text("x")
+    assert a._reports_dir("user_core") == str(own)
+
+
+def test_mcp_dir_lookup_never_picks_sibling(tmp_path):
+    import mcp_server as ms
+    d = tmp_path / "reports" / "asap7" / "user_core_ara" / "base"
+    d.mkdir(parents=True)
+    (d / "6_finish.rpt").write_text("x")
+    r = tmp_path / "results" / "asap7" / "user_core_ara" / "base"
+    r.mkdir(parents=True)
+    (r / "6_final.odb").write_text("x")
+    assert ms._reports_dir_for(str(tmp_path), "user_core") is None
+    assert ms._results_dir_for(str(tmp_path), "user_core") is None
