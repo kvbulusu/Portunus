@@ -1073,8 +1073,9 @@ class JANUSAutonomousAgent:
             os.path.join(self.flow_dir, "reports", "asap7", block, self._leaf()),
             os.path.join(self.flow_dir, "reports", "asap7", f"janus_{block}", self._leaf()),
         ]
-        # last resort: glob for any reports dir whose name contains the block
-        cands += glob.glob(os.path.join(self.flow_dir, "reports", "*", f"*{block}*", self._leaf()))
+        # §154: no `*{block}*` glob — it matched sibling blocks (user_core ->
+        # user_core_ara), so a failed user_core reported Ara's 6_finish QoR.
+        cands.append(os.path.join(self.flow_dir, "reports", "asap7", "janus", block, self._leaf()))
         for d in cands:
             if os.path.isdir(d) and glob.glob(os.path.join(d, "*_*.rpt")):
                 return d
@@ -1131,8 +1132,7 @@ class JANUSAutonomousAgent:
             os.path.join(self.flow_dir, "results", "asap7", f"janus_{block}", self._leaf()),
             os.path.join(self.flow_dir, "results", "asap7", "janus", block, self._leaf()),
         ]
-        cands += glob.glob(os.path.join(self.flow_dir, "results", "*",
-                                        f"*{block}*", self._leaf()))
+        # §154: exact names only (no sibling-block glob).
         for d in cands:
             if os.path.isdir(d) and glob.glob(os.path.join(d, "*.odb")):
                 return d
@@ -2312,8 +2312,8 @@ class JANUSAutonomousAgent:
             os.path.join(self.flow_dir, "logs", "asap7", block, self._leaf()),
             os.path.join(self.flow_dir, "logs", "asap7", f"janus_{block}", self._leaf()),
         ]
-        cands += glob.glob(os.path.join(self.flow_dir, "logs", "*",
-                                        f"*{block}*", self._leaf()))
+        # §154: exact names only (no sibling-block glob).
+        cands.append(os.path.join(self.flow_dir, "logs", "asap7", "janus", block, self._leaf()))
         for d in cands:
             if os.path.isdir(d) and glob.glob(os.path.join(d, "*.log")):
                 return d

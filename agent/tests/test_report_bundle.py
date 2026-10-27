@@ -289,3 +289,38 @@ def test_notify_mock_email(tmp_path, capsys, monkeypatch):
     assert not any("ampo" in x for x in _names(os.path.join(rd, "bundles", "noc", tars[0])))
     with capsys.disabled():
         print("\n----- MOCK EMAIL -----\nSubject: " + n.last_subject + "\n\n" + n.last_body)
+
+
+def _eco_copy(tmp_path):
+    import shutil
+    d = tmp_path / "rep"
+    shutil.copytree(ARA, d)
+    return d
+
+
+def test_eco_adopted_overrides_header(tmp_path):
+    """§154: adopted post-route ECO numbers win over the stale 6_finish.rpt."""
+    d = _eco_copy(tmp_path)
+    p = d / rb.ECO_ADOPTED_JSON
+    p.write_text(json.dumps({"setup_ws": -10.837, "setup_tns": -20.1,
+                             "hold_ws": 11.176, "hold_tns": 0.0, "drc": 0}))
+    os.utime(d / "6_finish.rpt", (1, 1))          # 6_finish older than ECO
+    q = rb.build_qor("user_core_ara", "DONE", None, str(d), None)
+    t = q["timing"]
+    assert t["setup_worst_slack"] == -10.837 and t["setup_wns"] == -10.837
+    assert t["setup_tns"] == -20.1 and t["hold_worst_slack"] == 11.176
+    assert t["source"] == "post-route ECO RCX"
+    assert t["pre_eco"]["setup_worst_slack"] == -1948.44
+    assert t["violators"] == {"setup": None, "hold": 0}
+    body = rb.render_email_body(q)
+    assert "-10.84" in body and "Pre-ECO" in body and "-1948.44" in body
+
+
+def test_eco_ignored_when_finish_newer(tmp_path):
+    d = _eco_copy(tmp_path)
+    p = d / rb.ECO_ADOPTED_JSON
+    p.write_text(json.dumps({"setup_ws": -10.837, "hold_ws": 11.176}))
+    os.utime(p, (1, 1))                            # re-finished after ECO
+    q = rb.build_qor("user_core_ara", "DONE", None, str(d), None)
+    assert q["timing"]["setup_worst_slack"] == -1948.44
+    assert "pre_eco" not in q["timing"]

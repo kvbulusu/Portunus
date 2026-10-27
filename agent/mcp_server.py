@@ -79,7 +79,7 @@ def _reports_dir_for(flow_dir: str, block: str) -> Optional[str]:
         os.path.join(flow_dir, "reports", "asap7", block, "base"),
         os.path.join(flow_dir, "reports", "asap7", f"janus_{block}", "base"),
     ]
-    cands += _glob.glob(os.path.join(flow_dir, "reports", "*", f"*{block}*", "base"))
+    cands.append(os.path.join(flow_dir, "reports", "asap7", "janus", block, "base"))  # §154
     for d in cands:
         if os.path.isdir(d) and _glob.glob(os.path.join(d, "*_*.rpt")):
             return d
@@ -92,7 +92,7 @@ def _results_dir_for(flow_dir: str, block: str) -> Optional[str]:
         os.path.join(flow_dir, "results", "asap7", f"janus_{block}", "base"),
         os.path.join(flow_dir, "results", "asap7", "janus", block, "base"),
     ]
-    cands += _glob.glob(os.path.join(flow_dir, "results", "*", f"*{block}*", "base"))
+    # §154: exact names only (no sibling-block glob)
     for d in cands:
         if os.path.isdir(d) and _glob.glob(os.path.join(d, "*.odb")):
             return d
