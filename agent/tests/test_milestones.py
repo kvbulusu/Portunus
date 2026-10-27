@@ -95,3 +95,32 @@ def test_enable_env():
     assert not milestones_enabled("user_core", {"JANUS_NOTIFY_MILESTONES": "0"})
     assert milestones_enabled("user_core", {"JANUS_NOTIFY_MILESTONES": "user_core,noc"})
     assert not milestones_enabled("user_core_ara", {"JANUS_NOTIFY_MILESTONES": "user_core,noc"})
+
+
+# Real lines from user_core run 20261027_115052 (3_2_place_iop.log / 5_1_grt.log).
+RUN_1027 = """Running io_placement.tcl, stage 3_2_place_iop
+JANUS_IO_SHADOW: i_ara_system.i_ara gap 17.16 um to left edge -> exclude 27.31-432.82
+JANUS_IO_SHADOW: i_ara_system.i_ara gap 27.31 um to bottom edge -> exclude 17.16-422.66
+JANUS_IO_SHADOW: i_ara_system.i_ara gap 27.18 um to top edge -> exclude 17.16-422.66
+JANUS_IO_SHADOW: i_ara_system.i_ariane gap 17.13 um to right edge -> exclude 69.94-390.07
+JANUS_IO_SHADOW: 532 pins, allowed perimeter 963.3 of 2500.0 um; PLACE_PINS_ARGS = -exclude left:27.312-432.820 -exclude right:69.936-390.071 -exclude bottom:17.156-422.664 -exclude top:17.156-422.664
+Running global_place.tcl, stage 3_3_place_gp
+JANUS_DETOUR: block=ara_integration_wrapper macros=1 (i_ara_system.i_ara) buf=BUFx4f_ASAP7_75t_R dry=0
+JANUS_DETOUR: 0 wrap-around net(s) found
+"""
+
+
+def test_run_20261027_shadow_count_and_detour():
+    subs = replay(RUN_1027)
+    # 4 per-edge spans; the PLACE_PINS_ARGS summary line must not count as a 5th
+    assert "[JANUS] user_core: OK IO shadow hook applied (4 edge excludes)" in subs, subs
+    assert "[JANUS] user_core: OK macro detour pre-buffered 0 net(s) before GRT" in subs, subs
+
+
+def test_detour_straddle_and_warn():
+    subs = replay("Running global_route.tcl, stage 5_1_grt\n"
+                  "JANUS_DETOUR: net net32642 straddles i_ara_system.i_ara W->E (no macro-pin trigger) pins=2 moved=1 wrap=N corners drv (8.58,446.00) far (437.6,446.00)\n"
+                  "JANUS_DETOUR: WARN net9 straddles i_ara_system.i_ara with 0 drivers -- skipped\n"
+                  "JANUS_DETOUR: 1 wrap-around net(s) found\n", expect_io_shadow=False)
+    assert any("WARN macro detour pre-buffered 1 net(s) before GRT (some straddling nets skipped)" in s
+               for s in subs), subs

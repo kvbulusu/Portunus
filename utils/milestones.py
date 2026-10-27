@@ -8,6 +8,8 @@ decide whether the run is worth letting continue:
   io_shadow  §156 IO macro-shadow hook verdict (only for blocks whose config
              uses the hook)
   hold       hold buffers inserted at CTS (+ RSZ-0064 if hold not repaired)
+  detour     §158 macro-detour hook: nets pre-buffered around the macro before
+             GRT (WARN if it skipped a straddling net)
   grt        global-route overflow per layer, or GRT-0116
   drt        detailed-route: violations after the 1st iteration, final count
   error      first real [ERROR] line (known-harmless hook noise excluded)
@@ -32,6 +34,7 @@ Event = Tuple[str, str, str]
 _BENIGN_ERRORS = ("GUI-0056", "STA-2204")
 
 _RE_SHADOW = re.compile(r"JANUS_IO_SHADOW:\s*(.*)")
+_RE_DETOUR_N = re.compile(r"JANUS_DETOUR: (\d+) wrap-around net")
 _RE_HOLD = re.compile(r"RSZ-0032\] Inserted (\d+) hold buffers")
 _RE_LAYER = re.compile(r"^(M\d+|Total)\s+\d+\s+\d+\s+[\d.]+%\s+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)")
 _RE_DRT_VIOL = re.compile(r"DRT-0199\]\s+Number of violations = (\d+)")
@@ -69,6 +72,7 @@ class MilestoneTracker:
         self.cong: List[str] = []
         self.drt_viol: Optional[int] = None
         self.drt_iters = 0
+        self.detour: List[str] = []
 
     def _ev(self, out: List[Event], key: str, tag: str, msg: str, body: str = "") -> None:
         if key in self.sent:
@@ -81,7 +85,7 @@ class MilestoneTracker:
             return
         self.io_done = True
         bad = [s for s in self.shadow if re.search(r"WARN|ERROR|disabled|nothing excluded", s)]
-        excl = [s for s in self.shadow if "exclude" in s and s not in bad]
+        excl = [s for s in self.shadow if "-> exclude" in s and s not in bad]
         body = "\n".join(self.shadow) or "(no JANUS_IO_SHADOW lines in the log)"
         if bad:
             self._ev(out, "io_shadow", "FAIL", "IO shadow hook did not apply excludes", body)
@@ -110,6 +114,19 @@ class MilestoneTracker:
         m = _RE_SHADOW.search(line)
         if m:
             self.shadow.append(m.group(1).strip())
+            return out
+        if "JANUS_DETOUR:" in line:
+            msg = line.split("JANUS_DETOUR:", 1)[1].strip()
+            if msg.startswith(("net ", "WARN")):
+                self.detour.append(msg)
+            m = _RE_DETOUR_N.search(line)
+            if m:
+                n = int(m.group(1))
+                warn = any(d.startswith("WARN") for d in self.detour)
+                self._ev(out, "detour", "WARN" if warn else "OK",
+                         f"macro detour pre-buffered {n} net(s) before GRT"
+                         + (" (some straddling nets skipped)" if warn else ""),
+                         "\n".join(self.detour[:40]) or msg)
             return out
         if "RSZ-0064]" in line:
             self.hold_unrepaired = True
