@@ -125,6 +125,8 @@ from checkpoint import Checkpoint                                        # noqa:
 from flow_state import FlowState                                        # noqa: E402
 from reporter import Reporter                                           # noqa: E402
 from notification import NotificationManager                            # noqa: E402
+from milestones import (MilestoneTracker, milestones_enabled,            # noqa: E402
+                        config_uses_io_shadow)
 from timing_classifier import classify_routed_odb, render as tc_render   # noqa: E402
 from incremental_opt import (run_eco_pass, decide_timing, decide_drc,     # noqa: E402
                              adopt_odb, discard_odb, ECOResult,
@@ -3144,6 +3146,7 @@ class JANUSAutonomousAgent:
             if self.git.available():
                 header += self.git.provenance() + "\n"
             logf.write(header.encode())
+            ms = self._milestone_tracker(block)
             # bufsize=0 (unbuffered) avoids the "line buffering isn't supported
             # in binary mode" RuntimeWarning that bufsize=1 raised on every run.
             proc = subprocess.Popen(
@@ -3200,11 +3203,15 @@ class JANUSAutonomousAgent:
                             logf.write(banner.encode())
                     if transitioned:
                         _push_dash("RUNNING")
+                    if ms is not None:
+                        self._send_milestones(block, ms.feed(line, state["stage"]))
                     if self.args.verbose:
                         self.ui.debug(f"{block}| {line}")
                 proc.stdout.close()
             finally:
                 proc.wait()
+                if ms is not None:
+                    self._send_milestones(block, ms.finish())
                 hb_stop.set()
                 hb.join(timeout=2.0)
                 if _live is not None:
@@ -4286,6 +4293,40 @@ class JANUSAutonomousAgent:
         except Exception as e:  # never let notification affect the run
             self.ui.warn(f"{block}: notification hook error (ignored): {e}")
             self._notify_log(f"{block}: notification hook error: {e}")
+
+    def _milestone_tracker(self, block: str):
+        """§157: per-make-run milestone parser, or None when milestone emails
+        are off (no SMTP config, or JANUS_NOTIFY_MILESTONES excludes block)."""
+        try:
+            if not (self.notifier.email_configured and milestones_enabled(block)):
+                return None
+            return MilestoneTracker(
+                block, expect_io_shadow=config_uses_io_shadow(self._config_path(block)))
+        except Exception:
+            return None
+
+    def _send_milestones(self, block: str, events) -> None:
+        """§157: send each milestone as a short summary-only email on a daemon
+        thread so SMTP latency never stalls the ORFS log reader. Never raises."""
+        for key, subject, body in events or ():
+            text = (f"{body}\n\nblock: {block}\nrun: {self.run_dir}\n"
+                    f"log: {self._block_log(block)}\n"
+                    f"time: {datetime.now().isoformat(timespec='seconds')}")
+            self._notify_log(f"milestone {block}/{key}: {subject}")
+
+            # Own shallow copy: keeps the main notifier's last_outcome (used by
+            # the DONE/FAILED email path) free of milestone-thread races.
+            if getattr(self, "_ms_notifier", None) is None:
+                import copy
+                self._ms_notifier = copy.copy(self.notifier)
+            mn = self._ms_notifier
+
+            def _go(s=subject, t=text):
+                try:
+                    mn.send_email(s, t, [])
+                except Exception:
+                    pass
+            threading.Thread(target=_go, name=f"ms-{block}-{key}", daemon=True).start()
 
     def _notify_log(self, msg: str) -> None:
         """§136: every notification line -> <run_dir>/notify.log (+ debug UI).
