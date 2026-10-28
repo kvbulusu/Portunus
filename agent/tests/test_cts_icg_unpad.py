@@ -27,3 +27,7 @@ def test_hook_wraps_cts_and_logs():
     assert "rename clock_tree_synthesis janus_orig_clock_tree_synthesis" in hook
     assert "JANUS_CTS_ICG_UNPAD: removed" in hook
     assert "catch {janus_cts_icg_unpad}" in hook
+    # ICG alignment model: latch CLK latency is never pulled below the gate clock pin
+    assert "proc janus_icg_gate_latency" in hook
+    assert "$lat <= $gate_lat" in hook
+    assert "arrival_max_rise" in hook
