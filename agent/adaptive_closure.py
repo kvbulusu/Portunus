@@ -39,6 +39,18 @@ ACTIONS = {
 }
 
 
+# Std-cell sequential clock pin names (ASAP7 DFF*/DLL*/ICG*: CLK). A latency pin
+# whose terminal is anything else is a hard-macro / hierarchical clock pin.
+STD_CLOCK_PINS = {"CLK"}
+
+
+def _macro_clk_pin(pin) -> bool:
+    if not pin or not isinstance(pin, str):
+        return False
+    term = pin.split()[0].rsplit("/", 1)[-1]
+    return term not in STD_CLOCK_PINS
+
+
 def _f(x):
     try:
         return float(x)
@@ -48,7 +60,8 @@ def _f(x):
 
 def classify(q: dict, th: dict | None = None) -> dict:
     """q keys (all optional): period_ps, groups{name:{wns_ps,tns_ps,violators}},
-    wire_share, grt_overflow, util, slew_viol, cap_viol, skew_ps, hold_wns_ps."""
+    wire_share, grt_overflow, util, slew_viol, cap_viol, skew_ps, skew_untrusted,
+    hold_wns_ps."""
     t = dict(DEFAULT_THRESHOLDS, **(th or {}))
     ev, per = [], _f(q.get("period_ps"))
     groups = q.get("groups") or {}
@@ -88,7 +101,10 @@ def classify(q: dict, th: dict | None = None) -> dict:
                     "evidence": ev + [f"worst group is {worst}; reg2reg not worst"]}
     if skew is not None and ((per and skew >= t["skew_frac_period"] * per) or skew >= t["skew_frac_wns"] * abs(wns)):
         return {"class": "CLOCK_SKEW_LIMITED", "confidence": 0.75, "evidence": ev + [f"skew {skew:.1f} ps"]}
-    if util is not None and util >= t["util_hot"]:
+    if q.get("skew_untrusted"):
+        ev.append(q["skew_untrusted"])
+    # §161: hot utilisation alone is not congestion when GRT reports 0 overflow
+    if util is not None and util >= t["util_hot"] and q.get("grt_overflow") is None:
         return {"class": "CONGESTION_LIMITED", "confidence": 0.6, "evidence": ev + [f"utilisation {util:.2f}"]}
     r2r = _f((groups.get("reg2reg") or {}).get("wns_ps"))
     ws = _f(q.get("wire_share"))
@@ -302,7 +318,18 @@ def from_qor(qor: dict) -> dict:
     if up is not None:
         out["util"] = up / 100.0
     if _f(ct.get("setup_skew")) is not None:
-        out["skew_ps"] = abs(_f(ct["setup_skew"]))
+        # §161: report_clock_skew may pair a flop with a hard-macro clock PIN.
+        # The pin latency excludes the macro's internal clock tree, so that
+        # "skew" is not flop-to-flop (20261027_195409: a_full_q/CLK 1719.65 vs
+        # i_ara/clk_i 458.39 -> 1338.49; CTS deliberately delays flops toward
+        # the macro insertion). Using it picked CLOCK_SKEW_LIMITED and the
+        # latency rerun regressed -247 -> -609 ps.
+        mp = [p for p in (ct.get("source_latency_pin"), ct.get("target_latency_pin")) if _macro_clk_pin(p)]
+        if mp:
+            out["skew_untrusted"] = (f"setup skew {_f(ct['setup_skew']):.1f} ps measured at macro clock pin "
+                                     f"{mp[0].split()[0]}; not flop-to-flop, ignored")
+        else:
+            out["skew_ps"] = abs(_f(ct["setup_skew"]))
     drc = qor.get("route_drc") or {}
     if drc.get("total") is not None:
         out["drc"] = int(drc["total"])

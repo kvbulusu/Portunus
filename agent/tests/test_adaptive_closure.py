@@ -85,13 +85,15 @@ def test_from_qor_real_ara():
     assert fq["wns_ps"] == -1948.44 and fq["hold_wns_ps"] == 8.95 and fq["tns_ps"] == -85378.1
     assert fq["groups"]["reg2reg"]["wns_ps"] == -1948.44 and fq["groups"]["reg2out"]["wns_ps"] == 5.24
     assert (fq["slew_viol"], fq["cap_viol"]) == (471, 8)
-    assert fq["skew_ps"] == 1074.05 and fq["latency_ps"] == 1487.02 and fq["clock_name"] == "core_clk"
+    assert fq["latency_ps"] == 1487.02 and fq["clock_name"] == "core_clk"
+    # §161: skew target is the i_ariane macro clock pin -> not flop-to-flop
+    assert "skew_ps" not in fq and "i_ara_system.i_ariane/clk_i" in fq["skew_untrusted"]
 
 
 def test_ara_not_drv_limited():
     # -1948 ps WNS with 479 DRV used to classify DRV_LIMITED; DRV is secondary.
     r = ac.classify(_fq("ara_finish_run"))
-    assert r["class"] == "CLOCK_SKEW_LIMITED"
+    assert r["class"] not in ("DRV_LIMITED", "CLOCK_SKEW_LIMITED")
     assert any("secondary" in e for e in r["evidence"])
 
 
@@ -107,7 +109,7 @@ def test_from_qor_missing_never_invented():
 
 
 def test_class_knobs():
-    fq = _fq("ara_finish_run")
+    fq = dict(_fq("ara_finish_run"), skew_ps=1074.05)  # flop-to-flop skew case
     sdc = "create_clock -name core_clk -period 2857 [get_ports clk]\n"
     k = ac.class_knobs("CLOCK_SKEW_LIMITED", fq, sdc_text=sdc)
     assert k["vars"] == [] and "set_clock_latency 1487.020" in k["overlay"]

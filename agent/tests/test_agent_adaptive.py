@@ -115,6 +115,10 @@ def test_advise_writes_adaptive_json(tmp_path):
     a = _agent(tmp_path)
     rep = tmp_path / "rep"
     shutil.copytree(os.path.join(FIX, "ara_finish_run"), rep)
+    # §161: the fixture's skew target is the i_ariane macro clock pin (ignored);
+    # point it at a flop so this test still exercises the CLOCK_SKEW plumbing.
+    fin = rep / "6_finish.rpt"
+    fin.write_text(fin.read_text().replace("i_ara_system.i_ariane/clk_i", "i_ara_system.u_x/q_reg/CLK"))
     a._reports_dir = lambda b: str(rep)
     a._logs_dir = lambda b: None
     a._results_dir = lambda b: None
