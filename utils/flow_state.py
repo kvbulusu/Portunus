@@ -110,6 +110,8 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     "LEC_CHECK": "4_cts",
     # Antenna repair runs in global route / detail route only.
     "REPAIR_ANTENNAS": "5_route",
+    # §167 only read by global_route.tcl (post-GRT repair_design/repair_timing)
+    "SKIP_INCREMENTAL_REPAIR": "5_route",
 }
 _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("SYNTH_", "1_synth"),
@@ -136,6 +138,7 @@ _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("JANUS_IO_MACRO_SHADOW", "3_place"),
     ("JANUS_UD_MACRO", "2_floorplan"),   # §164 user_domain_macros.tcl knobs
     ("JANUS_CTS_", "4_cts"),
+    ("JANUS_RSZ_", "5_route"),           # §167 PRE_GLOBAL_ROUTE repair_design knobs
     ("JANUS_CONST_FOLD", "3_place"),     # §161 PRE_RESIZE constant-net fold knobs             # §114/§160 PRE_CTS hook knobs
 ]
 
