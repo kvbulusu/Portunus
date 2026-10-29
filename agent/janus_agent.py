@@ -3066,6 +3066,10 @@ class JANUSAutonomousAgent:
         children = {
             "user_core_ara": (("user_core_ara_lane",), False),
             "user_core": (("user_core_ara", "user_core_cva6"), True),
+            # §164: user_domain consumes 2x the hardened user_core abstract
+            # (VDD/VSS on M6, M7-M9 signal OBS) with the same PDN/OBS recipe
+            # as user_core (user_core_grid_strategy + restore_macro_route_obs).
+            "user_domain": (("user_core",), True),
         }.get(block)
         if not children:
             return

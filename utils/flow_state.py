@@ -134,6 +134,7 @@ _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("JANUS_MACRO_DETOUR", "5_route"),   # §107 detour hook knobs (read in GRT)
     ("JANUS_IO_SHADOW", "3_place"),      # §156 IO macro-shadow hook knobs
     ("JANUS_IO_MACRO_SHADOW", "3_place"),
+    ("JANUS_UD_MACRO", "2_floorplan"),   # §164 user_domain_macros.tcl knobs
     ("JANUS_CTS_", "4_cts"),
     ("JANUS_CONST_FOLD", "3_place"),     # §161 PRE_RESIZE constant-net fold knobs             # §114/§160 PRE_CTS hook knobs
 ]
