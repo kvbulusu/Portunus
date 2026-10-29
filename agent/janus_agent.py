@@ -1614,7 +1614,9 @@ class JANUSAutonomousAgent:
 
         WHY THIS EXISTS: `make DESIGN_CONFIG=<stamped>/config.mk` reads a COPY
         that scripts/03_setup_janus_configs.sh stamps from asic_flow/configs.
-        agent.py does NOT auto-restamp, so if you `git pull` (or edit a source
+        §163: run() now re-stamps automatically at launch (_auto_restamp_all);
+        this guard still catches the cases it skips, or an edit after launch.
+        Before §163 agent.py did NOT auto-restamp, so if you `git pull` (or edit a source
         config / *_local.mk) and forget to re-run scripts/03, make silently uses
         the OLD stamped copy. Two real bugs hit exactly this: (1) scripts/03 not
         copying *_local.mk, and (2) config.mk's -include sitting below the
@@ -1705,9 +1707,108 @@ class JANUSAutonomousAgent:
             "levers.\n" + "\n".join(problems) +
             "\n\nFIX: re-stamp before running:\n"
             "    bash asic_flow/scripts/03_setup_janus_configs.sh\n"
-            "then re-launch. (agent.py does NOT auto-restamp. Override this guard "
+            "then re-launch. (The launch-time auto re-stamp skipped this block or "
+            "the source changed after launch. Override this guard "
             "with --skip-stamp-check only if you know the stamp is intentionally "
             "different.)")
+
+    # ----- §163 automatic re-stamp at launch ----------------------------------
+    # Same per-block copy scripts/03 step 1 does (configs/<blk>.mk -> config.mk,
+    # <blk>_local.mk, constraints/<blk>.sdc -> constraint.sdc; plain cp). Runs
+    # once at launch, BEFORE --force-blocks/--resume planning, so the semantic
+    # config diff in flow_state sees the new values and picks the right restart
+    # stage (comment-only edits invalidate nothing).
+    #   restamped : stamp differs from the repo and nothing else owns the block
+    #   fresh     : byte-identical -> no write (mtimes kept, no make churn)
+    #   skipped   : --skip-stamp-check (deliberate hand edit); no repo config;
+    #               never stamped (scripts/03 must run once for env/slang/cts
+    #               setup); or another live process is building with this
+    #               stamped config (re-stamping under it would re-synth it).
+    # Mid-run (_run_make) never re-stamps: the resume plan was already made
+    # from the launch-time stamp, so a later edit still aborts loudly there.
+    def _stamp_pairs(self, block: str) -> List[Tuple[Optional[str], str]]:
+        """(source or None, stamped dest) for every file scripts/03 stamps.
+        Source None means the stamped copy must not exist."""
+        bdir = os.path.join(self.design_root, block)
+        src_local = os.path.join(self.configs_dir, f"{block}_local.mk")
+        pairs: List[Tuple[Optional[str], str]] = [
+            (self._repo_config_path(block), os.path.join(bdir, "config.mk")),
+            (src_local if os.path.isfile(src_local) else None,
+             os.path.join(bdir, f"{block}_local.mk"))]
+        sdc = self._repo_sdc_path(block)
+        if sdc:
+            pairs.append((sdc, os.path.join(bdir, "constraint.sdc")))
+        return pairs
+
+    @staticmethod
+    def _stamp_users(stamped_cfg: str) -> List[int]:
+        """PIDs (other than us) whose command line references stamped_cfg."""
+        me, pids = os.getpid(), []
+        needle = stamped_cfg.encode()
+        for d in glob.glob("/proc/[0-9]*"):
+            try:
+                pid = int(os.path.basename(d))
+                if pid == me:
+                    continue
+                with open(os.path.join(d, "cmdline"), "rb") as fh:
+                    if needle in fh.read():
+                        pids.append(pid)
+            except (OSError, ValueError):
+                continue
+        return pids
+
+    def _auto_restamp(self, block: str) -> Tuple[str, str]:
+        """Returns (state, detail); state in restamped|fresh|skipped."""
+        if getattr(self.args, "skip_stamp_check", False):
+            return "skipped", "--skip-stamp-check (stamp kept as-is)"
+        if not self._repo_config_path(block):
+            return "skipped", "no repo config"
+        stamped_cfg = self._config_path(block)
+        if not os.path.isfile(stamped_cfg):
+            return "skipped", ("never stamped — run bash asic_flow/scripts/03_setup_janus_configs.sh "
+                               "once (it also sets up the env file / slang / cts patch)")
+
+        def _read(p: str) -> Optional[bytes]:
+            try:
+                with open(p, "rb") as fh:
+                    return fh.read()
+            except OSError:
+                return None
+        todo = []
+        for src, dst in self._stamp_pairs(block):
+            if src is None:
+                if os.path.isfile(dst):
+                    todo.append((None, dst))
+            elif _read(src) != _read(dst):
+                todo.append((src, dst))
+        if not todo:
+            return "fresh", ""
+        users = self._stamp_users(stamped_cfg)
+        if users:
+            return "skipped", (f"stamp is stale but PID(s) {users[:5]} are building with "
+                               f"{stamped_cfg}; not touching it")
+        done = []
+        for src, dst in todo:
+            if src is None:
+                os.remove(dst)
+                done.append(f"removed {os.path.basename(dst)}")
+                continue
+            tmp = dst + ".janus_restamp.tmp"
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dst)
+            done.append(os.path.basename(dst))
+        return "restamped", ", ".join(done)
+
+    def _auto_restamp_all(self) -> None:
+        for b in list(self.dep.graph):
+            try:
+                state, detail = self._auto_restamp(b)
+            except Exception as e:                  # never blocks the launch
+                state, detail = "skipped", f"re-stamp failed: {e}"
+            if state == "restamped":
+                self.ui.good(f"{b}: stamp refreshed from repo ({detail})")
+            elif state == "skipped" and detail != "no repo config":
+                self.ui.warn(f"{b}: auto re-stamp skipped — {detail}")
 
     # ----- interactive shell prompt (no-op unless --interactive on a TTY) ----
     def _ask(self, question: str, choices: str, default: str) -> str:
@@ -2088,31 +2189,35 @@ class JANUSAutonomousAgent:
         tag = f"janus_eco_{mode}"
         return {k: os.path.join(res_dir, f"{tag}.{k}") for k in ("odb", "spef", "def", "v")}
 
-    def _run_eco_orfs(self, block: str, mode: str) -> Tuple[ECOResult, Dict[str, str]]:
-        """One ECO pass (hold|setup) via ORFS `make run` on results/6_final.odb.
-        Writes janus_eco_<mode>.{odb,spef,def,v} beside it; never touches the
-        canonical files. Returns (parsed result, output paths)."""
+    def _run_eco_orfs(self, block: str, mode: str, in_odb: str = "6_final.odb",
+                      in_spef: Optional[str] = None,
+                      tag_mode: Optional[str] = None) -> Tuple[ECOResult, Dict[str, str]]:
+        """One ECO pass (hold|setup) via ORFS `make run` on results/<in_odb>
+        (default 6_final.odb; §163 chains a hold pass on janus_eco_setup.odb).
+        Writes janus_eco_<tag_mode or mode>.{odb,spef,def,v} beside it; never
+        touches the canonical files. Returns (parsed result, output paths)."""
         r = ECOResult(mode=mode)
         res_dir = self._results_dir(block)
         if not (self.flow_dir and res_dir):
             r.error = "no ORFS results dir"
             return r, {}
-        outs = self._eco_outputs(res_dir, mode)
+        tmode = tag_mode or mode
+        outs = self._eco_outputs(res_dir, tmode)
         for p in outs.values():
             if os.path.exists(p):
                 os.remove(p)                 # stale outputs of an earlier pass
         rpt_dir = self._reports_dir(block) or res_dir
-        tag = f"janus_eco_{mode}"
+        tag = f"janus_eco_{tmode}"
         tcl = os.path.join(_ROOT, "scripts", "post_route_opt.tcl")
         targets = ["run", f"RUN_SCRIPT={tcl}", f"RUN_LOG_NAME_STEM={tag}",
-                   "JANUS_PR_IN_ODB=6_final.odb", "JANUS_PR_IN_SDC=6_final.sdc",
+                   f"JANUS_PR_IN_ODB={in_odb}", "JANUS_PR_IN_SDC=6_final.sdc",
                    f"JANUS_PR_MODE={mode}",
                    f"JANUS_PR_HOLD_MARGIN={self._eco_hold_margin(block)}",
                    f"JANUS_OUT_ODB={outs['odb']}", f"JANUS_OUT_SPEF={outs['spef']}",
                    f"JANUS_OUT_DEF={outs['def']}", f"JANUS_OUT_V={outs['v']}",
                    f"JANUS_PR_RPT={os.path.join(rpt_dir, tag + '.rpt')}",
                    f"JANUS_PR_DRC_RPT={os.path.join(rpt_dir, tag + '_drc.rpt')}"]
-        spef = os.path.join(res_dir, "6_final.spef")
+        spef = in_spef or os.path.join(res_dir, "6_final.spef")
         if os.path.isfile(spef):
             targets.append(f"JANUS_SPEF={spef}")
         cmd = self._post_build_make_cmd(block, targets)
@@ -2277,6 +2382,15 @@ class JANUSAutonomousAgent:
         if (verdict == "adopt" and mode == "setup" and b_hold is not None
                 and b_hold >= 0.0 and (eco.hold_wns is None or eco.hold_wns < 0.0)):
             verdict, why = "discard", f"setup ECO opened hold ({eco.hold_wns} ps)"
+        # §163: a setup pass that gained setup but opened hold gets ONE hold
+        # pass on top of its own output; the combined result is judged against
+        # the original pre-ECO numbers with the same hold-first rules.
+        if verdict == "discard" and self._eco_setup_gain_hold_lost(eco, b_setup, b_hold):
+            first_why = why
+            chained = self._eco_chain_hold(block, eco, outs, b_setup, b_hold)
+            if chained is not None:
+                eco, outs, verdict, why = chained
+                why = f"{first_why}; {why}"
         # the incremental reroute must not leave new routing DRCs behind
         b_drc = res.drc_violations or 0
         if verdict == "adopt" and eco.drc is None:
@@ -2287,8 +2401,8 @@ class JANUSAutonomousAgent:
             res.wns_ns, res.hold_ps = eco.setup_wns, eco.hold_wns
             if eco.setup_tns is not None:
                 res.tns_ns = eco.setup_tns
-            self._eco_record_adopted(block, mode, eco)
-            res.note += f"  +eco({mode}) RCX WS {eco.setup_wns}/{eco.hold_wns}"
+            self._eco_record_adopted(block, eco.mode or mode, eco)
+            res.note += f"  +eco({eco.mode or mode}) RCX WS {eco.setup_wns}/{eco.hold_wns}"
             self._eco_log(block, f"{mode} ECO ADOPTED — {why} (drc {eco.drc}); "
                                  "6_final.{odb,spef,def,v,gds} replaced, *.preeco kept")
             self.ui.good(f"{block}: post-route {mode} ECO ADOPTED — {why}")
@@ -2299,6 +2413,39 @@ class JANUSAutonomousAgent:
             return setup, hold                     # adopt failed; already logged
         self._eco_log(block, f"{mode} ECO DISCARDED — {why}")
         return setup, hold
+
+    @staticmethod
+    def _eco_setup_gain_hold_lost(eco: ECOResult, b_setup: Optional[float],
+                                  b_hold: Optional[float]) -> bool:
+        """§163: setup ECO is worth a chained hold pass only when it produced
+        trusted data, gained setup beyond noise, routed with a known DRC count
+        and the sole problem is hold (now negative)."""
+        return bool(eco.ok and eco.mode == "setup" and eco.drc is not None
+                    and b_setup is not None and eco.setup_wns is not None
+                    and eco.setup_wns > b_setup + 1.0
+                    and eco.hold_wns is not None and eco.hold_wns < 0.0
+                    and (b_hold is None or eco.hold_wns < b_hold))
+
+    def _eco_chain_hold(self, block: str, s_eco: ECOResult, s_outs: Dict[str, str],
+                        b_setup: Optional[float], b_hold: Optional[float]):
+        """§163: run a hold pass on janus_eco_setup.{odb,spef}; return
+        (eco, outs, verdict, why) for the combined result, or None (setup
+        outputs are left for the caller to discard)."""
+        if not (os.path.isfile(s_outs.get("odb", "")) and os.path.isfile(s_outs.get("spef", ""))):
+            return None
+        self._eco_log(block, f"setup ECO gained setup {b_setup}->{s_eco.setup_wns} ps but hold "
+                             f"{b_hold}->{s_eco.hold_wns} ps — chaining a hold pass on its output")
+        h_eco, h_outs = self._run_eco_orfs(block, "hold",
+                                           in_odb=os.path.basename(s_outs["odb"]),
+                                           in_spef=s_outs["spef"], tag_mode="setup_hold")
+        for p in s_outs.values():
+            discard_odb(p)                 # intermediate; the chain output replaces it
+        verdict, why = decide_timing(before_setup=b_setup, before_hold=b_hold, after=h_eco)
+        if verdict == "adopt" and b_hold is not None and b_hold >= 0.0 and (
+                h_eco.hold_wns is None or h_eco.hold_wns < 0.0):
+            verdict, why = "discard", f"setup+hold ECO still leaves hold {h_eco.hold_wns} ps"
+        h_eco.mode = "setup_hold"
+        return h_eco, h_outs, verdict, ("setup+hold chain: " + why)
 
     # ----- ORFS logs directory for a block -----------------------------------
     def _logs_dir(self, block: str) -> Optional[str]:
@@ -4011,6 +4158,9 @@ class JANUSAutonomousAgent:
             for b in self.dep.graph:
                 self.ui.info(f"  ({b}) cd {self.flow_dir} && " + " ".join(self._make_cmd(b)))
             return 0
+
+        # §163: refresh stale stamps from the repo before any resume decision.
+        self._auto_restamp_all()
 
         # honor --force-blocks / --clean FIRST (before resume or scheduling):
         # wipe the on-disk ORFS state + manifest entry for the forced blocks so
