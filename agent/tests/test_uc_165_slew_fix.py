@@ -23,7 +23,7 @@ def test_user_core_opts_in_to_slew_fixes():
     assert _val(uc, "JANUS_CONST_FOLD_TIELO") == "$(TIELO_CELL_AND_PORT)"
     assert _val(uc, "PRE_RESIZE_TCL") == "$(JANUS_CONST_FOLD_TCL)"
     assert _val(uc, "JANUS_MACRO_DETOUR_SKIP_CONST") == "1"
-    assert _val(uc, "JANUS_ECO_SETUP_DRV") == "1"
+    assert _val(uc, "JANUS_ECO_SETUP_DRV") == "0"  # §166: off (SPEF -> WLM)
     # §163 settings untouched
     assert _val(uc, "JANUS_ECO_HOLD_MARGIN_PS") == "20"
     assert _val(uc, "SLEW_MARGIN") == "20"
@@ -39,11 +39,11 @@ def test_resume_stages():
 
 def test_tcl_drv_repair_gated_and_ordered():
     s = open(TCL).read()
-    gate = s.index('[_env JANUS_ECO_SETUP_DRV 0] ne "0"')
+    gate = s.index('} elseif {$mode eq "setup" && [_env JANUS_ECO_SETUP_DRV 0] ne "0"}')
     drv = s.index("repair_design -slew_margin $sm -cap_margin $cm")
     setup = s.index("if {[catch {repair_timing -setup")
     grt = s.index("    _grt_start\n")
     reroute = s.index("    _reroute\n")
     # inside the GRT incremental window, before setup sizing
     assert grt < gate < drv < setup < reroute
-    assert '$mode eq "setup"' in s[gate - 80:gate]
+    assert '$mode eq "setup"' in s[gate:gate + 80]
