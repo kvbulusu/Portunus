@@ -90,16 +90,14 @@ def _read(p):
         return f.read()
 
 
-def test_const_fold_tie_fallback_wired_for_user_domain_only():
+def test_const_fold_tie_fallback_wired():
     """ORFS erases TIEHI/TIELO_CELL_AND_PORT before PRE_RESIZE (stages synth,
-    floorplan), so the fold needs non-ORFS fallback names. Opt-in: user_domain
-    sets them, frozen user_core.mk does not."""
+    floorplan), so the fold needs non-ORFS fallback names. Opt-in per block:
+    user_domain and (since §165) user_core set them."""
     txt = _mk()
     assert _val(txt, "JANUS_CONST_FOLD_TIEHI") == "$(TIEHI_CELL_AND_PORT)"
     assert _val(txt, "JANUS_CONST_FOLD_TIELO") == "$(TIELO_CELL_AND_PORT)"
     assert _val(txt, "PRE_RESIZE_TCL") == "$(JANUS_CONST_FOLD_TCL)"
-    uc = _read(os.path.join(ASIC, "configs", "user_core.mk"))
-    assert "JANUS_CONST_FOLD_TIEHI" not in uc and "JANUS_CONST_FOLD_TIELO" not in uc
     hook = _read(os.path.join(HOOKS, "janus_const_fold.tcl"))
     assert "tie_master $db TIELO_CELL_AND_PORT JANUS_CONST_FOLD_TIELO" in hook
     assert "tie_master $db TIEHI_CELL_AND_PORT JANUS_CONST_FOLD_TIEHI" in hook
@@ -110,10 +108,8 @@ def test_const_fold_tie_fallback_wired_for_user_domain_only():
 def test_detour_const_guard_default_off_on_in_user_domain():
     txt = _mk()
     assert _val(txt, "JANUS_MACRO_DETOUR_SKIP_CONST") == "1"
-    uc = _read(os.path.join(ASIC, "configs", "user_core.mk"))
-    assert "JANUS_MACRO_DETOUR_SKIP_CONST" not in uc
     hook = _read(os.path.join(HOOKS, "janus_macro_detour.tcl"))
-    # default 0 => frozen user_core behaviour unchanged
+    # default 0 => blocks that do not opt in are unchanged
     assert "[env JANUS_MACRO_DETOUR_SKIP_CONST 0] eq \"0\"" in hook
     # guard applied in both the macro-pin pass and the straddle pass
     assert hook.count("[net_is_const $n]") == 2
