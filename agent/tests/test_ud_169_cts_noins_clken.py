@@ -108,3 +108,14 @@ def test_cts_diag_hook_text():
     assert "catch {janus_cts_diag}" in txt
     rb = _read(os.path.join(os.path.dirname(CFG), "utils", "report_bundle.py"))
     assert '"4_cts_pre_repair.rpt"' in rb
+
+
+def test_cts_probe_script_readonly():
+    root = os.path.dirname(CFG)
+    tcl = _read(os.path.join(root, "scripts", "ud_cts_probe.tcl"))
+    sh = _read(os.path.join(root, "scripts", "ud_cts_probe.sh"))
+    # read-only: never writes a db, never runs repair
+    assert "write_db" not in tcl and "orfs_write_db" not in tcl
+    assert "repair_timing" not in tcl.replace("no repair_timing", "")
+    assert "load_design 3_place.odb 3_place.sdc" in tcl
+    assert "-no_insertion_delay" in tcl and "RUN_SCRIPT=" in sh
