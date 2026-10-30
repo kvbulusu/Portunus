@@ -41,8 +41,12 @@ def test_sdc_io_on_virtual_clock_with_latency():
     assert "-clock $clk_name $in_dly" not in sdc
     # virtual clocks reject set_clock_transition
     assert "set_clock_transition        [expr {0.050 * $PS}] [get_clocks $clk_name]" in sdc
-    for kw in ("set_false_path", "set_multicycle_path", "set_max_delay", "set_disable_timing"):
+    # §168 itself adds no exceptions. §174 adds exactly three narrow control-signal
+    # exceptions (1 false path, 2 multicycle; see test_ud_174_ctrl_exceptions); nothing else.
+    for kw in ("set_max_delay", "set_disable_timing"):
         assert kw not in sdc
+    assert sdc.count("set_false_path") == 1 and sdc.count("set_multicycle_path") == 2
+    assert sdc.index("set_false_path") > sdc.index("set_output_delay -clock $io_clk_name")
 
 
 def test_mk_knobs():

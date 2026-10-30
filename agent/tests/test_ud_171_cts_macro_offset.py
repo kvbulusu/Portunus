@@ -23,7 +23,8 @@ def _read(p):
 
 def test_mk_knob():
     mk = _read(os.path.join(CFG, "user_domain.mk"))
-    assert re.search(r"^export\s+JANUS_CTS_MACRO_OFFSET\s+=\s*1166\s*$", mk, re.M)
+    # §174 retargeted 1166 -> 1800 (refpin D sweep); see test_ud_174_ctrl_exceptions
+    assert re.search(r"^export\s+JANUS_CTS_MACRO_OFFSET\s+=\s*1800\s*$", mk, re.M)
     # §170/§168 knobs unchanged
     assert re.search(r"^export\s+JANUS_CTS_NO_INSERTION_DELAY\s+=\s*0\s*$", mk, re.M)
     assert re.search(r"^export\s+JANUS_CTS_IO_LATENCY_TRACK\s+=\s*1", mk, re.M)
