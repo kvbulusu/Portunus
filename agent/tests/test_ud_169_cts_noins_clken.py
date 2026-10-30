@@ -24,7 +24,9 @@ def _read(p):
 
 def test_mk_knobs():
     mk = _read(os.path.join(CFG, "user_domain.mk"))
-    assert re.search(r"^export\s+JANUS_CTS_NO_INSERTION_DELAY\s+=\s*1\s*$", mk, re.M)
+    # §170: run 173032 disproved the §169 premise -> balanced CTS again
+    assert re.search(r"^export\s+JANUS_CTS_NO_INSERTION_DELAY\s+=\s*0\s*$", mk, re.M)
+    assert re.search(r"^export\s+JANUS_CTS_DIAG\s+=\s*1\s*$", mk, re.M)
     assert re.search(r"^JANUS_UD_CLKEN_PIPE \?= 1$", mk, re.M)
     assert "ifeq ($(JANUS_UD_BOUNDARY_CUT)$(JANUS_UD_CLKEN_PIPE),11)" in mk
     assert "export VERILOG_DEFINES += -D JANUS_UD_CLKEN_PIPE" in mk
@@ -97,3 +99,23 @@ def test_wrapper_args_and_fallback(tmp_path, reject, noins):
         assert "flag not supported" in out
     else:
         assert calls == [base + " -no_insertion_delay"]
+
+
+def test_cts_diag_hook_text():
+    txt = _read(os.path.join(os.path.dirname(CFG), "scripts", "hooks", "janus_cts_balance.tcl"))
+    assert "proc janus_cts_diag" in txt
+    assert "4_cts_pre_repair.rpt" in txt and "-format full_clock_expanded" in txt
+    assert "catch {janus_cts_diag}" in txt
+    rb = _read(os.path.join(os.path.dirname(CFG), "utils", "report_bundle.py"))
+    assert '"4_cts_pre_repair.rpt"' in rb
+
+
+def test_cts_probe_script_readonly():
+    root = os.path.dirname(CFG)
+    tcl = _read(os.path.join(root, "scripts", "ud_cts_probe.tcl"))
+    sh = _read(os.path.join(root, "scripts", "ud_cts_probe.sh"))
+    # read-only: never writes a db, never runs repair
+    assert "write_db" not in tcl and "orfs_write_db" not in tcl
+    assert "repair_timing" not in tcl.replace("no repair_timing", "")
+    assert "load_design 3_place.odb 3_place.sdc" in tcl
+    assert "-no_insertion_delay" in tcl and "RUN_SCRIPT=" in sh
