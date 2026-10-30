@@ -52,10 +52,10 @@ def test_hook_refpin_structure():
 
 
 def test_refpin_not_armed_in_any_config_yet():
-    # §172 is probe-only until the probe proves it; no .mk arms it (Restamp: no)
+    # §172 was probe-only; §174 arms it for user_domain only (sweep proved D=1800)
     cfg = os.path.join(ASIC, "configs")
     for name in os.listdir(cfg):
-        if name.endswith(".mk"):
+        if name.endswith(".mk") and name != "user_domain.mk":
             assert not re.search(r"JANUS_CTS_IO_REFPIN\s*[:?]?=\s*1", _read(os.path.join(cfg, name))), name
 
 
