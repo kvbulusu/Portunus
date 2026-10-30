@@ -20,6 +20,14 @@ agent does the sending (best-effort, background thread).
 
 Env only (no CLI flags): JANUS_NOTIFY_MILESTONES = 1 (default, all blocks) |
 0 (off) | comma list of block names (only those).
+
+§175: the per-event emails above were user_core bring-up debug aids and are
+now OFF by default -- they are still parsed and logged to notify.log, but only
+emailed with JANUS_NOTIFY_DEBUG=1 (see is_debug_event). What IS emailed:
+  * one stage-table email per completed ORFS stage (track_stage() reports the
+    stage that just finished; the agent renders it with utils/stage_report.py)
+  * KILL red flags, immediately, while repair_timing is still running:
+    pre-repair hold WNS < -300 ps, or > 5000 hold buffers.
 """
 
 from __future__ import annotations
@@ -39,6 +47,17 @@ _RE_HOLD = re.compile(r"RSZ-0032\] Inserted (\d+) hold buffers")
 _RE_LAYER = re.compile(r"^(M\d+|Total)\s+\d+\s+\d+\s+[\d.]+%\s+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)")
 _RE_DRT_VIOL = re.compile(r"DRT-0199\]\s+Number of violations = (\d+)")
 _RE_ERROR = re.compile(r"^\[ERROR [A-Z]+-\d+\]|^Error: ")
+
+# §175 user kill rule (kept in sync with stage_report.HOLD_*_KILL).
+HOLD_BUF_KILL = 5000
+HOLD_PRE_KILL_PS = -300.0
+# Events emailed regardless of JANUS_NOTIFY_DEBUG; everything else is debug.
+ALWAYS_KEYS = frozenset({"kill_hold_pre", "kill_hold_bufs"})
+
+
+def is_debug_event(key: str) -> bool:
+    """§175: True for the legacy per-event (user_core debug) milestones."""
+    return key not in ALWAYS_KEYS
 
 
 def milestones_enabled(block: str, env: Optional[dict] = None) -> bool:
@@ -73,6 +92,11 @@ class MilestoneTracker:
         self.drt_viol: Optional[int] = None
         self.drt_iters = 0
         self.detour: List[str] = []
+        # §175 live hold-repair watch + stage-completion tracking
+        self.hold_mode = False
+        self.hold_cols: List[str] = []
+        self.stage_key: Optional[str] = None
+        self.stages_run: List[str] = []
 
     def _ev(self, out: List[Event], key: str, tag: str, msg: str, body: str = "") -> None:
         if key in self.sent:
@@ -131,6 +155,7 @@ class MilestoneTracker:
         if "RSZ-0064]" in line:
             self.hold_unrepaired = True
             return out
+        self._hold_watch(line, st, out)
         m = _RE_HOLD.search(line)
         if m:
             n = int(m.group(1))
@@ -177,6 +202,64 @@ class MilestoneTracker:
         if _RE_ERROR.search(line) and not any(b in line for b in _BENIGN_ERRORS):
             self._ev(out, "error", "FAIL", f"error at '{st or '?'}': {line.strip()[:160]}")
         return out
+
+    def _hold_watch(self, line: str, st: str, out: List[Event]) -> None:
+        """§175: parse repair_timing's hold table live; fire KILL events."""
+        if "RSZ-0046]" in line:
+            self.hold_mode, self.hold_cols = True, []
+            return
+        if "RSZ-0094]" in line or "RSZ-0032]" in line:
+            m = _RE_HOLD.search(line)
+            if m and int(m.group(1)) > HOLD_BUF_KILL:
+                self._ev(out, "kill_hold_bufs", "KILL RUN?",
+                         f"{m.group(1)} hold buffers inserted at '{st or '?'}' "
+                         f"(> {HOLD_BUF_KILL})")
+            self.hold_mode = False
+            return
+        if not self.hold_mode or "|" not in line:
+            return
+        cells = [c.strip() for c in line.split("|")]
+        if "WNS" in cells and cells[0].startswith("Iter"):
+            self.hold_cols = cells
+            return
+        if not self.hold_cols or not (cells[0].isdigit() or cells[0] == "final"):
+            return
+        try:
+            wns = float(cells[self.hold_cols.index("WNS")])
+        except (ValueError, IndexError):
+            wns = None
+        if cells[0] == "0" and wns is not None and wns < HOLD_PRE_KILL_PS:
+            self._ev(out, "kill_hold_pre", "KILL RUN?",
+                     f"pre-repair hold WNS {wns:.1f} ps at '{st or '?'}' "
+                     f"(< {HOLD_PRE_KILL_PS:.0f} ps)")
+        for name in ("Buffers", "Inserted"):
+            if name in self.hold_cols:
+                try:
+                    b = int(cells[self.hold_cols.index(name)])
+                except (ValueError, IndexError):
+                    break
+                if b > HOLD_BUF_KILL:
+                    self._ev(out, "kill_hold_bufs", "KILL RUN?",
+                             f"hold repair already at {b} buffers at '{st or '?'}' "
+                             f"(> {HOLD_BUF_KILL}) and still going")
+                break
+
+    def track_stage(self, key: Optional[str]) -> Optional[str]:
+        """§175: feed the current stage key (stage_report.stage_key); returns
+        the key of the stage that just COMPLETED (moved forward past it),
+        else None. Each stage is reported at most once per make run."""
+        if not key or key == self.stage_key:
+            return None
+        order = ["1_synth", "2_floorplan", "3_place", "4_cts", "5_grt", "5_drt", "6_finish"]
+        prev = self.stage_key
+        if prev in order and key in order and order.index(key) < order.index(prev):
+            return None   # sub-step label regressed; ignore
+        self.stage_key = key
+        self.stages_run.append(key)
+        if prev and ("stage_done:" + prev) not in self.sent:
+            self.sent.add("stage_done:" + prev)
+            return prev
+        return None
 
     def finish(self) -> List[Event]:
         """Flush verdicts that depend on a stage boundary never seen (e.g. run

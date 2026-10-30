@@ -126,7 +126,8 @@ from flow_state import FlowState                                        # noqa: 
 from reporter import Reporter                                           # noqa: E402
 from notification import NotificationManager                            # noqa: E402
 from milestones import (MilestoneTracker, milestones_enabled,            # noqa: E402
-                        config_uses_io_shadow)
+                        config_uses_io_shadow, is_debug_event)
+import stage_report as _sr                                              # noqa: E402
 from timing_classifier import classify_routed_odb, render as tc_render   # noqa: E402
 from incremental_opt import (run_eco_pass, decide_timing, decide_drc,     # noqa: E402
                              adopt_odb, discard_odb, ECOResult,
@@ -3197,6 +3198,9 @@ class JANUSAutonomousAgent:
         # Shared state updated by the reader loop; read by the heartbeat thread,
         # the optional in-place live console panel, and the web dashboard.
         t_start = time.time()
+        if not hasattr(self, "_block_t0"):
+            self._block_t0 = {}
+        self._block_t0.setdefault(block, t_start)   # §175: first make of this run
         state = {"stage": "starting", "lines": 0, "last_msg": "",
                  "stage_at": t_start, "prev_lines": 0, "stage_idx": 0}
         state_lock = threading.Lock()
@@ -3356,6 +3360,14 @@ class JANUSAutonomousAgent:
                         _push_dash("RUNNING")
                     if ms is not None:
                         self._send_milestones(block, ms.feed(line, state["stage"]))
+                        # §175: one stage-table email per completed ORFS stage
+                        try:
+                            _cur = _sr.stage_key(state["stage"], line, state["stage_idx"])
+                            _done = ms.track_stage(_cur)
+                            if _done:
+                                self._send_stage_email(block, _done, _cur)
+                        except Exception:
+                            pass
                     if self.args.verbose:
                         self.ui.debug(f"{block}| {line}")
                 proc.stdout.close()
@@ -3763,6 +3775,7 @@ class JANUSAutonomousAgent:
                 self.ui.info(f"{block}: resume — {n}")
             summary = self.manifest.apply_resume_plan(plan, config_path=cfg)
             if plan.full_rebuild:
+                self._resume_note(block, plan)
                 # nothing reused — make must redo from synthesis; no -o flags.
                 self._resume_old_files.pop(block, None)
                 self.ui.info(f"{block}: resume — full rebuild from synthesis "
@@ -3776,6 +3789,7 @@ class JANUSAutonomousAgent:
                 # anything downstream on their account. The mtime-touch above is
                 # kept as belt-and-suspenders but is NOT sufficient on its own.
                 self._resume_old_files[block] = list(plan.touch_paths)
+                self._resume_note(block, plan)
                 self.ui.info(
                     f"{block}: resume — reuse [{', '.join(plan.reuse) or 'none'}], "
                     f"rerun from {plan.rerun_from or 'finish'} "
@@ -4420,7 +4434,25 @@ class JANUSAutonomousAgent:
             # 5_route_drc.rpt, skew, clock/fmax, triage) is rebuilt from the
             # reports by utils/report_bundle.py with the dashboard's parsers;
             # qor.json lands in the reports dir and inside the bundle.
+            sr = None
+            try:   # §175: merged stage-table email (never fatal)
+                logs_dir = _leafdir("logs", self._logs_dir(block))
+                sr = _sr.build_report(
+                    block, "final" if res.status == "DONE" else "failed",
+                    logs_dir=logs_dir, reports_dir=reports_dir,
+                    results_dir=_leafdir("results", self._results_dir(block)),
+                    signoff_dir=signoff if os.path.isdir(signoff) else None,
+                    agent_log=res.log_path or self._block_log(block),
+                    reused=self._reused_keys(block),
+                    run_start=getattr(self, "_block_t0", {}).get(block),
+                    elapsed=self._block_elapsed(block),
+                    ctx=self._stage_ctx(block, reports_dir))
+                if res.status != "DONE" and sr.get("subject"):
+                    sr["subject"] = sr["subject"].replace(" FAILED", f" {res.status}", 1)
+            except Exception as e:
+                self._notify_log(f"{block}: stage report error (ignored): {e}")
             qor = self.notifier.notify(
+                stage_report=sr,
                 block=block,
                 status=res.status,
                 stage=stage,
@@ -4461,8 +4493,13 @@ class JANUSAutonomousAgent:
 
     def _send_milestones(self, block: str, events) -> None:
         """§157: send each milestone as a short summary-only email on a daemon
-        thread so SMTP latency never stalls the ORFS log reader. Never raises."""
+        thread so SMTP latency never stalls the ORFS log reader. Never raises.
+        §175: legacy per-event (user_core debug) milestones are only LOGGED
+        unless JANUS_NOTIFY_DEBUG=1; KILL red flags are always emailed."""
         for key, subject, body in events or ():
+            if is_debug_event(key) and not _sr.notify_debug_enabled():
+                self._notify_log(f"milestone {block}/{key} (debug, not emailed): {subject}")
+                continue
             text = (f"{body}\n\nblock: {block}\nrun: {self.run_dir}\n"
                     f"log: {self._block_log(block)}\n"
                     f"time: {datetime.now().isoformat(timespec='seconds')}")
@@ -4481,6 +4518,85 @@ class JANUSAutonomousAgent:
                 except Exception:
                     pass
             threading.Thread(target=_go, name=f"ms-{block}-{key}", daemon=True).start()
+
+    # ----- §175 stage-table emails -----------------------------------------
+    def _resume_note(self, block: str, plan) -> None:
+        """Remember what --resume reused vs rebuilt (for the email)."""
+        try:
+            if not hasattr(self, "_resume_info"):
+                self._resume_info = {}
+            if plan.full_rebuild:
+                txt = f"full rebuild from synthesis ({plan.reason})"
+            else:
+                txt = (f"reuse [{', '.join(plan.reuse) or 'none'}], rerun from "
+                       f"{plan.rerun_from or 'finish'}. {plan.reason}")
+            self._resume_info[block] = {"text": txt[:300],
+                                        "reuse": list(plan.reuse or [])}
+        except Exception:
+            pass
+
+    def _reused_keys(self, block: str) -> List[str]:
+        info = getattr(self, "_resume_info", {}).get(block) or {}
+        out = []
+        for r in info.get("reuse") or []:
+            k = _sr.stage_key(str(r)) or next(
+                (sk for sk in _sr.STAGE_KEYS if sk.split("_", 1)[1] in str(r).lower()), None)
+            if k:
+                out.append(k)
+        return out
+
+    def _block_elapsed(self, block: str) -> Optional[float]:
+        t0 = getattr(self, "_block_t0", {}).get(block)
+        return (time.time() - t0) if t0 else None
+
+    def _stage_ctx(self, block: str, reports_dir: Optional[str] = None) -> dict:
+        """Run provenance for the email (cached git; never raises)."""
+        ctx: dict = {}
+        try:
+            ctx["run_id"] = os.path.basename(str(self.run_dir or ""))
+            if getattr(self, "_git_line", None) is None:
+                self._git_line = ""
+                if self.git.available():
+                    d = self.git.dirty_files()
+                    self._git_line = (f"{self.git.head_sha()} ({self.git.current_branch()}) "
+                                      + ("clean" if not d else f"DIRTY {len(d)} file(s)"))
+            ctx["git"] = self._git_line
+            import socket
+            ctx["host"] = socket.gethostname()
+            ctx["cores"] = getattr(self.args, "num_cores", None)
+            ctx["resume"] = (getattr(self, "_resume_info", {}).get(block) or {}).get("text", "")
+            ctx["prev_run"] = _sr.prev_done_summary(reports_dir or self._reports_dir(block))
+            ctx["cmd"] = " ".join(sys.argv)[:400]
+        except Exception:
+            pass
+        return ctx
+
+    def _send_stage_email(self, block: str, done_key: str, current: Optional[str]) -> None:
+        """Build + send the stage-table email on a daemon thread (the log
+        reader never waits on parsing or SMTP). Never raises."""
+        try:
+            if getattr(self, "_ms_notifier", None) is None:
+                import copy
+                self._ms_notifier = copy.copy(self.notifier)
+            mn = self._ms_notifier
+            dirs = (self._logs_dir(block), self._reports_dir(block), self._results_dir(block))
+            reused = self._reused_keys(block)
+            t0 = getattr(self, "_block_t0", {}).get(block)
+            ctx = self._stage_ctx(block, dirs[1])
+
+            def _go():
+                try:
+                    r = _sr.build_report(block, "stage", stage=done_key, logs_dir=dirs[0],
+                                         reports_dir=dirs[1], results_dir=dirs[2],
+                                         current=current, reused=reused, run_start=t0,
+                                         elapsed=(time.time() - t0) if t0 else None, ctx=ctx)
+                    self._notify_log(f"stage email {block}/{done_key}: {r['subject']}")
+                    mn.send_email(r["subject"], r["text"], [], html=r["html"])
+                except Exception as e:
+                    self._notify_log(f"stage email {block}/{done_key} error: {e}")
+            threading.Thread(target=_go, name=f"stage-{block}-{done_key}", daemon=True).start()
+        except Exception as e:
+            self._notify_log(f"stage email {block}/{done_key} error: {e}")
 
     def _notify_log(self, msg: str) -> None:
         """§136: every notification line -> <run_dir>/notify.log (+ debug UI).
@@ -5084,6 +5200,11 @@ class JANUSAutonomousAgent:
             if not getattr(self, "notifier", None) or not self.notifier.email_configured:
                 return
             rows = self._run_table()
+            if len(rows) <= 1 and not _sr.notify_debug_enabled():
+                # §175: single-block run -> the block email already carries
+                # the table; a second "run complete" mail is a duplicate.
+                self._notify_log("run summary email skipped (single block)")
+                return
             ok = sum(1 for r in rows if r["status"] == "DONE")
             self.notifier.send_summary(
                 f"JANUS run complete: {ok}/{len(rows)} DONE ({os.path.basename(self.run_dir)})",
