@@ -46,7 +46,7 @@ def test_hook_structure():
     assert "janus_ofsbuf* delaybuf_*" in t
     # gated: off when unset/0, armed flag in the wrapper condition
     assert 'set janus_cts_mofs [expr {[janus_cts_env JANUS_CTS_MACRO_OFFSET 0] ni {0 ""}}]' in t
-    assert "$janus_cts_diag || $janus_cts_mofs)" in t
+    assert "$janus_cts_diag || $janus_cts_mofs" in t
     # trim runs BEFORE the IO latency retarget (IO reference must follow the moved regs)
     w = t[t.index("proc clock_tree_synthesis"):]
     assert w.index("janus_cts_macro_offset") < w.index("janus_cts_io_latency_track")
@@ -55,10 +55,11 @@ def test_hook_structure():
 def test_probe_fix171_mode():
     tcl = _read(os.path.join(SCRIPTS, "ud_cts_probe.tcl"))
     sh = _read(os.path.join(SCRIPTS, "ud_cts_probe.sh"))
-    assert 'if { $mode eq "fix171" }' in tcl
+    assert 'if { $mode in {fix171 refpin} }' in tcl
     assert "hooks janus_cts_balance.tcl" in tcl and "PROBE_FIX171_TARGET" in tcl
-    # probe stays read-only: hook DIAG/IO_LAT disabled inside the probe
-    assert "JANUS_CTS_IO_LATENCY_TRACK JANUS_CTS_DIAG" in tcl
+    # probe stays read-only: hook DIAG disabled inside the probe (§172: IO_LAT
+    # now runs through the real hook for PD parity)
+    assert "foreach k {JANUS_CTS_DIAG JANUS_CTS_NO_INSERTION_DELAY JANUS_CTS_ICG_UNPAD}" in tcl
     assert "write_db" not in tcl
     assert "fix171" in sh and "JANUS_CTS_MACRO_OFS: (before|after)" in sh
     # default modes unchanged
