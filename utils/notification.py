@@ -64,6 +64,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import sys
 import smtplib
 import ssl
@@ -678,6 +679,45 @@ class NotificationManager:
                      f"failed: {e}")
             return None
 
+    def drive_note(self, tarball: Optional[str], block: str = "",
+                   drive_subfolder: Optional[str] = None) -> str:
+        """§175: one honest Drive status block (never silently omitted)."""
+        if not self.gdrive_enabled:
+            return ("Google Drive: off (no --gdrive-upload)"
+                    + (f"; bundle on EC2 disk: {tarball}" if tarball else ""))
+        dest = f"{block}/{drive_subfolder}" if drive_subfolder else block
+        if self.last_drive_links:
+            return ("Google Drive (" + self.gdrive_target_desc(dest) + "):\n  "
+                    + "\n  ".join(self.last_drive_links))
+        if not tarball:
+            return "Google Drive: NOT uploaded (no bundle was built)"
+        return (f"Google Drive upload: {self.last_drive_outcome or 'not attempted'}"
+                f"\nBundle on EC2 disk: {tarball}")
+
+    def _merge_stage_report(self, sr: dict, body: str, tarball: Optional[str],
+                            summary_only: bool, run_table: Optional[List[dict]],
+                            drive_subfolder: Optional[str], block: str):
+        """§175: (text, html) of the merged email. Drive block right under the
+        subject line; legacy bundle body kept below as 'detail'."""
+        import html as _h
+        note = self.drive_note(tarball, block, drive_subfolder)
+        st = str(sr.get("text") or "")
+        head, _, rest = st.partition("\n")
+        text = (head + "\n\n" + note + "\n" + rest.rstrip() + "\n\n" + "=" * 72
+                + "\nDETAIL (report bundle)\n" + "=" * 72 + "\n" + body)
+        h = str(sr.get("html") or "")
+        nh = ('<p style="background:#eef;padding:4px">'
+              + "<br>".join(re.sub(r"(https?://[^\s<]+)", r'<a href="\1">\1</a>',
+                                   _h.escape(x)) for x in note.splitlines()) + "</p>")
+        i = h.find("</p>")
+        h = (h[:i + 4] + nh + h[i + 4:]) if i >= 0 else nh + h
+        if run_table:
+            h += render_run_table_html(run_table)
+        h += ('<details><summary>Report-bundle detail</summary>'
+              '<pre style="font-size:11px;white-space:pre-wrap">' + _h.escape(body)
+              + "</pre></details>")
+        return text, h
+
     def send_summary(self, subject: str, rows: List[dict],
                      run_dir: Optional[str] = None) -> bool:
         """§145: run-end email with just the all-blocks table."""
@@ -708,6 +748,7 @@ class NotificationManager:
         bundle_dir: Optional[str] = None,
         run_table: Optional[List[dict]] = None,
         drive_subfolder: Optional[str] = None,
+        stage_report: Optional[dict] = None,
     ) -> Optional[dict]:
         """Build the per-block bundle, email it, and (optionally) upload to Drive.
 
@@ -722,6 +763,12 @@ class NotificationManager:
         is also written to *qor_out_dir* (the block's ORFS reports dir) for
         the adaptive flow. Falls back to the legacy tarball if report_bundle
         cannot be imported. Returns the qor dict (or None).
+
+        §175: *stage_report* ({subject, text, html} from utils/stage_report.py)
+        makes this ONE merged email: stage table + QoR + red flags (+ first
+        errors and the failing-log tail on failure) + Drive links/status at
+        the top, then the bundle QoR detail. Its subject replaces the legacy
+        one.
         """
         if not self.enabled:
             return None
@@ -773,6 +820,8 @@ class NotificationManager:
                 if hs is not None:
                     subject += f" hold WS {hs:.2f} ps"
 
+            if stage_report and stage_report.get("subject"):
+                subject = str(stage_report["subject"])
             if not body:
                 lines = [f"Block   : {block}", f"Status  : {status}"]
                 if stage:
@@ -795,7 +844,9 @@ class NotificationManager:
             body = body + ("\n\n" + "\n".join(extra) if extra else "")
             # §145: every email carries the run-wide table (latest state of
             # every block; not-yet-run ones PENDING) at the top.
-            table_txt = render_run_table_text(run_table or [])
+            multi = len(run_table or []) > 1
+            table_txt = (render_run_table_text(run_table or [])
+                         if (multi or not stage_report) else "")
             if table_txt:
                 body = ("ALL BLOCKS (latest)\n" + table_txt + "\n\n"
                         + "=" * 72 + f"\nTHIS BLOCK: {block}\n" + "=" * 72
@@ -850,14 +901,19 @@ class NotificationManager:
                 try:
                     sp = os.path.join(bdir, "SUMMARY.txt")
                     with open(sp, "w") as fh:
-                        fh.write(f"{subject}\n\n{body}\n")
+                        fh.write(f"{subject}\n\n"
+                                 + (str(stage_report.get("text") or "") + "\n"
+                                    if stage_report else "")
+                                 + f"{body}\n")
                     up.append(sp)
                 except OSError:
                     pass
                 self.upload_to_drive(up, block, **({"subfolder": drive_subfolder}
                                                    if drive_subfolder else {}))
                 dest = f"{block}/{drive_subfolder}" if drive_subfolder else block
-                if self.last_drive_links:
+                if stage_report:
+                    pass   # §175: Drive block goes to the top (below)
+                elif self.last_drive_links:
                     body += ("\n\nBundle on Google Drive ("
                              f"{self.gdrive_target_desc(dest)}):\n  "
                              + "\n  ".join(self.last_drive_links))
@@ -865,9 +921,13 @@ class NotificationManager:
                     body += (f"\n\nGoogle Drive upload: {self.last_drive_outcome}"
                              f"\nBundle on EC2 disk: {tarball}")
 
-            self.last_subject, self.last_body = subject, body
             html = None
-            if run_table:
+            if stage_report:
+                body, html = self._merge_stage_report(
+                    stage_report, body, tarball, summary_only,
+                    run_table if multi else None, drive_subfolder, block)
+            self.last_subject, self.last_body = subject, body
+            if not html and run_table:
                 import html as _h
                 html = (render_run_table_html(run_table)
                         + f"<hr><p><b>This block: {_h.escape(block)}</b></p>"
