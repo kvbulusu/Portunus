@@ -129,7 +129,7 @@ def test_cts_hook_wrap_logic():
     assert "proc janus_cts_io_latency_track" in txt
     assert "set_clock_latency -source $med $vclk" in txt
     # both knobs share one wrapper; each step independently gated + caught
-    assert "($janus_cts_unpad || $janus_cts_iolat || $janus_cts_noins)" in txt  # §169
+    assert "($janus_cts_unpad || $janus_cts_iolat || $janus_cts_noins || $janus_cts_diag)" in txt  # §169/§170
     assert "catch {janus_cts_io_latency_track}" in txt and "catch {janus_cts_icg_unpad}" in txt
 
 
