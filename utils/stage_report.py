@@ -38,10 +38,13 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 DASH = "—"
 DEFAULT_TAIL_LINES = 50
 
-# Red-flag thresholds (user rule: pre-repair hold < -300 ps or > 5000 hold
-# buffers => signal to KILL the run).
-HOLD_BUF_KILL = 5000
-HOLD_PRE_KILL_PS = -300.0
+# Red-flag thresholds. §177 (user rule revised 2026-10-30: "fewer buffers is
+# better, but hold must close"): KILL only if hold buffers > 10000, or hold is
+# still negative after repair. Pre-repair hold < -300 ps / > 5000 buffers is
+# now a WARN (RED), not a kill signal.
+HOLD_BUF_KILL = 10000
+HOLD_BUF_WARN = 5000
+HOLD_PRE_KILL_PS = -300.0  # kept for import compat; now a WARN threshold
 
 # key, label, log prefixes, metric prefixes, reports, result artifacts
 STAGES: List[Tuple[str, str, Tuple[str, ...], Tuple[str, ...], Tuple[str, ...], Tuple[str, ...]]] = [
@@ -587,9 +590,15 @@ def red_flags(rows: List[Dict[str, object]]) -> List[Tuple[str, str]]:
         hb = r.get("hold_bufs_peak") or r.get("hold_bufs")
         if isinstance(hb, (int, float)) and hb > HOLD_BUF_KILL:
             out.append(("KILL", f"{k}: {int(hb)} hold buffers > {HOLD_BUF_KILL} -> KILL RUN"))
+        elif isinstance(hb, (int, float)) and hb > HOLD_BUF_WARN:
+            out.append(("RED", f"{k}: {int(hb)} hold buffers > {HOLD_BUF_WARN}"))
         hp = r.get("hold_pre_wns")
         if isinstance(hp, (int, float)) and hp < HOLD_PRE_KILL_PS:
-            out.append(("KILL", f"{k}: pre-repair hold WNS {hp:.0f} ps < {HOLD_PRE_KILL_PS:.0f} ps -> KILL RUN"))
+            out.append(("RED", f"{k}: pre-repair hold WNS {hp:.0f} ps < {HOLD_PRE_KILL_PS:.0f} ps"))
+        hw = r.get("hold_ws")
+        if (k == "4_cts" and r.get("status") in ("DONE", "FAILED")
+                and isinstance(hw, (int, float)) and hw < 0):
+            out.append(("KILL", f"{k}: hold WNS {hw:.1f} ps after repair (not closed) -> KILL RUN"))
         if r.get("rsz0060"):
             out.append(("RED", f"{k}: RSZ-0060 buffer cap hit during repair_timing"))
         g = r.get("grt_overflow")

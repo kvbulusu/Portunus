@@ -27,7 +27,8 @@ emailed with JANUS_NOTIFY_DEBUG=1 (see is_debug_event). What IS emailed:
   * one stage-table email per completed ORFS stage (track_stage() reports the
     stage that just finished; the agent renders it with utils/stage_report.py)
   * KILL red flags, immediately, while repair_timing is still running:
-    pre-repair hold WNS < -300 ps, or > 5000 hold buffers.
+    > 10000 hold buffers (§177 revised rule; pre-repair hold < -300 ps is now
+    a debug-only warning -- hold closure is judged after repair).
 """
 
 from __future__ import annotations
@@ -48,11 +49,11 @@ _RE_LAYER = re.compile(r"^(M\d+|Total)\s+\d+\s+\d+\s+[\d.]+%\s+(\d+)\s*/\s*(\d+)
 _RE_DRT_VIOL = re.compile(r"DRT-0199\]\s+Number of violations = (\d+)")
 _RE_ERROR = re.compile(r"^\[ERROR [A-Z]+-\d+\]|^Error: ")
 
-# §175 user kill rule (kept in sync with stage_report.HOLD_*_KILL).
-HOLD_BUF_KILL = 5000
+# §175/§177 user kill rule (kept in sync with stage_report.HOLD_*).
+HOLD_BUF_KILL = 10000
 HOLD_PRE_KILL_PS = -300.0
 # Events emailed regardless of JANUS_NOTIFY_DEBUG; everything else is debug.
-ALWAYS_KEYS = frozenset({"kill_hold_pre", "kill_hold_bufs"})
+ALWAYS_KEYS = frozenset({"kill_hold_bufs"})
 
 
 def is_debug_event(key: str) -> bool:
@@ -229,7 +230,7 @@ class MilestoneTracker:
         except (ValueError, IndexError):
             wns = None
         if cells[0] == "0" and wns is not None and wns < HOLD_PRE_KILL_PS:
-            self._ev(out, "kill_hold_pre", "KILL RUN?",
+            self._ev(out, "warn_hold_pre", "hold pre-repair",
                      f"pre-repair hold WNS {wns:.1f} ps at '{st or '?'}' "
                      f"(< {HOLD_PRE_KILL_PS:.0f} ps)")
         for name in ("Buffers", "Inserted"):
