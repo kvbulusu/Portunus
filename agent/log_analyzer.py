@@ -75,6 +75,17 @@ _IGNORE_PATTERNS = [
     re.compile(r"Invalid syntax for -filter", re.I),
 ]
 
+# §180: lines the AGENT itself writes into the block log (NOT tool output) must
+# never be scanned for failure text. The make header echoes the full command,
+# including every `-o <file>` resume old-file — run 20261030_185523 was falsely
+# marked FAILED because `-o .../5_1_grt-failed.odb` matched r"\bfailed\b", which
+# skipped the whole DONE path (post-route opt, abstract, RCX signoff, golden).
+# The GIT PROVENANCE block carries a free-text commit subject (same risk).
+_RE_AGENT_HEADER = re.compile(r"^===== \S+ : .*=====\s*$")
+_RE_PROV_START = re.compile(r"^-{3,} GIT PROVENANCE -*\s*$")
+_RE_PROV_END = re.compile(r"^-{20,}\s*$")
+_RE_PROV_NOGIT = re.compile(r"^GIT PROVENANCE: ")
+
 # Metric extractors (best-effort; ORFS report formats vary by version).
 #
 # UNITS: for the ASAP7 PDK the standard-cell Liberty declares time_unit = 1ps,
@@ -371,7 +382,18 @@ class LogAnalyzer:
         lines = text.splitlines()
         rep = LogReport(block=block, stage=stage)
 
+        in_prov = False
         for i, line in enumerate(lines):
+            # §180: skip agent-written headers / provenance (not tool output).
+            if in_prov:
+                if _RE_PROV_END.match(line):
+                    in_prov = False
+                continue
+            if _RE_PROV_START.match(line):
+                in_prov = True
+                continue
+            if _RE_AGENT_HEADER.match(line) or _RE_PROV_NOGIT.match(line):
+                continue
             if any(p.search(line) for p in _IGNORE_PATTERNS):
                 continue
 
