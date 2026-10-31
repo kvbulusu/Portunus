@@ -47,3 +47,15 @@ def test_hook_braces_balance():
     r = subprocess.run(["tclsh"], input=f'set f [open "{HOOK}"]; puts [info complete [read $f]]',
                        capture_output=True, text=True)
     assert r.stdout.strip() == "1"
+
+
+def test_179_no_sta_port_name_and_failsafe():
+    """Run 20261030_183916: `[[$p port] name]` threw 'Invalid method' in planning,
+    which dropped ALL detours (ovfl back to 27438). Use the ODB iterm and make
+    clock-side failures drop only the clock entries."""
+    t = HOOK.read_text()
+    assert "[$p port] name" not in t
+    assert "sta::sta_to_db_pin $p" in t
+    assert "signal detours continue" in t
+    assert "catch {set clk_before [macro_clk_arr]}" in t
+    assert "catch {restore_clk $blk $clk_before $dbu}" in t
