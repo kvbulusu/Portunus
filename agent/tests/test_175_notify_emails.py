@@ -169,7 +169,7 @@ def test_drive_failure_is_stated(tmp_path):
 def test_kill_red_flags():
     rows = [{"key": "4_cts", "status": "DONE", "hold_bufs": 20010, "hold_pre_wns": -628.3}]
     f = sr.red_flags(rows)
-    assert [lv for lv, _ in f] == ["KILL", "KILL"]
+    assert [lv for lv, _ in f] == ["KILL", "RED"]   # §177: pre-repair hold is WARN only
     s = sr.subject_line("user_domain", "stage", "4_cts", rows, f)
     assert s.endswith("!! KILL RUN?")
     rows[0]["status"] = "PENDING"           # stale data from an old run: ignored
@@ -180,11 +180,13 @@ def test_kill_red_flags():
     for ln in ["[INFO RSZ-0046] Found 1116 endpoints with hold violations.",
                "Iteration | Resized | Buffers | Cloned Gates |   Area   |   WNS   |   TNS   | Endpoint",
                "        0 |       0 |       0 |            0 |    +0.0% | -628.3 | -9.0 | x/D",
-               "       10 |       0 |    6001 |            0 |    +1.0% | -400.0 | -8.0 | x/D"]:
+               "       10 |       0 |    6001 |            0 |    +1.0% | -400.0 | -8.0 | x/D",
+               "       20 |       0 |   10001 |            0 |    +2.0% | -300.0 | -7.0 | x/D"]:
         ev += t.feed(ln, "4_cts")
     keys = [e[0] for e in ev if e[0] != "start"]
-    assert keys == ["kill_hold_pre", "kill_hold_bufs"], ev
-    assert not any(is_debug_event(k) for k in keys)
+    assert "warn_hold_pre" in keys and is_debug_event("warn_hold_pre"), ev
+    kills = [k for k in keys if not is_debug_event(k)]
+    assert kills == ["kill_hold_bufs"], ev   # §177: only > 10000 buffers fires live
 
 
 def test_debug_events_gated_off_by_default(monkeypatch):
