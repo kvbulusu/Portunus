@@ -604,15 +604,33 @@ def triage_failure(texts: List[Tuple[str, str]], failed_stage: str) -> Dict[str,
                              f"known signature; read the quoted line and the log tail.",
                 "knob": "", "first_error": first, "code": code, "source": name,
                 "last_errors": last}
+    clean_exit = None
     for name, text in texts:
         tail = text[-4000:]
-        if re.search(r"Peak memory", tail) and not re.search(r"\bExit\b|finished", tail[-400:]):
+        end = tail[-400:]
+        # §180: ORFS wraps every step in GNU time, which prints the
+        # "Elapsed time ... Peak memory" banner on a NORMAL exit too; on a
+        # signal/non-zero exit it prefixes "Command terminated by signal N" /
+        # "Command exited with non-zero status N". A bare clean banner is a
+        # successful step, not an OOM (run 20261030_185523 6_1_merge.log).
+        if (re.search(r"Elapsed time:.*Peak memory", end)
+                and not re.search(r"Command (terminated by signal|exited with non-zero)", end)):
+            clean_exit = clean_exit or name
+            continue
+        if re.search(r"Peak memory", tail) and not re.search(r"\bExit\b|finished", end):
             return {"category": "oom-killed",
                     "diagnosis": f"{name} ends on OpenROAD's 'Peak memory' banner with no "
                                  "ERROR line: the process was most likely killed by the OS "
                                  "(OOM-silent; make reports Error 247).",
                     "knob": TRIAGE_RULES[1][3], "first_error": None, "code": None,
                     "source": name, "last_errors": tail.strip().splitlines()[-5:]}
+    if clean_exit:
+        return {"category": "no-tool-failure",
+                "diagnosis": f"No tool error found and {clean_exit} ends on a clean GNU-time "
+                             "banner (normal exit). The FAILED status likely came from the "
+                             "agent's own classification, not ORFS — check the agent log.",
+                "knob": "", "first_error": None, "code": None, "source": clean_exit,
+                "last_errors": []}
     return {"category": "unknown", "diagnosis": "No error line found in the bundled logs.",
             "knob": "", "first_error": None, "code": None, "source": None,
             "last_errors": []}

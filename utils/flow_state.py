@@ -205,6 +205,10 @@ def _stage_sibling_artifacts(results_dir: str, stage_base: str) -> List[str]:
     for name in os.listdir(results_dir):
         if not name.startswith(prefix):
             continue
+        # §180: ORFS failure dumps (e.g. 5_1_grt-failed.odb) are not stage
+        # products; never touch them or pass them to make as `-o` old-files.
+        if "-failed" in name:
+            continue
         toks = name.split("_")
         if toks and toks[0].isdigit() and int(toks[0]) == major:
             out.append(os.path.abspath(os.path.join(results_dir, name)))
