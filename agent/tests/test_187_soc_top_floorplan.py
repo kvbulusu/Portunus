@@ -1,8 +1,8 @@
 """§187: janus_soc_top explicit dataflow floorplan + SDC audit.
 
 The macro-placement script is executed in plain tclsh against a mocked OpenDB
-(real child sizes: user_domain 1280.285^2, agent_domain 640^2, security
-~397.3^2, noc ~91.7^2, ampo unknown -> swept) so the geometry, halo and
+(real on-box LEF sizes: user_domain 1280.29^2, agent_domain 640^2, security
+397.784^2, noc 88.119^2, ampo 40.323^2; ampo also swept) so the geometry, halo and
 fail-fast logic are exercised without OpenROAD.
 """
 import os
@@ -133,10 +133,10 @@ proc theblock {m args} {
 }
 namespace eval ord { proc get_db_block {} { return theblock } }
 set ::INSTS [list \
-  [mkinst u_user  [mkmaster user_cluster_top 1280.285 1280.285]] \
+  [mkinst u_user  [mkmaster user_cluster_top 1280.29 1280.29]] \
   [mkinst u_agent [mkmaster agent_cluster_top 640 640]] \
   [mkinst u_kv_secure_subsystem [mkmaster janus_kv_secure_subsystem __SEC__ __SEC__]] \
-  [mkinst u_noc   [mkmaster axi4_crossbar 91.692 91.692]] \
+  [mkinst u_noc   [mkmaster axi4_crossbar 88.119 88.119]] \
   [mkinst u_periph/u_ampo [mkmaster ampo_top __AMPO__ __AMPO__]]]
 set ::env(MACRO_PLACE_HALO) "20 20"
 set ::CORE {__CORE__}
@@ -145,7 +145,7 @@ foreach p $::placed { puts "PLACED $p" }
 """
 
 
-def _run_place(core_um, sec=397.3, ampo=120.0):
+def _run_place(core_um, sec=397.784, ampo=40.323):
     core = " ".join(str(int(round(v * 1000))) for v in core_um)
     tcl = (_MOCK.replace("__SEC__", str(sec)).replace("__AMPO__", str(ampo))
            .replace("__CORE__", core).replace("__SCRIPT__", MACROS))
@@ -154,8 +154,8 @@ def _run_place(core_um, sec=397.3, ampo=120.0):
     return r.stdout
 
 
-SIZES = {"u_user": 1280.285, "u_agent": 640.0, "u_kv_secure_subsystem": 397.3,
-         "u_noc": 91.692, "u_periph/u_ampo": 120.0}
+SIZES = {"u_user": 1280.29, "u_agent": 640.0, "u_kv_secure_subsystem": 397.784,
+         "u_noc": 88.119, "u_periph/u_ampo": 40.323}
 
 
 def _parse(out):
@@ -168,7 +168,7 @@ def _parse(out):
 
 
 @pytest.mark.skipif(not shutil.which("tclsh"), reason="no tclsh")
-@pytest.mark.parametrize("ampo", [40.0, 120.0, 250.0])
+@pytest.mark.parametrize("ampo", [40.323, 120.0, 250.0])
 def test_macros_fit_with_halo(ampo):
     core = [float(v) for v in _mk_val("CORE_AREA").split()]
     out = _run_place(core, ampo=ampo)
