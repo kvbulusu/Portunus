@@ -245,3 +245,15 @@ def test_agent_strips_child_obs_for_soc_top():
     assert m, "janus_soc_top missing from children map"
     kids = re.findall(r'"(\w+)"', m.group(1))
     assert sorted(kids) == sorted(["security", "noc", "ampo", "agent_domain", "user_domain"])
+
+
+def test_sdc_skips_dead_clock_roots_188():
+    """§188: a clock root with no loads is removed by eliminate_dead_logic after
+    read_sdc; write_sdc then emits a freed Pin* (garbage name) -> segfault in
+    set_sense at 2_1_floorplan. janus_clk_root must reject load-less nets."""
+    s = _active(_read(SDC))
+    i = s.index("proc janus_clk_root")
+    body = s[i:s.index("\n}\n", i)]
+    assert 'direction == input' in body and "continue" in body
+    # set_sense is only applied to roots that were actually created
+    assert "if {$_have_periph} {\n  set_sense" in s
