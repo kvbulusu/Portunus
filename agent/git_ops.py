@@ -126,6 +126,27 @@ class GitOps:
         return rc_n == 0 and rc_e == 0
 
     # ---- commit -------------------------------------------------------------
+    # §184: golden snapshots are large (user_domain: 134 files incl. .lib/.lef
+    # and multi-MB reports, on an index already holding 6.5M golden lines).
+    # The 60 s default killed `git add` mid-write (TimeoutExpired -> "git exec
+    # failed: Command [...]") and left .git/index.lock behind, which then broke
+    # the operator's next `git pull`. Staging/committing gets its own budget.
+    _STAGE_TIMEOUT_S = int(os.environ.get("JANUS_GIT_STAGE_TIMEOUT_S", "1800") or 1800)
+
+    def _git_stage(self, *args: str) -> Tuple[int, str]:
+        """index-writing git command; on timeout/kill remove the index.lock
+        that OUR killed process left (only if it appeared after we started)."""
+        lock = os.path.join(self.repo_root, ".git", "index.lock")
+        pre = os.path.exists(lock)
+        rc, out = self._git(*args, timeout=self._STAGE_TIMEOUT_S)
+        if rc == 127 and not pre and os.path.exists(lock):
+            try:
+                os.remove(lock)
+                out += " (removed stale .git/index.lock left by the killed git)"
+            except OSError:
+                pass
+        return rc, out
+
     def commit_paths(self, paths: List[str], message: str) -> Tuple[bool, str]:
         """Stage exactly `paths` and commit them. Returns (ok, human_message).
 
@@ -149,9 +170,9 @@ class GitOps:
         if not inside:
             return False, "no in-repo files to commit"
 
-        rc, out = self._git("add", "--", *inside)
+        rc, out = self._git_stage("add", "--", *inside)
         if rc != 0:
-            return False, f"git add failed: {out.strip()[:200]}"
+            return False, f"git add failed: {out.strip()[-300:]}"
 
         # nothing staged (identical content)? then there is nothing to commit.
         rc_d, _ = self._git("diff", "--cached", "--quiet")
@@ -164,9 +185,9 @@ class GitOps:
                            "Run: git config user.name '...' && git config "
                            "user.email '...'  (fix is staged on disk).")
 
-        rc, out = self._git("commit", "-m", message)
+        rc, out = self._git_stage("commit", "-m", message)
         if rc != 0:
-            return False, f"git commit failed: {out.strip()[:200]}"
+            return False, f"git commit failed: {out.strip()[-300:]}"
         # short hash for the log
         _, sha = self._git("rev-parse", "--short", "HEAD")
         return True, f"committed {sha.strip()} on {self.current_branch()}"
