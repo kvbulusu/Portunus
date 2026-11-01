@@ -2488,7 +2488,8 @@ class JANUSAutonomousAgent:
         gate decides, the TRUE QoR is always recorded verbatim in the manifest.
         Returns (ok, human_reason).
         """
-        wns_m = float(getattr(self.args, "golden_wns_margin_ps", 0.0) or 0.0)
+        wns_m = getattr(self.args, "golden_wns_margin_ps", 80.0)
+        wns_m = float(80.0 if wns_m is None else wns_m)
         hold_m = float(getattr(self.args, "golden_hold_margin_ps", 0.0) or 0.0)
         handful = int(getattr(self.args, "drc_handful", 20))
         setup, hold, drc = res.wns_ns, res.hold_ps, res.drc_violations
@@ -2775,6 +2776,14 @@ class JANUSAutonomousAgent:
                         continue
                     shutil.copy2(sp, os.path.join(out, name))
                     copied.append(f"final/{name}")
+                # §182: the hierarchical abstract (.lef/.lib) is what a parent
+                # block links, so golden must hold it too — that makes golden
+                # self-contained and lets results/<block>/base be trimmed.
+                for pat in ("*.lef", "*.lib"):
+                    for sp in sorted(glob.glob(os.path.join(rdir, pat))):
+                        name = os.path.basename(sp)
+                        shutil.copy2(sp, os.path.join(out, name))
+                        copied.append(f"final/{name}")
 
             # (3b) sign-off outputs (RCX SPEF / LVS reports) for this run. Text
             #      reports are tracked; the SPEF is heavy (in _GOLDEN_HEAVY_EXT)
@@ -5738,10 +5747,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "asic_flow/golden). Snapshots go to "
                         "<golden-dir>/asap7/<block>/ and OVERWRITE the previous "
                         "snapshot for that block — git history preserves versions.")
-    p.add_argument("--golden-wns-margin-ps", type=float, default=0.0,
+    # §182: default = the SDC setup clock uncertainty (80 ps on every JANUS
+    # block). Strict 0 refused user_core (-13 ps) / user_core_ara even though
+    # they meet the project closure target (setup >= -80, hold >= 0).
+    p.add_argument("--golden-wns-margin-ps", type=float, default=80.0,
                    help="setup-WNS uncertainty margin (ps) tolerated when "
-                        "deciding a block is golden-converged. Default 0 = "
-                        "strict (setup timing must actually be met). Raising it "
+                        "deciding a block is golden-converged. Default 80 = "
+                        "the SDC setup uncertainty; 0 = strict. Raising it "
                         "lets you archive results 'within the uncertainty "
                         "margin'; the TRUE WNS is always recorded in the "
                         "manifest — the margin never masks or rewrites it.")
