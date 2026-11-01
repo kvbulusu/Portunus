@@ -63,7 +63,7 @@ def test_mk_knobs():
 
 def test_other_blocks_unaffected():
     for name in os.listdir(CFG):
-        if not name.endswith(".mk") or name == "user_domain.mk":
+        if not name.endswith(".mk") or name in ("user_domain.mk", "janus_soc_top.mk"):  # §187 uses the shadow knobs
             continue
         txt = _read(CFG, name)
         for k in ("JANUS_IO_SHADOW_EXCLUDE_EDGES", "JANUS_IO_SHADOW_SPAN_EDGES", "JANUS_CTS_IO_LATENCY_TRACK"):

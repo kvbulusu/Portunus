@@ -3180,6 +3180,11 @@ class JANUSAutonomousAgent:
             # (VDD/VSS on M6, M7-M9 signal OBS) with the same PDN/OBS recipe
             # as user_core (user_core_grid_strategy + restore_macro_route_obs).
             "user_domain": (("user_core",), True),
+            # §187: janus_soc_top consumes the 5 hardened child abstracts and
+            # now uses the same PDN/OBS recipe (user_core_grid_strategy +
+            # restore_macro_route_obs) so its M5 straps reach their M6 pins.
+            "janus_soc_top": (("security", "noc", "ampo", "agent_domain",
+                               "user_domain"), True),
         }.get(block)
         if not children:
             return

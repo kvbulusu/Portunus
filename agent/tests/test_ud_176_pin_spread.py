@@ -50,8 +50,8 @@ def test_capacity_fits():
 
 def test_other_blocks_pin_settings_unchanged():
     for name in sorted(os.listdir(CFG)):
-        if not name.endswith(".mk") or name == "user_domain.mk":
-            continue
+        if not name.endswith(".mk") or name in ("user_domain.mk", "janus_soc_top.mk"):
+            continue  # §187: janus_soc_top sets its own pin spread
         txt = _read(CFG, name)
         assert _val(txt, "JANUS_IO_SHADOW_PIN_PITCH_UM") is None, name
         ppa = _val(txt, "PLACE_PINS_ARGS")
