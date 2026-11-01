@@ -62,6 +62,8 @@ class ECOResult:
     raw: str = ""
     pre_setup: Optional[float] = None      # §149 JANUS_PR_PRE (same session, before)
     pre_hold: Optional[float] = None
+    slew_viol: Optional[int] = None        # §183 drv mode: max-slew count after (RCX)
+    pre_slew_viol: Optional[int] = None    # §183 drv mode: max-slew count before
 
 
 _RE_PRE = re.compile(r"^JANUS_PR_PRE\s+(setup|hold)\s+wns\s+(-?\d+(?:\.\d+)?)", re.M)
@@ -73,6 +75,19 @@ def parse_eco_pre(out: str) -> Tuple[Optional[float], Optional[float]]:
     return d.get("setup"), d.get("hold")
 
 
+_RE_SLEW = re.compile(r"^JANUS_PR\s+drv\s+slew\s+(-?\d+)", re.M)
+_RE_PRE_SLEW = re.compile(r"^JANUS_PR_PRE\s+drv\s+slew\s+(-?\d+)", re.M)
+
+
+def _slew_count(rx: "re.Pattern[str]", out: str) -> Optional[int]:
+    """Last reported slew count; -1 (Tcl counter unavailable) -> None."""
+    vals = rx.findall(out)
+    if not vals:
+        return None
+    v = int(vals[-1])
+    return v if v >= 0 else None
+
+
 _RE_PR = re.compile(r"^JANUS_PR\s+(setup|hold)\s+(wns|tns)\s+(-?\d+(?:\.\d+)?)", re.M)
 _RE_DRC = re.compile(r"^JANUS_PR\s+drc\s+(\d+)", re.M)
 _RE_WROTE = re.compile(r"^JANUS_PR\s+wrote\s+(\S+)", re.M)
@@ -82,6 +97,7 @@ _RE_ERR = re.compile(r"^JANUS_PR_ERROR\s+(.*)$", re.M)
 def parse_eco(out: str, mode: str = "timing", out_odb: str = "") -> ECOResult:
     """Parse post_route_opt.tcl output. Never raises."""
     r = ECOResult(mode=mode, out_odb=out_odb, raw=out)
+    r.pre_slew_viol = _slew_count(_RE_PRE_SLEW, out)
     m = _RE_ERR.search(out)
     if m:
         r.error = m.group(1).strip()
@@ -91,6 +107,7 @@ def parse_eco(out: str, mode: str = "timing", out_odb: str = "") -> ECOResult:
     md = _RE_DRC.search(out)
     if md:
         r.drc = int(md.group(1))
+    r.slew_viol = _slew_count(_RE_SLEW, out)
     mw = _RE_WROTE.search(out)
     r.wrote = bool(mw)
     if mw and not out_odb:
@@ -157,6 +174,45 @@ def decide_timing(before_setup: Optional[float], before_hold: Optional[float],
     return ("discard",
             "ECO gave no meaningful timing improvement; reverting to avoid "
             "unnecessary post-route churn")
+
+
+def decide_drv(before_setup: Optional[float], before_hold: Optional[float],
+               before_drc: Optional[int], after: ECOResult,
+               setup_tol_ps: float = 5.0, noise_ps: float = 1.0
+               ) -> Tuple[str, str]:
+    """§183 adopt/discard a post-route max-slew (drv) ECO.
+
+    The goal is fewer max-slew violations on an already-closed block, so the
+    timing guards are absolute: hold must stay >= 0 and not regress beyond
+    noise; setup may move by <= setup_tol_ps (repeaters on long port wires
+    usually help, but a small shift is acceptable) and must not go negative if
+    it was >= 0; DRC must not increase; the slew count must drop.
+    """
+    if not after.ok:
+        return ("discard", f"drv ECO produced no trustworthy data "
+                f"({after.error or 'no write/slack'}); keeping pre-ECO result")
+    a_s, a_h = after.setup_wns, after.hold_wns
+    if a_h is None or a_s is None:
+        return ("discard", "drv ECO: post-ECO setup/hold unknown; reverting")
+    if a_h < 0.0:
+        return ("discard", f"drv ECO: hold {a_h:+.3f} ps < 0; reverting")
+    if before_hold is not None and a_h < before_hold - noise_ps:
+        return ("discard", f"drv ECO: hold regressed {before_hold:+.3f} -> {a_h:+.3f} ps; reverting")
+    if before_setup is not None:
+        if a_s < before_setup - setup_tol_ps:
+            return ("discard", f"drv ECO: setup regressed {before_setup:+.3f} -> {a_s:+.3f} ps "
+                    f"(> {setup_tol_ps:g} ps tol); reverting")
+        if before_setup >= 0.0 and a_s < 0.0:
+            return ("discard", f"drv ECO: setup reopened {before_setup:+.3f} -> {a_s:+.3f} ps; reverting")
+    if before_drc is not None and (after.drc is None or after.drc > before_drc):
+        return ("discard", f"drv ECO: DRC {before_drc} -> {after.drc}; reverting")
+    pre, post = after.pre_slew_viol, after.slew_viol
+    if pre is None or post is None:
+        return ("discard", f"drv ECO: slew count unknown ({pre} -> {post}); reverting")
+    if post >= pre:
+        return ("discard", f"drv ECO: max-slew not reduced ({pre} -> {post}); reverting")
+    return ("adopt", f"max-slew {pre} -> {post}; setup {before_setup} -> {a_s:+.3f}, "
+            f"hold {before_hold} -> {a_h:+.3f} ps, DRC {before_drc} -> {after.drc}")
 
 
 def decide_drc(timing_closed: bool,

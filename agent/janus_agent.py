@@ -131,7 +131,7 @@ import stage_report as _sr                                              # noqa: 
 from timing_classifier import classify_routed_odb, render as tc_render   # noqa: E402
 from incremental_opt import (run_eco_pass, decide_timing, decide_drc,     # noqa: E402
                              adopt_odb, discard_odb, ECOResult,
-                             parse_eco, parse_eco_pre)
+                             parse_eco, parse_eco_pre, decide_drv)
 try:
     from dashboard import Dashboard, DashboardState  # noqa: E402
     _HAS_DASHBOARD = True
@@ -2056,6 +2056,13 @@ class JANUSAutonomousAgent:
         return cand if cand and os.path.isfile(cand) else "openroad"
 
     def _post_route_opt(self, block: str) -> None:
+        """Timing/DRC ECO stages, then the §183 opt-in max-slew stage."""
+        self._post_route_opt_timing(block)
+        if (getattr(self.args, "eco_drv", False)
+                and not getattr(self.args, "no_post_route_opt", False)):
+            self._eco_drv_pass(block)
+
+    def _post_route_opt_timing(self, block: str) -> None:
         """Adaptive post-route ECO: try to close residual timing (hold first —
         it is functionally critical), then optionally clean a handful of DRCs.
         DISCARDS any ECO that degrades timing; the canonical .odb is only
@@ -2218,6 +2225,9 @@ class JANUSAutonomousAgent:
                    f"JANUS_OUT_DEF={outs['def']}", f"JANUS_OUT_V={outs['v']}",
                    f"JANUS_PR_RPT={os.path.join(rpt_dir, tag + '.rpt')}",
                    f"JANUS_PR_DRC_RPT={os.path.join(rpt_dir, tag + '_drc.rpt')}"]
+        if mode == "drv":
+            targets += [f"JANUS_PR_DRV_MAX_WIRE_UM={self._eco_drv_max_wire_um(block)}",
+                        f"JANUS_PR_DRV_SCOPE={self._eco_drv_scope(block)}"]
         spef = in_spef or os.path.join(res_dir, "6_final.spef")
         if os.path.isfile(spef):
             targets.append(f"JANUS_SPEF={spef}")
@@ -2414,6 +2424,96 @@ class JANUSAutonomousAgent:
             return setup, hold                     # adopt failed; already logged
         self._eco_log(block, f"{mode} ECO DISCARDED — {why}")
         return setup, hold
+
+    # ----- §183: post-route max-slew (long output-port wire) ECO ------------
+    # user_domain 20261031 6_finish: timing closed (+67.27/+17.4 ps, DRC 0) but
+    # 95 max-slew pins, 77 on m_m2s_o[*] (worst 1594 ps vs 320); 196 of 762
+    # output ports have their BUFx16f driver >200 um from the pin (max 612 um).
+    # mode=drv buffers only output-port nets with a -max_wire_length cap inside
+    # an incremental GRT/DRT window on the existing 6_final.odb, then RCX.
+    def _eco_drv_max_wire_um(self, block: str) -> str:
+        v = self._janus_knob(block, "JANUS_ECO_DRV_MAX_WIRE_UM")
+        try:
+            return f"{float(v):g}" if v and float(v) > 0 else "160"
+        except ValueError:
+            return "160"
+
+    def _eco_drv_scope(self, block: str) -> str:
+        v = (self._janus_knob(block, "JANUS_ECO_DRV_SCOPE") or "").strip().lower()
+        return v if v in ("ports", "all") else "ports"
+
+    def _eco_drv_pass(self, block: str) -> bool:
+        """Run + judge one drv ECO. Adopts only when max-slew count drops and
+        setup/hold/DRC hold (decide_drv). Returns True when adopted."""
+        res = self.results[block]
+        res_dir = self._results_dir(block)
+        if not (self.flow_dir and res_dir
+                and os.path.isfile(os.path.join(res_dir, "6_final.odb"))):
+            self._eco_log(block, "drv ECO skipped — no ORFS results/6_final.odb")
+            return False
+        self._eco_log(block, f"drv ECO (max-slew) via ORFS make run: scope "
+                             f"{self._eco_drv_scope(block)}, max wire "
+                             f"{self._eco_drv_max_wire_um(block)} um, incremental reroute + RCX")
+        eco, outs = self._run_eco_orfs(block, "drv")
+        if getattr(self.args, "dry_run", False):
+            return False
+        b_setup = eco.pre_setup if eco.pre_setup is not None else res.wns_ns
+        b_hold = eco.pre_hold if eco.pre_hold is not None else res.hold_ps
+        b_drc = res.drc_violations or 0
+        verdict, why = decide_drv(b_setup, b_hold, b_drc, eco)
+        if verdict == "adopt" and self._adopt_eco_orfs(block, outs):
+            res.wns_ns, res.hold_ps = eco.setup_wns, eco.hold_wns
+            if eco.setup_tns is not None:
+                res.tns_ns = eco.setup_tns
+            if eco.drc is not None:
+                res.drc_violations = eco.drc
+            self._eco_record_adopted(block, "drv", eco)
+            res.note += f"  +eco(drv) slew {eco.pre_slew_viol}->{eco.slew_viol}"
+            self._eco_log(block, f"drv ECO ADOPTED — {why}; "
+                                 "6_final.{odb,spef,def,v,gds} replaced, *.preeco kept")
+            self.ui.good(f"{block}: post-route drv ECO ADOPTED — {why}")
+            return True
+        for p in outs.values():
+            discard_odb(p)
+        if verdict != "adopt":
+            self._eco_log(block, f"drv ECO DISCARDED — {why}")
+        return False
+
+    def _eco_drv_only(self) -> int:
+        """--eco-drv-only: §183 max-slew ECO on each --blocks block's EXISTING
+        routed result; if adopted, re-emit abstract, sign-off and golden.
+        No stamp check, no build (mirrors --signoff-only). Exit 0 = adopted
+        for all, 5 = discarded (pre-ECO result kept), 3 = no routed odb."""
+        blocks = list(self.args.blocks or [])
+        if not blocks:
+            self.ui.err("--eco-drv-only needs --blocks <block> (e.g. --blocks user_domain)")
+            return 2
+        os.makedirs(self.run_dir, exist_ok=True)
+        rc_all = 0
+        for b in blocks:
+            if b not in self.results:
+                self.results[b] = BlockResult(block=b)
+            res = self.results[b]
+            if not self._find_routed_odb(b):
+                self.ui.err(f"{b}: no routed .odb (block must have finished routing)")
+                rc_all = rc_all or 3
+                continue
+            self._classify_timing(b)
+            if self.args.dry_run:
+                self._eco_drv_pass(b)
+                continue
+            if not self._eco_drv_pass(b):
+                rc_all = rc_all or 5
+                continue
+            res.status = "DONE"
+            self._run_abstract(b)
+            try:
+                self.args.no_signoff = False
+                self._run_signoff(b)
+            except Exception as e:
+                self.ui.warn(f"{b}: sign-off after drv ECO failed: {e}")
+            self._archive_golden(b, res)
+        return rc_all
 
     @staticmethod
     def _eco_setup_gain_hold_lost(eco: ECOResult, b_setup: Optional[float],
@@ -4165,6 +4265,8 @@ class JANUSAutonomousAgent:
             return self._triage_slew()
         if getattr(self.args, "signoff_only", False):
             return self._signoff_only()
+        if getattr(self.args, "eco_drv_only", False):
+            return self._eco_drv_only()
         self._preflight()
         if self.dashboard is not None:
             try:
@@ -5471,7 +5573,7 @@ _SKIP_MAP = {
 
 # Read-only / exit-early modes: at most one per invocation.
 _EXCLUSIVE_MODES = ("status", "gc", "gc_dry_run", "resume_preview", "estimate",
-                    "signoff_only", "triage_slew")
+                    "signoff_only", "triage_slew", "eco_drv_only")
 _ADAPTIVE_MAX_PASSES_CAP = 5
 
 
@@ -5733,6 +5835,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-sram-regen", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--no-abstract", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--no-post-route-opt", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--eco-drv", action="store_true",
+                   help="§183: after the timing ECO, run a post-route max-slew ECO "
+                        "(repeaters on long output-port nets; knobs "
+                        "JANUS_ECO_DRV_MAX_WIRE_UM=160, JANUS_ECO_DRV_SCOPE=ports|all). "
+                        "Adopted only if slew count drops and setup/hold/DRC hold.")
+    p.add_argument("--eco-drv-only", action="store_true",
+                   help="§183: run ONLY the max-slew ECO on the EXISTING routed result "
+                        "of each --blocks block; if adopted, re-run abstract, sign-off "
+                        "and golden. Exit 0 adopted, 5 discarded, 3 no routed odb.")
     p.add_argument("--no-debug-dump", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--no-debug-images", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--drc-handful", type=int, default=20,
