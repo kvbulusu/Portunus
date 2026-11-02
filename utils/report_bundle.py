@@ -299,7 +299,7 @@ def parse_finish_extras(text: str) -> Dict[str, object]:
     not cover: clock min period, skew/latency, critical path delay/slack,
     power per corner, DRV violator tables (worst slack, top pins, buckets)."""
     out: Dict[str, object] = {"clock": None, "period_min": None, "fmax_mhz": None,
-                              "skew": {}, "critical_path": {}, "power": {},
+                              "clocks_min": {}, "skew": {}, "critical_path": {}, "power": {},
                               "drv": {}}
     sec = ""
     drv_kind = None
@@ -325,6 +325,8 @@ def parse_finish_extras(text: str) -> Dict[str, object]:
             continue
         if sec.startswith("report_clock_min_period"):
             mp = _RE_PMIN.match(line)
+            if mp:
+                out["clocks_min"].setdefault(mp.group(1), (float(mp.group(2)), float(mp.group(3))))
             if mp and out["period_min"] is None:
                 out["clock"], out["period_min"], out["fmax_mhz"] = (
                     mp.group(1), float(mp.group(2)), float(mp.group(3)))
@@ -453,6 +455,41 @@ def _mget(m: Dict, suffix: str):
         if k.endswith("__" + suffix):
             return v
     return None
+
+
+def parse_sdc_clocks(results_dir: Optional[str]) -> Dict[str, float]:
+    """{clock name: period ps} for EVERY create_clock (port- or pin-sourced)
+    in the newest results SDC. §191d: multi-clock blocks (janus_soc_top) need
+    the period of the clock being reported, not the first port clock."""
+    sdcs = sorted(glob.glob(os.path.join(results_dir or "#", "*.sdc")),
+                  key=lambda p: (os.path.basename(p) != "6_final.sdc", -os.path.getmtime(p)))
+    for s in sdcs:
+        clocks: Dict[str, float] = {}
+        for line in _read(s).splitlines():
+            if line.lstrip().startswith("create_clock"):
+                mp = re.search(r"-period\s+(\d+\.?\d*)", line)
+                mn = re.search(r"-name\s+(\S+)", line)
+                if mp and mn:
+                    clocks.setdefault(mn.group(1).strip("{}"), float(mp.group(1)))
+        if clocks:
+            return clocks
+    return {}
+
+
+def pick_primary_clock(sdc_clocks: Dict[str, float],
+                       clocks_min: Dict[str, Tuple[float, float]]) -> Optional[str]:
+    """Most timing-critical clock: smallest (period - period_min) margin among
+    clocks that have both an SDC period and a non-zero period_min; else the
+    fastest SDC clock. None when nothing is known."""
+    best, best_m = None, None
+    for name, (pmin, _f) in clocks_min.items():
+        if name in sdc_clocks and pmin > 0:
+            m = sdc_clocks[name] - pmin
+            if best_m is None or m < best_m:
+                best, best_m = name, m
+    if best is None and sdc_clocks:
+        best = min(sdc_clocks, key=sdc_clocks.get)
+    return best
 
 
 def parse_sdc_period(results_dir: Optional[str]) -> Optional[Tuple[str, float]]:
@@ -776,10 +813,26 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
     sdc = parse_sdc_period(results_dir)
     clk = {"name": None, "period": None, "target_mhz": None, "achieved_mhz": None,
            "period_min": ex.get("period_min"), "source": None}
-    if sdc:
-        clk["name"], clk["period"], clk["source"] = sdc[0], sdc[1], "sdc"
-    if ex.get("clock"):
-        clk["name"] = ex["clock"]
+    sdc_all = parse_sdc_clocks(results_dir)
+    cmin = ex.get("clocks_min") or {}
+    if not cmin and os.path.isfile(fin):
+        cmin = parse_finish_extras(_read(fin)).get("clocks_min") or {}
+    prim = pick_primary_clock(sdc_all, cmin) if len(sdc_all) > 1 else None
+    if prim:
+        # §191d: name, period, period_min and fmax all describe the SAME clock
+        clk["name"], clk["period"], clk["source"] = prim, sdc_all[prim], "sdc"
+        if prim in cmin:
+            clk["period_min"] = cmin[prim][0]
+            ex = dict(ex, period_min=cmin[prim][0], fmax_mhz=cmin[prim][1])
+        else:
+            ex = dict(ex, fmax_mhz=None)
+        clk["all"] = {n: {"period": p, "period_min": (cmin.get(n) or (None,))[0]}
+                      for n, p in sdc_all.items()}
+    else:
+        if sdc:
+            clk["name"], clk["period"], clk["source"] = sdc[0], sdc[1], "sdc"
+        if ex.get("clock"):
+            clk["name"] = ex["clock"]
     if clk["period"] is None and ex.get("period_min") is not None and setup_worst is not None:
         clk["period"] = round(ex["period_min"] + setup_worst, 2)
         clk["source"] = "period_min+worst_slack"

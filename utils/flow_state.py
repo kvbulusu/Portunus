@@ -112,6 +112,8 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     "REPAIR_ANTENNAS": "5_route",
     # §167 only read by global_route.tcl (post-GRT repair_design/repair_timing)
     "SKIP_INCREMENTAL_REPAIR": "5_route",
+    # §191 read by repair_timing_helper (first caller: 2_1_floorplan)
+    "SKIP_GATE_CLONING": "2_floorplan",
 }
 _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("SYNTH_", "1_synth"),
