@@ -114,6 +114,9 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     "SKIP_INCREMENTAL_REPAIR": "5_route",
     # §191 read by repair_timing_helper (first caller: 2_1_floorplan)
     "SKIP_GATE_CLONING": "2_floorplan",
+    # §192 3_4 resize repair_timing (ORFS block / janus post_resize no-clone)
+    "ENABLE_PLACE_REPAIR_TIMING": "3_place",
+    "JANUS_PLACE_REPAIR_NOCLONE": "3_place",
 }
 _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("SYNTH_", "1_synth"),
