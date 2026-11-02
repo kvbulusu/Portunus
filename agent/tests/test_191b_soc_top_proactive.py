@@ -128,3 +128,107 @@ def test_job_scheduler_tbs_191b(tb, tmp_path):
                        text=True, timeout=300)
     out = r.stdout + r.stderr
     assert "ALL TESTS PASS" in out or "RESULT: PASS" in out, out[-2000:]
+
+
+# ---------------------------------------------------------------------------
+# §191f / §191g (run 1101 check_setup + hold report follow-ups)
+# ---------------------------------------------------------------------------
+_USER_CLK_EN_CONSUMERS = [
+    r"\.pd_perf_en_i\s*\(\s*pwr_switch_en_user\[PD_PERFORMANCE\]\s*\)",
+    r"\.npu_accel_en_i\s*\(\s*pwr_switch_en_user\[PD_NPU_L\]\s*\)",
+    r"assign\s+kvx_en\s*=\s*pwr_switch_en_user\[PD_NPU_L\]",
+]
+
+
+def test_pwr_switch_en_synced_into_user_clk_191g():
+    src = _code(TOP)
+    m = re.search(r"cdc_level_sync\s*#\(\s*\.WIDTH\s*\(\s*NUM_POWER_DOMAINS\s*\)\s*\)"
+                  r"\s*u_pwr_en_user_cdc\s*\((.*?)\);", src, re.S)
+    assert m, "u_pwr_en_user_cdc missing"
+    body = m.group(1)
+    assert re.search(r"\.dst_clk\s*\(\s*user_clk\s*\)", body)
+    assert re.search(r"\.dst_rst_n\s*\(\s*user_rst_n\s*\)", body)
+    assert re.search(r"\.data_i\s*\(\s*pwr_switch_en\s*\)", body)
+    assert re.search(r"\.data_o\s*\(\s*pwr_switch_en_user\s*\)", body)
+    for pat in _USER_CLK_EN_CONSUMERS:
+        assert re.search(pat, src), pat
+    # NPU-L / KV en_i ports (dispatcher, kv bridge, kv_secure_subsystem)
+    assert len(re.findall(r"\.en_i\s*\(\s*pwr_switch_en_user\[PD_NPU_L\]\s*\)", src)) == 3
+    # no user_clk consumer left on the raw agent_clk vector; only the agent
+    # always-on enable, the self-ack and the sync input may use it
+    raw = re.findall(r"pwr_switch_en\[(\w+)\]", src)
+    assert set(raw) <= {"PD_ALWAYS_ON", "PD_SYSTEM"}, raw
+
+
+def test_user_core_sleep_o_constant_at_top_191f():
+    src = _code(TOP)
+    assert re.search(r"assign\s+user_core_sleep_o\s*=\s*'0\s*;", src)
+    assert re.search(r"\.core_sleep_o\s*\(\s*user_core_sleep_unused\s*\)", src)
+    assert not re.search(r"\.core_sleep_o\s*\(\s*user_core_sleep_o\s*\)", src)
+    m = re.search(r"assign\s+_unused\s*=\s*&\{(.*?)\};", src, re.S)
+    assert m and "user_core_sleep_unused" in m.group(1)
+    # frozen macro still ties its own pin to 0 (the justification for §191f)
+    uct = _code(ROOT / "rtl/user/user_cluster_top.sv")
+    assert re.search(r"core_sleep_o\[\w+\]\s*=\s*1'b0", uct)
+
+
+@pytest.mark.skipif(shutil.which("verilator") is None, reason="verilator not installed")
+def test_pwr_en_level_sync_tb_191g(tmp_path):
+    """2-flop sync: 0 in reset, follows source after exactly 2 dst edges."""
+    tb = tmp_path / "tb_pwr_en_sync.sv"
+    tb.write_text(r"""
+module tb_pwr_en_sync;
+  logic clk = 0, rst_n = 0;
+  logic [3:0] d, q;
+  int errs = 0;
+  always #1 clk = ~clk;
+  cdc_level_sync #(.WIDTH(4)) dut (.dst_clk(clk), .dst_rst_n(rst_n), .data_i(d), .data_o(q));
+  initial begin
+    d = 4'hF;
+    #5; if (q !== 4'h0) errs++;
+    @(negedge clk); rst_n = 1;
+    @(negedge clk); if (q !== 4'h0) errs++;   // 1 edge: not yet
+    @(negedge clk); if (q !== 4'hF) errs++;   // 2 edges: through
+    d = 4'h4;
+    @(negedge clk); if (q !== 4'hF) errs++;
+    @(negedge clk); if (q !== 4'h4) errs++;
+    if (errs == 0) $display("PASS"); else $display("FAIL %0d", errs);
+    $finish;
+  end
+endmodule
+""")
+    mdir = tmp_path / "obj"
+    r = subprocess.run(["verilator", "--cc", "--exe", "--main", "--timing", "-Wno-fatal",
+                        "-CFLAGS", "-std=c++20", "--Mdir", str(mdir), "--build", "-j", "4",
+                        "--top-module", "tb_pwr_en_sync",
+                        str(ROOT / "rtl/common/cdc_sync.sv"), str(tb)],
+                       cwd=ROOT, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-2000:]
+    out = subprocess.run([str(mdir / "Vtb_pwr_en_sync")], capture_output=True, text=True).stdout
+    assert "PASS" in out, out
+
+
+def test_soc_top_elaborates_pyslang_191fg():
+    pyslang_driver = pytest.importorskip("pyslang.driver")
+    # --allow-use-before-declare: the top has pre-existing forward references
+    # (npu_l_launch, periph_eip, ...) that yosys-slang accepts in the flow.
+    for extra in ([], ["-DJANUS_SOC_HARD_MACROS"], ["-DJANUS_NPU_KV_PORT"]):
+        d = pyslang_driver.Driver()
+        d.addStandardArgs()
+        args = ("slang -f scripts/filelist.f --top janus_soc_top --ignore-unknown-modules "
+                "--timescale=1ns/1ps --allow-use-before-declare " + " ".join(extra))
+        cwd = os.getcwd()
+        os.chdir(ROOT)
+        try:
+            assert d.parseCommandLine(args)
+            assert d.processOptions()
+            d.parseAllSources()
+            comp = d.createCompilation()
+            sm = comp.sourceManager
+            # pre-existing errors in frozen child RTL (use-before-declare etc.)
+            # are out of scope; the top glue itself must be error-free.
+            errs = [x for x in comp.getAllDiagnostics() if x.isError()
+                    and "janus_soc_top.sv" in str(sm.getFileName(x.location))]
+        finally:
+            os.chdir(cwd)
+        assert not errs, f"{extra}: {len(errs)} slang errors in janus_soc_top.sv"
