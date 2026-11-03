@@ -28,7 +28,7 @@ def test_mk_arms_guard_193b():
     ("janus_cts_balance.tcl", "pre_cts", "1"),
     ("post_cts.tcl", "cts", "1"),
     ("post_global_route.tcl", "global_route", "0"),
-    ("janus_place_repair_noclone.tcl", "resize", "1"),
+    ("janus_place_repair_noclone.tcl", "resize_pre", "0"),
 ])
 def test_hooks_call_guard_193b(hook, stage, fatal):
     txt = (HOOKS / hook).read_text()
@@ -65,7 +65,8 @@ proc get_full_name {o} {
   switch $o { p_refport { return ref_clk_i } p_146 { return u_clkgen/_146_/Y } p_147 { return u_clkgen/_147_/Y } }
 }
 proc get_cells {args} { return [lindex $args end] }
-proc set_dont_touch {c} { lappend ::dt $c }
+proc set_dont_touch {c} { if {[lsearch -exact $::dt $c] < 0} { lappend ::dt $c } }
+proc unset_dont_touch {c} { set i [lsearch -exact $::dt $c]; if {$i >= 0} { set ::dt [lreplace $::dt $i $i] } }
 namespace eval ord { proc get_db_block {} { return ::blk } }
 set ::k 0
 proc mkinst {n} {
@@ -87,10 +88,14 @@ janus_crg::run off 1
 puts "OFF [llength $::dt]"
 set ::env(JANUS_CLKROOT_GUARD) 1
 set ::env(JANUS_CLKROOT_GUARD_FATAL) 1
+set ::dt {u_clkgen/_146_}
 janus_crg::run s0 0
+puts "DT0 <$::dt>"
+janus_crg::window_begin s1
 puts "DT $::dt"
-set rc [catch {janus_crg::run s1 1} e]
+set rc [catch {janus_crg::window_end s1 1} e]
 puts "RC $rc"
+puts "DTEND <$::dt>"
 """
 
 
@@ -105,15 +110,26 @@ def test_guard_mock_clean_193b(tmp_path):
     out = _run(tmp_path, "clone_1_u_a/_9_")
     assert out.returncode == 0, out.stderr
     assert "OFF 0" in out.stdout
+    # §194: run releases stale dont_touch and never leaves it set
+    assert "s0 released stale dont_touch" in out.stdout and "DT0 <>" in out.stdout
+    # window: dont_touch only between window_begin / window_end
     assert "DT u_clkgen/_146_ u_clkgen/_147_" in out.stdout  # port source skipped
+    assert "s1 window open: dont_touch 2 root(s)" in out.stdout
     assert "JANUS_CRG: OK s1" in out.stdout and "RC 0" in out.stdout
-    assert "u_clkgen/_146_=1" in out.stdout
+    assert "DTEND <>" in out.stdout
 
 
 @pytest.mark.skipif(not shutil.which("tclsh"), reason="tclsh not installed")
 def test_guard_mock_clone_fatal_193b(tmp_path):
     out = _run(tmp_path, "clone_4_u_clkgen/_147_ clone_1_u_clkgen/_146_")
     assert out.returncode == 0, out.stderr
-    # non-fatal call reports, fatal call errors
+    # non-fatal call reports, fatal window_end errors (after releasing)
     assert "JANUS_CRG: FAIL s0 2 clock-root clone(s)" in out.stdout
-    assert "RC 1" in out.stdout
+    assert "RC 1" in out.stdout and "DTEND <>" in out.stdout
+
+
+def test_hooks_window_194():
+    p = (HOOKS / "janus_place_repair_noclone.tcl").read_text()
+    assert p.index("janus_crg::window_begin resize") < p.index("repair_timing {*}$args") < p.index("janus_crg::window_end resize 1")
+    for h, st in (("janus_cts_balance.tcl", "cts"), ("janus_soc_pre_grt.tcl", "global_route")):
+        assert f"janus_crg::wrap_repair_timing {st}" in (HOOKS / h).read_text(), h
