@@ -225,21 +225,32 @@ def read_tail(path: Optional[str], n: int, max_bytes: int = 1 << 20) -> List[str
     return data.splitlines()[-n:]
 
 
-def stage_logs(logs_dir: Optional[str], key: str) -> List[str]:
+def _fresh(path: str, since: Optional[float]) -> bool:
+    """§195: file written by THIS run (mtime >= since). since=None -> always."""
+    if since is None:
+        return True
+    try:
+        return os.path.getmtime(path) >= since
+    except OSError:
+        return False
+
+
+def stage_logs(logs_dir: Optional[str], key: str, since: Optional[float] = None) -> List[str]:
     if not logs_dir or not os.path.isdir(logs_dir):
         return []
     out = []
     for pre in _SPEC[key][2]:
         out += glob.glob(os.path.join(logs_dir, pre + "*.log"))
-    return sorted(set(out))
+    return sorted(p for p in set(out) if _fresh(p, since))
 
 
-def stage_runtime(logs_dir: Optional[str], key: str) -> Dict[str, Optional[float]]:
+def stage_runtime(logs_dir: Optional[str], key: str,
+                  since: Optional[float] = None) -> Dict[str, Optional[float]]:
     """Sum wall/CPU and max peak memory over the stage's sub-step logs."""
     wall = cpu = 0.0
     peak = 0
     n = 0
-    for lp in stage_logs(logs_dir, key):
+    for lp in stage_logs(logs_dir, key, since):
         for e in parse_elapsed(_read_tail_text(lp)):
             wall += e["wall"]
             cpu += e["cpu"]
@@ -255,11 +266,13 @@ def _read_tail_text(path: str) -> str:
     return "\n".join(read_tail(path, 400, 64 << 10))
 
 
-def load_metrics(logs_dir: Optional[str]) -> Dict[str, object]:
+def load_metrics(logs_dir: Optional[str], since: Optional[float] = None) -> Dict[str, object]:
     m: Dict[str, object] = {}
     if not logs_dir or not os.path.isdir(logs_dir):
         return m
     for jp in sorted(glob.glob(os.path.join(logs_dir, "[0-9]_*.json"))):
+        if not _fresh(jp, since):
+            continue
         try:
             with open(jp) as fh:
                 d = json.load(fh)
@@ -426,13 +439,16 @@ def parse_grt(text: str) -> Optional[int]:
 # per-stage collection
 # ---------------------------------------------------------------------------
 def collect_stage(key: str, logs_dir: Optional[str], reports_dir: Optional[str],
-                  metrics: Optional[Dict] = None) -> Dict[str, object]:
-    """QoR + runtime for one stage. Never raises (missing -> absent key)."""
+                  metrics: Optional[Dict] = None, since: Optional[float] = None) -> Dict[str, object]:
+    """QoR + runtime for one stage. Never raises (missing -> absent key).
+
+    since (§195): ignore logs / reports / metrics json older than this epoch
+    (previous run's artifacts of a stage that is re-running or pending)."""
     spec = _SPEC[key]
     row: Dict[str, object] = {"key": key}
     try:
-        row.update(stage_runtime(logs_dir, key))
-        m = metrics if metrics is not None else load_metrics(logs_dir)
+        row.update(stage_runtime(logs_dir, key, since))
+        m = metrics if metrics is not None else load_metrics(logs_dir, since)
         mp = spec[3]
         for k, suf in (("setup_ws", "timing__setup__ws"), ("setup_tns", "timing__setup__tns"),
                        ("hold_ws", "timing__hold__ws"), ("hold_tns", "timing__hold__tns"),
@@ -455,14 +471,17 @@ def collect_stage(key: str, logs_dir: Optional[str], reports_dir: Optional[str],
         rpt_text = ""
         if reports_dir:
             for rn in spec[4]:
-                t = _read(os.path.join(reports_dir, rn), 8 << 20)
+                rp = os.path.join(reports_dir, rn)
+                if not _fresh(rp, since):
+                    continue
+                t = _read(rp, 8 << 20)
                 if t:
                     rpt_text = t
                     for k, v in parse_stage_rpt(t).items():
                         row.setdefault(k, v)
                     break
         row["paths"] = parse_paths(rpt_text)
-        log_text = "\n".join(_read(p) for p in stage_logs(logs_dir, key))
+        log_text = "\n".join(_read(p) for p in stage_logs(logs_dir, key, since))
         rep = parse_repair(log_text)
         for k in ("setup_pre_wns", "setup_post_wns", "hold_pre_wns", "hold_post_wns",
                   "hold_bufs_peak", "rsz0060"):
@@ -492,7 +511,7 @@ def collect_stage(key: str, logs_dir: Optional[str], reports_dir: Optional[str],
                 if md:
                     row["macro_ofs_d"] = float(md.group(1))
         row["msgs"] = msg_counts(log_text).most_common(6)
-        row["has_log"] = bool(stage_logs(logs_dir, key))
+        row["has_log"] = bool(stage_logs(logs_dir, key, since))
     except Exception as e:  # best-effort
         row["error"] = f"{type(e).__name__}: {e}"
     return row
@@ -535,13 +554,22 @@ def build_rows(logs_dir: Optional[str], reports_dir: Optional[str],
                signoff_dir: Optional[str] = None) -> List[Dict[str, object]]:
     """One row per stage with status DONE / RUNNING / FAILED / REUSED / PENDING."""
     metrics = load_metrics(logs_dir)
+    fresh_metrics = load_metrics(logs_dir, run_start) if run_start else metrics
     reused, done = set(reused or ()), set(done or ())
     rows = []
     for key in STAGE_KEYS:
-        r = collect_stage(key, logs_dir, reports_dir, metrics)
         art = _artifact(results_dir, key)
         lt = _log_mtime(logs_dir, key)
         ran_now = bool(run_start and lt and lt >= run_start)
+        is_reused = key in reused or bool((art or key in done) and run_start and not ran_now
+                                         and key not in done and key != current and key != failed)
+        # §195: a stage re-running / pending / failed in THIS run must not show the
+        # previous run's logs, reports or metrics (run 20261102_221045 mailed the
+        # old 4_cts hold -1417 / 14470 hbuf KILL while 4_cts had just started).
+        if run_start and not is_reused:
+            r = collect_stage(key, logs_dir, reports_dir, fresh_metrics, since=run_start)
+        else:
+            r = collect_stage(key, logs_dir, reports_dir, metrics)
         if key == failed:
             st = "FAILED"
         elif key == current:
