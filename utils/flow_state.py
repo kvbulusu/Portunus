@@ -114,6 +114,19 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     "SKIP_INCREMENTAL_REPAIR": "5_route",
     # §191 read by repair_timing_helper (first caller: 2_1_floorplan)
     "SKIP_GATE_CLONING": "2_floorplan",
+    # §192 3_4 resize repair_timing (ORFS block / janus post_resize no-clone)
+    "ENABLE_PLACE_REPAIR_TIMING": "3_place",
+    "JANUS_PLACE_REPAIR_NOCLONE": "3_place",
+    # §193b clock-root guard: also applied at 2_1, but the 3_4 no-clone hook
+    # re-applies dont_touch before its repair_timing (the first cloning caller
+    # once ENABLE_PLACE_REPAIR_TIMING=0), so a 3_place restamp is sufficient.
+    "JANUS_CLKROOT_GUARD": "3_place",
+    "JANUS_CLKROOT_GUARD_FATAL": "3_place",
+    # §193c: relocate runs at 3_3 (post GPL), upsize/allow-cloning re-applied at
+    # 3_4 -> 3_place. PRE_GLOBAL_ROUTE_TCL is already a 5_route key via prefix/map.
+    "JANUS_CLKROOT_UPSIZE": "3_place",
+    "JANUS_CLKROOT_RELOCATE": "3_place",
+    "JANUS_CLKROOT_ALLOW_CLONING": "3_place",
 }
 _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("SYNTH_", "1_synth"),
