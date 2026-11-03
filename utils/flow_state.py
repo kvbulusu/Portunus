@@ -122,6 +122,11 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     # once ENABLE_PLACE_REPAIR_TIMING=0), so a 3_place restamp is sufficient.
     "JANUS_CLKROOT_GUARD": "3_place",
     "JANUS_CLKROOT_GUARD_FATAL": "3_place",
+    # §193c: relocate runs at 3_3 (post GPL), upsize/allow-cloning re-applied at
+    # 3_4 -> 3_place. PRE_GLOBAL_ROUTE_TCL is already a 5_route key via prefix/map.
+    "JANUS_CLKROOT_UPSIZE": "3_place",
+    "JANUS_CLKROOT_RELOCATE": "3_place",
+    "JANUS_CLKROOT_ALLOW_CLONING": "3_place",
 }
 _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("SYNTH_", "1_synth"),
