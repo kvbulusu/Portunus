@@ -725,6 +725,38 @@ def read_eco_adopted(reports_dir: Optional[str]) -> Optional[Dict]:
     return d
 
 
+def _after_stage(fname: str, failed_stage: str) -> bool:
+    """True if artifact `fname` belongs to a flow stage after `failed_stage`."""
+    st = stage_of(fname)
+    return (st is not None and failed_stage in _STAGE_IDX
+            and _STAGE_IDX[st] > _STAGE_IDX[failed_stage])
+
+
+def _stage_timing_fallback(reports_dir: Optional[str], failed_stage: str) -> Dict[str, object]:
+    """Timing from the newest janus_NN_*_paths.rpt not after `failed_stage`."""
+    if _la is None:
+        return {}
+    cands = sorted(glob.glob(os.path.join(reports_dir or "#", "janus_[0-9][0-9]_*_paths.rpt")),
+                   reverse=True)
+    for f in cands:
+        if _after_stage(f, failed_stage):
+            continue
+        try:
+            with open(f, "r", errors="replace") as fh:
+                t = {"counts": {}, "setup_worst": None, "fmax_mhz": None}
+                t.update(_la.parse_stage_timing_rpt(fh.read(16384)))
+                fh.seek(0)
+                t["path_groups"] = _la.parse_path_group_slacks(fh)
+        except OSError:
+            continue
+        if t.get("setup_ws") is None and t.get("hold_ws") is None:
+            continue
+        t["_source"] = f
+        t["source"] = "janus_" + os.path.basename(f).split("_")[1]
+        return t
+    return {}
+
+
 def build_qor(block: str, status: str, logs_dir: Optional[str],
               reports_dir: Optional[str], results_dir: Optional[str],
               agent_log: Optional[str] = None, manifest_stage: str = "",
@@ -747,6 +779,14 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
         except Exception:
             t = None
     t = t or {}
+    # §197c: a failed run must not quote timing from a report of a LATER stage
+    # left on disk by an older run (run 20261102_221045 failed at cts; email
+    # showed WNS -779.83 from a stale janus_08_detail_route_paths.rpt). Fall
+    # back to the newest janus_NN_*_paths.rpt at or before the failed stage.
+    stale_dropped = None
+    if failed and t.get("_source") and _after_stage(t["_source"], failed):
+        stale_dropped = os.path.basename(t["_source"])
+        t = _stage_timing_fallback(reports_dir, failed)
     pg = t.get("path_groups") or {"setup": {}, "hold": {}}
     counts = t.get("counts") or {}
     setup_worst = t.get("setup_worst")
@@ -768,6 +808,8 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
         "wns_note": "ORFS 'wns max' is clamped to 0 when met; setup_worst_slack "
                     "('worst slack max') is the true worst setup slack.",
     }
+    if stale_dropped:
+        timing["stale_dropped"] = stale_dropped
     # §154: an adopted post-route ECO replaces 6_final.* but NOT 6_finish.rpt
     # (§150). Without this the email header showed pre-ECO slack (ara
     # 20261024: header -61.32 while the ECO'd 6_final in force is -10.84).
@@ -793,6 +835,8 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
                                                 timing["hold_worst_slack"])
                              if _la else None)
     dbg, dbg_src = parse_debug_groups(reports_dir)
+    if failed and dbg_src and _after_stage(dbg_src, failed):
+        dbg, dbg_src = {}, None
     if dbg:
         timing["class_split"] = dbg
         timing["class_split_source"] = dbg_src
@@ -852,6 +896,8 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
         if vs:
             drc = {"total": int(vs[-1]), "by_type": {}, "layers": {},
                    "source": "5_2_route.log (DRT-0199 last iteration)"}
+    if drc is not None and failed in _STAGE_IDX and _STAGE_IDX[failed] < _STAGE_IDX["route"]:
+        drc = None   # §197c: route DRC left by an older run
     q["route_drc"] = drc
     ant = None
     for name, txt in (("drt_antennas.log", _read(os.path.join(reports_dir or "#", "drt_antennas.log"))),
@@ -935,6 +981,9 @@ def render_email_body(q: Dict[str, object]) -> str:
              f"TNS {_f(t.get('setup_tns'))}  violators {_f(v.get('setup'), '{}')}")
     L.append(f"  Hold       : worst slack {_f(t.get('hold_worst_slack'))}  violators {_f(v.get('hold'), '{}')}")
     L.append(f"  Verdict    : {t.get('verdict') or 'UNKNOWN'}")
+    if t.get("stale_dropped"):
+        L.append(f"  NOTE       : {t['stale_dropped']} is from a later stage than the failure "
+                 f"(older run) -> not quoted")
     pe = t.get("pre_eco")
     if pe:
         pv = pe.get("violators") or {}
