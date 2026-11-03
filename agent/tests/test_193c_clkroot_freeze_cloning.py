@@ -31,11 +31,13 @@ def test_mk_193c():
 def test_hook_wiring_193c():
     assert "janus_crg::relocate global_place" in (HOOKS / "post_global_place.tcl").read_text()
     cb = (HOOKS / "janus_cts_balance.tcl").read_text()
-    assert cb.index("janus_crg::run pre_cts 1") < cb.index("janus_crg::allow_cloning pre_cts")
+    # §194: allow_cloning is reached through the dont_touch window
+    assert cb.index("janus_crg::run pre_cts 1") < cb.index("janus_crg::wrap_repair_timing cts")
     pg = (HOOKS / "janus_soc_pre_grt.tcl").read_text()
-    assert pg.index("janus_crg::run pre_global_route 1") < pg.index("janus_crg::allow_cloning")
+    assert pg.index("janus_crg::run pre_global_route 1") < pg.index("janus_crg::wrap_repair_timing global_route")
     p = PRNC.read_text()
-    assert p.index("janus_crg::run resize_pre") < p.index("janus_crg::allow_cloning resize")
+    assert p.index("janus_crg::run resize_pre") < p.index("janus_crg::window_begin resize")
+    assert "allow_cloning $stage" in GUARD.read_text()
 
 
 def test_flow_state_193c():
@@ -71,6 +73,7 @@ proc get_name {c} { return [string map {c_ ""} $c] }
 proc get_cells {args} { return [lindex $args end] }
 proc get_pins {args} { return [lindex $args end] }
 proc set_dont_touch {c} { set ::DT($c) 1 }
+proc unset_dont_touch {c} { unset -nocomplain ::DT($c) }
 namespace eval ord { proc get_db_block {} { return ::blk }; proc get_db {} { return ::db } }
 proc ::db {m} { return ::lib }
 proc ::lib {m} { set r {}; foreach n $::masters { lappend r [mkmaster $n] }; return $r }
@@ -96,7 +99,7 @@ proc mkinst {n} {
       getMaster { return [mkmaster $mst] }
       swapMaster { lset ::I(NAME) 0 [[lindex $args 0] getName]; return 1 }
       isDoNotTouch { return [info exists ::DT(NAME)] }
-      setDoNotTouch { set ::DT(NAME) 1 }
+      setDoNotTouch { if {[lindex $args 0]} { set ::DT(NAME) 1 } else { unset -nocomplain ::DT(NAME) } }
       getLocation { return [list $x $y] }
       setLocation { lset ::I(NAME) 1 [lindex $args 0]; lset ::I(NAME) 2 [lindex $args 1] }
       setPlacementStatus { set ::ST(NAME) [lindex $args 0] }
@@ -158,9 +161,14 @@ set ::env(SKIP_GATE_CLONING) 1
 puts "A0 [janus_crg::allow_cloning pre_cts] [info exists ::env(SKIP_GATE_CLONING)]"
 janus_crg::run pre_cts 1
 puts "A1 [janus_crg::allow_cloning pre_cts] [info exists ::env(SKIP_GATE_CLONING)]"
+puts "W [janus_crg::window_begin cts] [info exists ::env(SKIP_GATE_CLONING)] [array size ::DT]"
+janus_crg::window_end cts 1
+puts "E [info exists ::env(SKIP_GATE_CLONING)] $::env(SKIP_GATE_CLONING) [array size ::DT]"
 """)
-    assert "A0 0 1" in out   # not frozen yet -> keep skip
-    assert "A1 1 0" in out   # frozen -> SKIP_GATE_CLONING unset
+    assert "A0 0 1" in out   # not frozen -> keep skip
+    assert "A1 0 1" in out   # §194: run no longer freezes -> still kept
+    assert "W 1 0 2" in out  # inside window: frozen, cloning on
+    assert "E 1 1 0" in out  # after window: skip restored, released
 
 
 @needs_tcl
