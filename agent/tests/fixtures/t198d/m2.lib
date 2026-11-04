@@ -1,0 +1,21 @@
+library(FAKEM2lib) {
+ delay_model : table_lookup; time_unit : "1ps"; voltage_unit : "1V"; current_unit : "1mA";
+ capacitive_load_unit (1,ff); pulling_resistance_unit : "1kohm"; leakage_power_unit : "1pW";
+ nom_process : 1; nom_temperature : 25; nom_voltage : 0.7;
+ cell(FAKEM2) { area : 100; interface_timing : true;
+  pin(clk) { direction : input; clock : true; capacitance : 1;
+    timing() { timing_type : max_clock_tree_path; timing_sense : positive_unate;
+      cell_rise(scalar) { values("30"); } cell_fall(scalar) { values("30"); } }
+    timing() { timing_type : min_clock_tree_path; timing_sense : positive_unate;
+      cell_rise(scalar) { values("30"); } cell_fall(scalar) { values("30"); } } }
+  pin(din) { direction : input; capacitance : 1;
+    timing() { related_pin : "clk"; timing_type : setup_rising;
+      rise_constraint(scalar) { values("50"); } fall_constraint(scalar) { values("50"); } }
+    timing() { related_pin : "clk"; timing_type : hold_rising;
+      rise_constraint(scalar) { values("100"); } fall_constraint(scalar) { values("100"); } } }
+  pin(dout) { direction : output; max_capacitance : 100;
+    timing() { related_pin : "clk"; timing_type : rising_edge;
+      cell_rise(scalar) { values("300"); } cell_fall(scalar) { values("300"); }
+      rise_transition(scalar) { values("20"); } fall_transition(scalar) { values("20"); } } }
+ }
+}

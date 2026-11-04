@@ -6,6 +6,15 @@ hold buffers, RSZ-0060).
 198b  JANUS_CTS_HOLD_ABORT_PS fail-fast before repair_timing.
 198c  report_bundle: a failed run does not quote reports / fmax / "Stage
       reached" from an older run's files.
+198d  (probe 2026-11-04: fork mode -> setup -2727 / hold -1896, still aborts)
+      janus_cts_macro_isolate: re-tap the isolated macro clock pin(s) onto the
+      clock root, push ALL other sinks with a calibrated chain; target D uses
+      MOVABLE-only boundary slacks (skew-invariant macro->macro / self loops
+      excluded). Default mode; MODE=fork keeps the 198 method.
+198e  janus_soc_top.sdc: a port with an input delay in both clk_user and
+      clk_agent (fetch_enable_i) gets cross-clock false paths through that port
+      only (the clk_user -reference_pin latency was timed against clk_agent).
+      In the SDC, not the CTS hook (§169 rule: no exceptions in hooks).
 """
 import os
 import re
@@ -49,7 +58,8 @@ def test_wrapper_order_refpin_align_diag_abort():
     assert i_ref < i_al < i_dg < i_ab
     # abort is NOT caught (it must fail the stage); align is caught
     assert "catch {janus_cts_hold_abort}" not in w
-    assert "catch {janus_cts_macro_align}" in w
+    assert "catch {$mal}" in w
+    assert '"fork" ? "janus_cts_macro_align" : "janus_cts_macro_isolate"' in w
 
 
 def test_wrapper_armed_by_new_flags():
@@ -74,9 +84,38 @@ def test_early_tap_and_no_gate_cloning_change():
 def test_mk_enables_align_and_abort_in_hier_block():
     hier = MK[MK.index("ifneq ($(JANUS_FLAT),1)"):]
     hier = hier[:hier.index("\nendif")]
-    for k, v in (("JANUS_CTS_MACRO_ALIGN", "1"), ("JANUS_CTS_MACRO_ALIGN_CLOCKS", "clk_user clk_agent"),
-                 ("JANUS_CTS_MACRO_ALIGN_EARLY", "u_clkgen/*"), ("JANUS_CTS_HOLD_ABORT_PS", "-1500")):
+    for k, v in (("JANUS_CTS_MACRO_ALIGN", "1"), ("JANUS_CTS_MACRO_ALIGN_MODE", "isolate"),
+                 ("JANUS_CTS_MACRO_ALIGN_CLOCKS", "clk_user"),
+                 ("JANUS_CTS_MACRO_ALIGN_ISOLATE", "u_user/user_clk"),
+                 ("JANUS_CTS_MACRO_ALIGN_MAXPUSH", "5000"), ("JANUS_CTS_HOLD_ABORT_PS", "-1500")):
         assert re.search(r"^export %s\s*=\s*%s\s*$" % (k, re.escape(v)), hier, re.M), k
+
+
+def test_isolate_procs_and_xcut_defined():
+    for p in ("janus_cts_macro_isolate", "janus_mal_iso_match", "janus_mal_in_insts",
+              "janus_mal_movable_slack", "janus_mal_movable_slacks", "janus_mal_prune"):
+        assert re.search(r"^proc %s \{" % p, BAL, re.M), p
+    iso = BAL[BAL.index("proc janus_cts_macro_isolate"):]
+    assert "disconnect" in iso and "connect $root" in iso    # re-tap onto clock root
+    assert "JANUS_CTS_MACRO_ALIGN_ISOLATE" in BAL
+    for kw in ("set_false_path", "set_multicycle_path", "set_max_delay", "set_disable_timing"):
+        assert kw not in BAL                               # §169 rule
+
+
+def test_sdc_shared_input_xclock_cut():
+    sdc = (ROOT / "asic_flow/configs/constraints/janus_soc_top.sdc").read_text()
+    assert "fetch_enable_i" in sdc[sdc.index("set _in_agent"):sdc.index("set _in_jtag")]
+    blk = sdc[sdc.index("§198e"):sdc.index("set _out_user")]
+    assert "lsearch -exact $_in_agent $_p" in blk
+    assert "set_false_path -from [get_clocks clk_user]  -through $_p -to [get_clocks clk_agent]" in blk
+    assert "set_false_path -from [get_clocks clk_agent] -through $_p -to [get_clocks clk_user]" in blk
+    assert "-hold" not in blk and "-setup" not in blk
+
+
+def test_probe_modes():
+    for m in ("stock", "isolate", "align", "dry"):
+        assert m in PROBE
+    assert '"MOVABLE %s' in PROBE and '"LIB_CTP ' in PROBE and '"PATH %s slack' in PROBE
 
 
 def test_probe_is_read_only_and_disables_abort():
@@ -110,6 +149,7 @@ def test_toy_align_fixes_macro_boundary(tmp_path):
     s0, h0, a0, _ = _toy(tmp_path / "off", {"JANUS_CTS_DIAG": "1"})
     assert h0 < -300                                    # hold into the ETM macro
     s1, h1, a1, out = _toy(tmp_path / "on", {"JANUS_CTS_MACRO_ALIGN": "1",
+                                             "JANUS_CTS_MACRO_ALIGN_MODE": "fork",
                                              "JANUS_CTS_MACRO_ALIGN_CLOCKS": "clk_user"})
     assert "(A) removed" in out and "(B) iter" in out
     assert h1 >= 0 and s1 > s0                          # hold fixed, setup improved
@@ -130,6 +170,43 @@ def test_toy_hold_abort(tmp_path):
     out = r.stdout + r.stderr
     assert "JANUS_CTS_HOLD_ABORT: pre-repair hold WNS" in out and "aborting before repair_timing" in out
     assert "T198 FINAL" not in out
+
+
+# ---- 198d/198e toy: isolate mode, 2 clocks, shared refpin input (SDC cut mirrored), self loop
+FIXD = Path(__file__).resolve().parent / "fixtures" / "t198d"
+
+
+def _toyd(tmp_path, extra):
+    if not (os.access(OR, os.X_OK) and os.path.isdir(PLAT)):
+        pytest.skip("openroad / asap7 platform not available")
+    d = tmp_path / "t198d"
+    shutil.copytree(FIXD, d)
+    env = dict(os.environ, T198_PLATFORM=PLAT, T198_HOOK=str(HOOKS / "janus_cts_balance.tcl"), **extra)
+    r = subprocess.run([OR, "-no_init", "-exit", "t.tcl"], cwd=d, env=env, capture_output=True,
+                       text=True, timeout=600)
+    out = r.stdout + r.stderr
+    m = re.search(r"T198D FINAL setup (-?[\d.]+) hold (-?[\d.]+)", out)
+    assert m, out[-3000:]
+    v = {k: float(x) for k, x in re.findall(r"(\S+ (?:setup|hold)) (-?[\d.]+)", out)}
+    return float(m.group(1)), float(m.group(2)), v, out
+
+
+def test_toy_isolate_and_xcut(tmp_path):
+    s0, h0, v0, _ = _toyd(tmp_path / "off", {"JANUS_CTS_MACRO_ALIGN": "0"})
+    assert h0 < -300                                     # r3 -> ETM macro hold
+    on = {"JANUS_CTS_MACRO_ALIGN": "1", "JANUS_CTS_MACRO_ALIGN_ISOLATE": "u_m/clk",
+          "JANUS_CTS_MACRO_ALIGN_CLOCKS": "clk_user"}
+    s1, h1, v1, out = _toyd(tmp_path / "iso", on)
+    assert "done (isolate)" in out and "re-tapped" in out
+    assert h1 > h0 + 300 and h1 >= -60
+    assert v1["u_m->u_m setup"] == pytest.approx(v0["u_m->u_m setup"], abs=5)  # skew-invariant
+    assert v1["u_m->rx setup"] > 0 and v1["r3->u_m hold"] >= 0
+    assert v1["reg2reg setup"] == pytest.approx(v0["reg2reg setup"], abs=5)    # agent untouched
+    assert v1["reg2reg hold"] == pytest.approx(v0["reg2reg hold"], abs=5)      # user regs stay balanced
+    assert "T198D XCUT on" in out
+    assert v1["fetch->a1 setup"] > 1000                  # cross-clock refpin artifact cut
+    _, _, vx, _ = _toyd(tmp_path / "isox", dict(on, T198_XCUT="0"))
+    assert vx["fetch->a1 setup"] < 0                     # without the cut the push breaks it
 
 
 # ---- 198c report_bundle -----------------------------------------------------

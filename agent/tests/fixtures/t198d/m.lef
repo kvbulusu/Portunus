@@ -1,0 +1,112 @@
+VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+MACRO FAKEM
+  CLASS BLOCK ;
+  ORIGIN 0 0 ;
+  SIZE 20 BY 20 ;
+  PIN clk
+    DIRECTION INPUT ;
+    USE CLOCK ;
+    PORT
+      LAYER M4 ;
+        RECT 0 2 0.5 2.1 ;
+    END
+  END clk
+  PIN din
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M4 ;
+        RECT 0 7 0.5 7.1 ;
+    END
+  END din
+  PIN dout
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M4 ;
+        RECT 0 12 0.5 12.1 ;
+    END
+  END dout
+  OBS
+    LAYER M1 ;
+      RECT 0 0 20 20 ;
+  END
+END FAKEM
+MACRO FAKEM2
+  CLASS BLOCK ;
+  ORIGIN 0 0 ;
+  SIZE 20 BY 20 ;
+  PIN clk
+    DIRECTION INPUT ;
+    USE CLOCK ;
+    PORT
+      LAYER M4 ;
+        RECT 0 2 0.5 2.1 ;
+    END
+  END clk
+  PIN din
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M4 ;
+        RECT 0 7 0.5 7.1 ;
+    END
+  END din
+  PIN dout
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M4 ;
+        RECT 0 12 0.5 12.1 ;
+    END
+  END dout
+  OBS
+    LAYER M1 ;
+      RECT 0 0 20 20 ;
+  END
+END FAKEM2
+
+MACRO FAKEU
+  CLASS BLOCK ;
+  ORIGIN 0 0 ;
+  SIZE 20 BY 20 ;
+  PIN clk
+    DIRECTION INPUT ;
+    USE CLOCK ;
+    PORT
+      LAYER M4 ;
+        RECT 0 2 0.5 2.1 ;
+    END
+  END clk
+  PIN din
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M4 ;
+        RECT 0 7 0.5 7.1 ;
+    END
+  END din
+  PIN din2
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M4 ;
+        RECT 0 16 0.5 16.1 ;
+    END
+  END din2
+  PIN dout
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M4 ;
+        RECT 0 12 0.5 12.1 ;
+    END
+  END dout
+  OBS
+    LAYER M1 ;
+      RECT 0 0 20 20 ;
+  END
+END FAKEU
+END LIBRARY
