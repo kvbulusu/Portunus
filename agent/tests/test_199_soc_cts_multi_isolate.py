@@ -33,8 +33,9 @@ def test_mk_isolates_user_kv_noc_not_ampo():
     m = re.search(r"^export JANUS_CTS_MACRO_ALIGN_ISOLATE\s*=\s*(.+?)\s*$", _hier(), re.M)
     assert m
     iso = m.group(1).split()
-    assert iso == ["u_user/user_clk", "u_kv_secure_subsystem/clk", "u_noc/clk"]
-    assert not any("ampo" in g for g in iso)
+    assert iso[:3] == ["u_user/user_clk", "u_kv_secure_subsystem/clk", "u_noc/clk"]
+    # §200 adds the ampo user_clk pin only (never its agent_clk pin)
+    assert [g for g in iso if "ampo" in g] == ["u_periph/u_ampo/user_clk"]
 
 
 def test_sdc_untouched_and_no_exceptions():
