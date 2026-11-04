@@ -24,12 +24,6 @@ set_max_delay -ignore_clock_latency 1000 -from [get_clocks clk_agent] -to [get_c
 set_max_delay -ignore_clock_latency 600 -from [get_clocks clk_user] -to [get_clocks clk_agent]
 set_input_delay 100 -clock clk_user [get_ports {d fetch en}]
 set_input_delay 100 -clock clk_agent -add_delay [get_ports fetch]
-# mirrors janus_soc_top.sdc §198e (T198_XCUT=0 disables)
-if { ![info exists ::env(T198_XCUT)] || $::env(T198_XCUT) ne "0" } {
-  set_false_path -from [get_clocks clk_user] -through [get_ports fetch] -to [get_clocks clk_agent]
-  set_false_path -from [get_clocks clk_agent] -through [get_ports fetch] -to [get_clocks clk_user]
-  puts "T198D XCUT on"
-}
 set_output_delay 100 -clock clk_user [get_ports {q q2}]
 set_output_delay 100 -clock clk_agent [get_ports q3]
 source $P/setRC.tcl
@@ -41,6 +35,10 @@ set ::env(JANUS_CTS_IO_REFPIN_IN_clk_user) "d fetch en"
 set ::env(JANUS_CTS_IO_REFPIN_IN_clk_agent) "fetch"
 set ::env(JANUS_CTS_IO_REFPIN_OUT_clk_user) "q q2"
 set ::env(JANUS_CTS_IO_REFPIN_OUT_clk_agent) "q3"
+# §198f: janus_soc_top sets JANUS_CTS_XCUT_TCL (T198_XCUT=0 disables)
+if { ![info exists ::env(T198_XCUT)] || $::env(T198_XCUT) ne "0" } {
+  set ::env(JANUS_CTS_XCUT_TCL) [file join [file dirname $::env(T198_HOOK)] janus_soc_cts_xcut.tcl]
+}
 source $::env(T198_HOOK)
 clock_tree_synthesis -sink_clustering_enable -repair_clock_nets -buf_list BUFx4_ASAP7_75t_R
 set_propagated_clock [all_clocks]
