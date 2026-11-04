@@ -1904,6 +1904,7 @@ class JANUSAutonomousAgent:
             self.ui.good(f"{block}: abstract OK — "
                          f"lef={os.path.basename(lef) if lef else 'n/a'} "
                          f"lib={os.path.basename(lib) if lib else 'n/a'}")
+            self._check_abstract_corners(block)
         else:
             self.ui.warn(f"{block}: abstract target rc={proc.returncode} "
                          f"(GDS is still valid; see {os.path.basename(log_path)}). "
@@ -1925,6 +1926,46 @@ class JANUSAutonomousAgent:
             os.path.join(root, f"janus_{block}", self._leaf()),
             os.path.join(root, "janus", block, self._leaf()),
         ]
+
+    def _check_abstract_corners(self, block: str) -> Optional[bool]:
+        """§201: warn when <blk>_fast.lib carries slow-corner clk->out arrivals.
+
+        EC2 (openroad 26Q2-2270) wrote user_core/user_domain _fast.lib with
+        corner-invariant clk->out and a 0.63 V/100 C header, which made every
+        parent's fast-corner setup ~1.5-2.5 ns pessimistic (and fast hold on
+        those outputs optimistic). Read-only, never raises, never fails the
+        block. Returns True (OK) / False (SUSPECT) / None (not checkable)."""
+        slow = fast = None
+        for base in self._abstract_base_dirs(block):
+            s = sorted(glob.glob(os.path.join(base, "*_slow.lib")))
+            f = sorted(glob.glob(os.path.join(base, "*_fast.lib")))
+            if s and f:
+                slow, fast = s[0], f[0]
+                break
+        if not (slow and fast):
+            return None
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                            os.pardir, "scripts", "debug"))
+            import etm_corner_check  # noqa: E402
+            with open(slow, encoding="utf-8", errors="replace") as fh:
+                st = fh.read()
+            with open(fast, encoding="utf-8", errors="replace") as fh:
+                ft = fh.read()
+            ok, msgs = etm_corner_check.check(st, ft)
+        except Exception as e:  # diagnostic only
+            self.ui.debug(f"{block}: ETM corner check skipped ({e})")
+            return None
+        if ok:
+            self.ui.debug(f"{block}: ETM corner check OK — {msgs[-1] if msgs else ''}")
+        else:
+            self.ui.warn(f"{block}: ETM CORNER CHECK SUSPECT — "
+                         f"{os.path.basename(fast)} looks like the SLOW corner: "
+                         + "; ".join(msgs)
+                         + ". Parents' fast-corner timing on this macro is wrong. "
+                           "Run asic_flow/scripts/debug/etm_corner_selftest.sh (§201).")
+            self.results[block].note += "  ETM-FAST-SUSPECT"
+        return ok
 
     def _find_abstract(self, block: str, ext: str) -> Optional[str]:
         """Locate a freshly generated abstract file (.lef/.lib) for a block."""
