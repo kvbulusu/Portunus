@@ -11,10 +11,13 @@ hold buffers, RSZ-0060).
       clock root, push ALL other sinks with a calibrated chain; target D uses
       MOVABLE-only boundary slacks (skew-invariant macro->macro / self loops
       excluded). Default mode; MODE=fork keeps the 198 method.
-198e  janus_soc_top.sdc: a port with an input delay in both clk_user and
-      clk_agent (fetch_enable_i) gets cross-clock false paths through that port
-      only (the clk_user -reference_pin latency was timed against clk_agent).
-      In the SDC, not the CTS hook (§169 rule: no exceptions in hooks).
+198e  a port with an input delay in both clk_user and clk_agent
+      (fetch_enable_i) gets cross-clock false paths through that port only (the
+      clk_user -reference_pin latency was timed against clk_agent).
+198f  198e moved OUT of janus_soc_top.sdc into hooks/janus_soc_cts_xcut.tcl
+      (JANUS_CTS_XCUT_TCL, sourced by the CTS hook): an SDC edit trips the
+      §113 stale-SDC guard (full re-synth) and the probe / a 4_cts resume load
+      the frozen 3_place.sdc anyway. §169: no exceptions in janus_cts_balance.
 """
 import os
 import re
@@ -102,14 +105,24 @@ def test_isolate_procs_and_xcut_defined():
         assert kw not in BAL                               # §169 rule
 
 
-def test_sdc_shared_input_xclock_cut():
+def test_xcut_hook_not_sdc():
     sdc = (ROOT / "asic_flow/configs/constraints/janus_soc_top.sdc").read_text()
-    assert "fetch_enable_i" in sdc[sdc.index("set _in_agent"):sdc.index("set _in_jtag")]
-    blk = sdc[sdc.index("§198e"):sdc.index("set _out_user")]
-    assert "lsearch -exact $_in_agent $_p" in blk
-    assert "set_false_path -from [get_clocks clk_user]  -through $_p -to [get_clocks clk_agent]" in blk
-    assert "set_false_path -from [get_clocks clk_agent] -through $_p -to [get_clocks clk_user]" in blk
-    assert "-hold" not in blk and "-setup" not in blk
+    assert "§198e" not in sdc                              # no SDC edit -> no re-synth
+    xc = (HOOKS / "janus_soc_cts_xcut.tcl").read_text()
+    assert "set_false_path -from [get_clocks $a] -through [get_ports $pn] -to [get_clocks $b]" in xc
+    assert "-hold" not in xc and "-setup" not in xc
+    assert "JANUS_CTS_IO_REFPIN_IN_$cn" in xc
+    assert 'source $::env(JANUS_CTS_XCUT_TCL)' in BAL
+    hier = MK[MK.index("ifneq ($(JANUS_FLAT),1)"):]
+    hier = hier[:hier.index("\nendif")]
+    assert re.search(r"^export JANUS_CTS_XCUT_TCL\s*=.*hooks/janus_soc_cts_xcut\.tcl\s*$", hier, re.M)
+    # mk port lists still contain the shared input in both domains
+    assert re.search(r"^export JANUS_CTS_IO_REFPIN_IN_clk_user\s*=.*fetch_enable_i", MK, re.M)
+    assert re.search(r"^export JANUS_CTS_IO_REFPIN_IN_clk_agent\s*=.*fetch_enable_i", MK, re.M)
+    import importlib
+    fs = importlib.import_module("flow_state")
+    stage = next(st for pre, st in fs._KEY_STAGE_PREFIX if "JANUS_CTS_XCUT_TCL".startswith(pre))
+    assert stage == "4_cts"                                 # restamp resumes at CTS
 
 
 def test_probe_modes():
@@ -172,7 +185,7 @@ def test_toy_hold_abort(tmp_path):
     assert "T198 FINAL" not in out
 
 
-# ---- 198d/198e toy: isolate mode, 2 clocks, shared refpin input (SDC cut mirrored), self loop
+# ---- 198d/198e toy: isolate mode, 2 clocks, shared refpin input (xcut hook), self loop
 FIXD = Path(__file__).resolve().parent / "fixtures" / "t198d"
 
 
@@ -203,7 +216,7 @@ def test_toy_isolate_and_xcut(tmp_path):
     assert v1["u_m->rx setup"] > 0 and v1["r3->u_m hold"] >= 0
     assert v1["reg2reg setup"] == pytest.approx(v0["reg2reg setup"], abs=5)    # agent untouched
     assert v1["reg2reg hold"] == pytest.approx(v0["reg2reg hold"], abs=5)      # user regs stay balanced
-    assert "T198D XCUT on" in out
+    assert "JANUS_CTS_XCUT: fetch shared by {clk_agent clk_user}" in out
     assert v1["fetch->a1 setup"] > 1000                  # cross-clock refpin artifact cut
     _, _, vx, _ = _toyd(tmp_path / "isox", dict(on, T198_XCUT="0"))
     assert vx["fetch->a1 setup"] < 0                     # without the cut the push breaks it
