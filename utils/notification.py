@@ -74,7 +74,7 @@ from datetime import datetime
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 
 # Default cap for the emailed tarball. Gmail rejects attachments > 25 MB; most
@@ -749,6 +749,8 @@ class NotificationManager:
         run_table: Optional[List[dict]] = None,
         drive_subfolder: Optional[str] = None,
         stage_report: Optional[dict] = None,
+        extra_dirs: Optional[Dict[str, str]] = None,
+        limit_stage: Optional[str] = None,
     ) -> Optional[dict]:
         """Build the per-block bundle, email it, and (optionally) upload to Drive.
 
@@ -791,7 +793,8 @@ class NotificationManager:
                     reports_dir=reports_dir, results_dir=results_dir,
                     agent_log=log_path, signoff_dir=signoff_dir,
                     manifest_stage=stage, cap_bytes=self.max_tar_bytes,
-                    tries=tries, note=note, archive_fmt=self.archive_fmt)
+                    tries=tries, note=note, archive_fmt=self.archive_fmt,
+                    extra_dirs=extra_dirs, limit_stage=limit_stage)
                 qor = res["qor"]
                 tarball = res["tar"]
                 body = res["body"]

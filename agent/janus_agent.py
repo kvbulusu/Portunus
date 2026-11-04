@@ -73,6 +73,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -3415,7 +3416,8 @@ class JANUSAutonomousAgent:
                     pass
                 self.ui.err(f"{block}: {stale}")
                 return 90  # nonzero -> treated as a build failure, no make run
-        cmd = self._make_cmd(block)
+        # §207: --stop-flow-at STAGE -> explicit ORFS goal (default goal = all).
+        cmd = self._make_cmd(block) + self._stop_goal()
         self.ui.debug(f"{block}: cwd={self.flow_dir} cmd={' '.join(cmd)}")
         if self.manifest is not None and not self.args.dry_run:
             try:   # §74: lets a later --resume attribute .odb from a killed run
@@ -3684,6 +3686,24 @@ class JANUSAutonomousAgent:
             res.log_path = self._block_log(block)
 
             if rc == 0 and not report.failed:
+                stop = self._stop_stage()
+                if stop:
+                    # §207: flow intentionally ended after STAGE. Timing comes
+                    # from THIS run's log only (a 6_finish/janus_08 rpt on disk
+                    # is from an earlier run). No classify / post-route opt /
+                    # abstract / signoff / golden; settled as STOPPED so the
+                    # manifest keeps the block resumable and dependents block.
+                    res.status = "STOPPED"
+                    res.wns_ns, res.hold_ps, res.tns_ns = (
+                        report.wns_ns, report.hold_ps, report.tns_ns)
+                    res.timing_source = f"run log (stopped after {stop})"
+                    res.path_groups = None
+                    res.max_slew_violations = res.max_cap_violations = None
+                    res.note = (f"stopped after {stop} (--stop-flow-at); "
+                                f"{report.headline()}")[:240]
+                    self.ui.good(f"{block}: STOPPED after {stop} as requested "
+                                 f"(--stop-flow-at) — {report.headline()}")
+                    return res
                 res.status = "DONE"
                 res.note = report.headline()
                 self.ui.good(f"{block}: PASS — {report.headline()}")
@@ -4620,6 +4640,9 @@ class JANUSAutonomousAgent:
                     self.results[b].status = "BLOCKED"
                     self.results[b].note = "skipped — a dependency failed"
 
+        # §207: optional user post-script (e.g. a probe) BEFORE the bundle so
+        # its log + outputs ride along in the email / Drive upload.
+        self._run_post_custom_script(block, res)
         # Fire the completion/failure notification OUTSIDE the results lock so
         # the (possibly slow) email/Drive I/O never serialises other blocks.
         # Fully best-effort inside notify(); a failure here cannot affect the run.
@@ -4669,10 +4692,13 @@ class JANUSAutonomousAgent:
             # reports by utils/report_bundle.py with the dashboard's parsers;
             # qor.json lands in the reports dir and inside the bundle.
             sr = None
+            stop = self._stop_stage() if res.status == "STOPPED" else None
             try:   # §175: merged stage-table email (never fatal)
                 logs_dir = _leafdir("logs", self._logs_dir(block))
+                kind = ("final" if res.status == "DONE"
+                        else "stage" if stop else "failed")
                 sr = _sr.build_report(
-                    block, "final" if res.status == "DONE" else "failed",
+                    block, kind, stage=_STOP_SR_KEY.get(stop) if stop else None,
                     logs_dir=logs_dir, reports_dir=reports_dir,
                     results_dir=_leafdir("results", self._results_dir(block)),
                     signoff_dir=signoff if os.path.isdir(signoff) else None,
@@ -4681,7 +4707,9 @@ class JANUSAutonomousAgent:
                     run_start=getattr(self, "_block_t0", {}).get(block),
                     elapsed=self._block_elapsed(block),
                     ctx=self._stage_ctx(block, reports_dir))
-                if res.status != "DONE" and sr.get("subject"):
+                if stop and sr.get("subject"):
+                    sr["subject"] = f"[STOPPED@{stop}] " + sr["subject"]
+                elif res.status != "DONE" and sr.get("subject"):
                     sr["subject"] = sr["subject"].replace(" FAILED", f" {res.status}", 1)
             except Exception as e:
                 self._notify_log(f"{block}: stage report error (ignored): {e}")
@@ -4702,6 +4730,8 @@ class JANUSAutonomousAgent:
                 bundle_dir=os.path.join(self.run_dir, "bundles", block),
                 run_table=self._run_table(),
                 drive_subfolder=self._drive_run_stamp(),
+                extra_dirs=self._bundle_extra_dirs(block),
+                limit_stage=stop,
             )
             out = getattr(self.notifier, "last_outcome", "") or "no outcome recorded"
             (self.ui.good if out.startswith("email SENT") and "[" not in out
@@ -4713,6 +4743,110 @@ class JANUSAutonomousAgent:
         except Exception as e:  # never let notification affect the run
             self.ui.warn(f"{block}: notification hook error (ignored): {e}")
             self._notify_log(f"{block}: notification hook error: {e}")
+
+    # ----- §207: --stop-flow-at / --post-custom-script -----------------------
+    def _stop_stage(self) -> Optional[str]:
+        st = getattr(self.args, "stop_flow_at", None)
+        return st if st in STOP_FLOW_STAGES else None
+
+    def _stop_goal(self) -> List[str]:
+        """Explicit ORFS make goal for --stop-flow-at (ORFS .DEFAULT_GOAL is
+        `all` = synth..finish). `grt` is the ORFS global-route goal."""
+        st = self._stop_stage()
+        return [st] if st else []
+
+    def _post_script_out(self, block: str) -> str:
+        return os.path.join(self.run_dir, "post_script", block)
+
+    def _bundle_extra_dirs(self, block: str) -> Optional[Dict[str, str]]:
+        d = self._post_script_out(block)
+        return {"post_script": d} if os.path.isdir(d) else None
+
+    def _post_custom_cmd(self, block: str, script: str) -> List[str]:
+        """.tcl -> ORFS `make ... run RUN_SCRIPT=` (same CORNER/CORNERS/libs
+        as the build, every artifact -o'd so no stage rebuilds); extra args
+        become make assignments. .py -> python3; executable -> direct;
+        otherwise bash. Extra args are appended for non-tcl scripts."""
+        extra = shlex.split(getattr(self.args, "post_custom_args", None) or "")
+        if script.endswith(".tcl"):
+            return self._post_build_make_cmd(
+                block, ["run", f"RUN_SCRIPT={script}"] + extra)
+        if script.endswith(".py"):
+            return [sys.executable, script] + extra
+        if os.access(script, os.X_OK):
+            return [script] + extra
+        return ["bash", script] + extra
+
+    def _run_post_custom_script(self, block: str, res: "BlockResult") -> Optional[int]:
+        """Run --post-custom-script once the block settled (DONE / STOPPED;
+        FAILED etc. only with --post-custom-on-fail). Its stdout+stderr go to
+        <run_dir>/post_script/<block>/post_custom_script.log and anything it
+        writes into $JANUS_POST_SCRIPT_OUT (same dir) is bundled into the
+        email / Drive upload. Never changes the block status; never raises."""
+        script = getattr(self.args, "post_custom_script", None)
+        if not script:
+            return None
+        if res.status not in ("DONE", "STOPPED") and not getattr(
+                self.args, "post_custom_on_fail", False):
+            self.ui.info(f"{block}: post-custom-script skipped (status {res.status}; "
+                         "--post-custom-on-fail to run it anyway)")
+            return None
+        if getattr(self.args, "dry_run", False):
+            self.ui.info(f"{block}: [dry-run] would run post-custom-script {script}")
+            return None
+        out = self._post_script_out(block)
+        log_path = os.path.join(out, "post_custom_script.log")
+        rc: Optional[int] = None
+        try:
+            os.makedirs(out, exist_ok=True)
+            script = os.path.abspath(os.path.expanduser(script))
+            cmd = self._post_custom_cmd(block, script)
+            env = dict(os.environ)
+            env.update({
+                "JANUS_BLOCK": block,
+                "JANUS_BLOCK_STATUS": str(res.status),
+                "JANUS_STOP_FLOW_AT": self._stop_stage() or "",
+                "JANUS_FLOW_DIR": self.flow_dir or "",
+                "JANUS_RUN_DIR": self.run_dir,
+                "JANUS_RESULTS_DIR": self._results_dir(block) or "",
+                "JANUS_REPORTS_DIR": self._reports_dir(block) or "",
+                "JANUS_LOGS_DIR": self._logs_dir(block) or "",
+                "JANUS_DESIGN_CONFIG": self._config_path(block),
+                "JANUS_POST_SCRIPT_OUT": out,
+            })
+            for kv in (getattr(self.args, "post_custom_env", None) or []):
+                k, _, v = kv.partition("=")
+                env[k.strip()] = v
+            tmo = float(getattr(self.args, "post_custom_timeout", 7200) or 0) or None
+            self.ui.step(f"{block}: post-custom-script → {' '.join(cmd[:2])} ... "
+                         f"(log {log_path})")
+            t0 = time.time()
+            with open(log_path, "w") as lf:
+                lf.write(f"# JANUS §207 post-custom-script  block={block} "
+                         f"status={res.status}\n# cwd={self.flow_dir}\n"
+                         f"# cmd={' '.join(shlex.quote(c) for c in cmd)}\n"
+                         f"# JANUS_POST_SCRIPT_OUT={out}\n\n")
+                lf.flush()
+                try:
+                    rc = subprocess.run(cmd, cwd=self.flow_dir or None, env=env,
+                                        stdout=lf, stderr=subprocess.STDOUT,
+                                        timeout=tmo).returncode
+                except subprocess.TimeoutExpired:
+                    rc = 124
+                    lf.write(f"\n# TIMEOUT after {tmo:.0f} s (--post-custom-timeout)\n")
+                lf.write(f"\n# rc={rc} elapsed={time.time() - t0:.0f}s\n")
+            (self.ui.good if rc == 0 else self.ui.warn)(
+                f"{block}: post-custom-script rc={rc} ({time.time() - t0:.0f}s); "
+                "output bundled with the report")
+            res.note = (f"{res.note or ''} | post-script rc={rc}").strip(" |")[:240]
+        except Exception as e:  # never let the user script affect the run
+            self.ui.warn(f"{block}: post-custom-script error (ignored): {e}")
+            try:
+                with open(log_path, "a") as lf:
+                    lf.write(f"\n# agent error launching script: {e}\n")
+            except OSError:
+                pass
+        return rc
 
     def _milestone_tracker(self, block: str):
         """§157: per-make-run milestone parser, or None when milestone emails
@@ -5695,6 +5829,14 @@ _SKIP_MAP = {
 }
 
 # Read-only / exit-early modes: at most one per invocation.
+# §207 --stop-flow-at: ORFS make goals (Makefile `synth: ... grt: ... route:`)
+# and the matching stage_report STAGE_KEYS row for the stopped-run email.
+STOP_FLOW_STAGES = ("synth", "floorplan", "place", "cts", "grt", "route")
+_STOP_SR_KEY = {"synth": "1_synth", "floorplan": "2_floorplan", "place": "3_place",
+                "cts": "4_cts", "grt": "5_grt", "route": "5_drt"}
+_RESUME_FROM_IDX = {"1_synth": 0, "2_floorplan": 1, "3_place": 2, "4_cts": 3,
+                    "5_route": 4, "6_final": 6}
+
 _EXCLUSIVE_MODES = ("status", "gc", "gc_dry_run", "resume_preview", "estimate",
                     "signoff_only", "triage_slew", "eco_drv_only", "abstract_only")
 _ADAPTIVE_MAX_PASSES_CAP = 5
@@ -5735,6 +5877,34 @@ def _validate_args(args: argparse.Namespace) -> Tuple[List[str], List[str]]:
                     "--force-blocks is redundant")
     if g("yes") and not g("gc"):
         warn.append("--yes only answers the --gc prompt; ignored")
+    # §207 unattended-run flags
+    if g("stop_flow_at"):
+        if modes:
+            err.append(f"--stop-flow-at needs a build; it conflicts with {modes[0]}")
+        rf = g("resume_from")
+        stop_idx = min(STOP_FLOW_STAGES.index(g("stop_flow_at")), 4)  # grt/route = 5_route
+        if rf and _RESUME_FROM_IDX.get(rf, 0) > stop_idx:
+            err.append(f"--resume-from {rf} is after --stop-flow-at "
+                       f"{g('stop_flow_at')} (nothing would run)")
+        if g("post_triage_slew"):
+            warn.append("--post-triage-slew needs a routed block; ignored for "
+                        "a --stop-flow-at run that stops before finish")
+    pcs = g("post_custom_script")
+    if pcs and not os.path.isfile(os.path.expanduser(pcs)):
+        err.append(f"--post-custom-script {pcs}: file not found")
+    if not pcs and (g("post_custom_args") or g("post_custom_env")
+                    or g("post_custom_on_fail")):
+        warn.append("--post-custom-args/-env/-on-fail have no effect without "
+                    "--post-custom-script")
+    for kv in (g("post_custom_env") or []):
+        if "=" not in kv or not kv.split("=", 1)[0].strip():
+            err.append(f"--post-custom-env {kv!r}: expected VAR=VAL")
+    asi = g("auto_stop_idle")
+    if asi is not None and asi < 0:
+        err.append("--auto-stop-idle MIN must be >= 0 (0 = off)")
+    elif asi and asi < 10:
+        warn.append(f"--auto-stop-idle {asi}: the watcher ticks every 60 s and "
+                    "load5 lags; < 10 min may stop the box between steps")
     if g("no_git_commit") and (g("git_push") or g("git_sync_branches")):
         err.append("--git-push/--git-sync-branches publish committed fixes; "
                    "they conflict with --skip git-commit (--no-git-commit)")
@@ -6170,6 +6340,54 @@ def build_parser() -> argparse.ArgumentParser:
                        help="override classifier thresholds with a JSON object "
                             "(inline or a file path); keys must be from "
                             "adaptive_closure.DEFAULT_THRESHOLDS.")
+    # ----- §207 unattended runs ------------------------------------------
+    un = p.add_argument_group(
+        "unattended runs (§207)",
+        "stop the flow early, run a custom probe, and auto-stop the EC2 box. "
+        "The usual per-block email / --gdrive-upload bundle still goes out "
+        "and includes the post-script log + outputs.")
+    un.add_argument("--stop-flow-at", default=None, choices=STOP_FLOW_STAGES,
+                    metavar="STAGE",
+                    help="end the ORFS flow after STAGE (one of "
+                         f"{', '.join(STOP_FLOW_STAGES)}; passed as the make "
+                         "goal). The block settles as STOPPED: no post-route "
+                         "opt / abstract / signoff / golden, dependents are "
+                         "skipped, the manifest stays resumable (--resume "
+                         "continues from STAGE). Email + Drive bundle are sent "
+                         "with reports/logs up to STAGE.")
+    un.add_argument("--post-custom-script", default=None, metavar="PATH",
+                    help="run PATH after each block settles (DONE/STOPPED), "
+                         "BEFORE the email/Drive bundle. .tcl -> ORFS `make "
+                         "... run RUN_SCRIPT=PATH` with the build's corners/"
+                         "libs (e.g. scripts/debug/soc_cts_align_probe.tcl); "
+                         ".py -> python3; else executable/bash. cwd = ORFS "
+                         "flow dir; env JANUS_BLOCK, JANUS_RESULTS_DIR, "
+                         "JANUS_REPORTS_DIR, JANUS_LOGS_DIR, JANUS_RUN_DIR, "
+                         "JANUS_POST_SCRIPT_OUT (files written there are "
+                         "bundled). Never changes the block status.")
+    un.add_argument("--post-custom-args", default=None, metavar="'ARGS'",
+                    help="extra args (one shell-quoted string). For .tcl they "
+                         "are make assignments, e.g. 'SAP_MODE=split'.")
+    un.add_argument("--post-custom-env", action="append", default=None,
+                    metavar="VAR=VAL",
+                    help="extra env var for the post-script (repeatable), "
+                         "e.g. --post-custom-env SAP_MODE=split")
+    un.add_argument("--post-custom-timeout", type=float, default=7200.0,
+                    metavar="SEC", help="kill the post-script after SEC "
+                    "(default 7200; 0 = no limit). rc=124 on timeout.")
+    un.add_argument("--post-custom-on-fail", action="store_true",
+                    help="also run the post-script when the block FAILED / "
+                         "NEEDS_MANUAL (default: DONE and STOPPED only).")
+    un.add_argument("--auto-stop-idle", type=int, default=None, metavar="MIN",
+                    help="EC2: arm a detached idle watcher (utils/idle_stop.py "
+                         "--watch) at launch; it STOPS the instance once no "
+                         "agent/openroad/yosys/make/rsync/git process, no "
+                         "terminal input and load5<=1.0 for MIN minutes (so "
+                         "after this run, its post-script and emails/uploads "
+                         "are all done). Survives an agent crash. Needs root "
+                         "or passwordless sudo for `shutdown -h now`. Cancel: "
+                         "touch ~/.janus_no_autostop. Env "
+                         "JANUS_AUTO_STOP_IDLE=MIN does the same.")
     p.add_argument("--debug-on-fail", action="store_true",
                    help="on a block FAILURE, rerun hooks/janus_debug_rerun.tcl "
                         "on the last good ODB to dump debug timing reports "
@@ -6505,6 +6723,50 @@ def _relaunch_in_tmux(argv: Optional[List[str]]) -> int:
     return 0
 
 
+def _arm_auto_stop(args: argparse.Namespace,
+                   popen=subprocess.Popen) -> Optional[List[str]]:
+    """§207: spawn the detached EC2 idle watcher (utils/idle_stop.py --watch).
+    Armed at LAUNCH (not at exit) so it also covers an agent crash / OOM-kill;
+    while this agent, any flow tool, a post-script, an upload (rsync/scp) or
+    terminal input is active it only records 'busy'. idle_stop.py keeps a pid
+    file, so a second agent (or janus_autorun.sh) re-arming is a no-op.
+    Returns the command (for tests) or None when not armed."""
+    mins = getattr(args, "auto_stop_idle", None)
+    if mins is None:
+        try:
+            mins = int(os.environ.get("JANUS_AUTO_STOP_IDLE", "0") or 0)
+        except ValueError:
+            mins = 0
+    if not mins or mins <= 0 or getattr(args, "dry_run", False):
+        return None
+    watcher = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           os.pardir, "utils", "idle_stop.py")
+    watcher = os.path.normpath(watcher)
+    cmd = [sys.executable, watcher, "--watch", "--idle-minutes", str(mins)]
+    env = dict(os.environ)
+    # stop email reuses the run's SMTP creds (CLI wins over env)
+    for k, a in (("SMTP_HOST", "smtp_host"), ("SMTP_PORT", "smtp_port"),
+                 ("SMTP_USER", "smtp_user"), ("SMTP_PASS", "smtp_pass"),
+                 ("NOTIFY_EMAIL", "notify_email")):
+        v = getattr(args, a, None) or os.environ.get(k)
+        if isinstance(v, (list, tuple)):
+            v = ",".join(v)
+        if v:
+            env["JIS_" + k] = str(v)
+    log = os.path.expanduser("~/.janus_idle_watch.out")
+    try:
+        with open(log, "ab") as lf:
+            popen(cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
+                  env=env, start_new_session=True, close_fds=True)
+        print(f"[auto-stop] idle watcher armed: EC2 stops after {mins} min idle "
+              f"(log ~/.janus_idle_watch.log; cancel: touch ~/.janus_no_autostop)",
+              file=sys.stderr)
+        return cmd
+    except Exception as e:  # never block the run
+        print(f"warning: --auto-stop-idle: could not start watcher: {e}", file=sys.stderr)
+        return None
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -6533,6 +6795,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     rc = _manifest_only_cli(args)
     if rc is not None:
         return rc
+    _arm_auto_stop(args)   # §207: no-op unless --auto-stop-idle / env
     # PARENT fan-out: --variants launches one parallel child agent per spec.
     if getattr(args, "variants", None):
         return _run_variants_parent(args, argv)

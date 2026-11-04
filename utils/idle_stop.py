@@ -19,6 +19,12 @@ Every 5 min (janus-idle-stop.timer) this decides BUSY or IDLE:
 
 Config: KEY=VALUE file (default /etc/janus/idle_stop.conf), env vars override.
 CLI: idle_stop.py [--conf F] [--dry-run] [--status]
+
+§207 --watch: the same decision in a user-space loop (no systemd needed), armed
+by `janus_agent.py --auto-stop-idle MIN` / janus_autorun.sh at launch. Ticks
+every --interval s (default 60) with its own STATE_DIR/LOG_FILE under the
+user's home/tmp, is a singleton (pid file), and runs `sudo -n shutdown -h now`
+when not root. Exits after STOP, REFUSED or DISABLED.
 """
 import argparse
 import json
@@ -70,18 +76,23 @@ BUSY_PATTERNS = [
 
 def load_conf(path):
     c = dict(DEFAULTS)
+    lines = []
     if path and os.path.isfile(path):
-        with open(path) as fh:
-            for ln in fh:
-                ln = ln.strip()
-                if not ln or ln.startswith("#") or "=" not in ln:
-                    continue
-                k, v = ln.split("=", 1)
-                k = k.strip().removeprefix("export ").strip()
-                v = v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
-                    v = v[1:-1]
-                c[k] = v
+        try:   # §207: the root-only 600 conf is unreadable for the --watch user
+            with open(path) as fh:
+                lines = fh.readlines()
+        except OSError:
+            lines = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln or ln.startswith("#") or "=" not in ln:
+            continue
+        k, v = ln.split("=", 1)
+        k = k.strip().removeprefix("export ").strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+            v = v[1:-1]
+        c[k] = v
     for k in list(c):
         if os.environ.get("JIS_" + k) is not None:      # test / one-off override
             c[k] = os.environ["JIS_" + k]
@@ -283,13 +294,96 @@ def check(c, now=None, dry_run=False, behavior_fn=shutdown_behavior):
     return "STOP", detail
 
 
+def _watch_defaults(c):
+    """User-space paths + sudo stop for the --watch loop (unless overridden
+    via JIS_* env). /tmp is wiped at boot, so each boot starts fresh."""
+    uid = os.getuid()
+    if not os.environ.get("JIS_STATE_DIR"):
+        c["STATE_DIR"] = f"/tmp/janus-idle-watch-{uid}"
+    if not os.environ.get("JIS_LOG_FILE"):
+        c["LOG_FILE"] = os.path.expanduser("~/.janus_idle_watch.log")
+    if not os.environ.get("JIS_STOP_CMD") and uid != 0:
+        c["STOP_CMD"] = "sudo -n shutdown -h now"
+    return c
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return b"idle_stop.py" in fh.read()
+    except OSError:
+        return True
+
+
+def watch(c, interval=60.0, dry_run=False, max_ticks=None, sleep=time.sleep,
+          behavior_fn=shutdown_behavior):
+    """Loop check() until STOP / REFUSED / DISABLED (or max_ticks). Returns
+    (exit_code, last_action). Singleton via STATE_DIR/watch.pid."""
+    os.makedirs(c["STATE_DIR"], exist_ok=True)
+    pidf = os.path.join(c["STATE_DIR"], "watch.pid")
+    try:
+        old = int(open(pidf).read().strip())
+    except (OSError, ValueError):
+        old = 0
+    if old and old != os.getpid() and _pid_alive(old):
+        print(f"idle watcher already running (pid {old}); not starting another")
+        return 0, "ALREADY"
+    with open(pidf, "w") as fh:
+        fh.write(str(os.getpid()))
+    if c["STOP_CMD"].startswith("sudo -n") and not dry_run:
+        r = subprocess.run(["sudo", "-n", "true"], capture_output=True, timeout=10)
+        if r.returncode != 0:
+            log(c, "WARN watch: passwordless sudo unavailable -- the STOP will fail; "
+                   "run as root or add a sudoers rule for shutdown")
+    log(c, f"WATCH start pid {os.getpid()}: stop after {c['IDLE_MINUTES']} min idle, "
+           f"tick {interval:.0f}s, stop cmd '{c['STOP_CMD']}'")
+    prev, ticks = None, 0
+    try:
+        while True:
+            act, det = check(c, dry_run=dry_run, behavior_fn=behavior_fn)
+            if act != prev or act in ("WARN", "STOP", "REFUSED"):
+                log(c, f"WATCH {act} {det}")
+            prev = act
+            if act == "REFUSED":
+                return 2, act
+            if act in ("STOP", "DISABLED"):
+                return 0, act
+            ticks += 1
+            if max_ticks is not None and ticks >= max_ticks:
+                return 0, act
+            sleep(interval)
+    finally:
+        try:
+            if open(pidf).read().strip() == str(os.getpid()):
+                os.remove(pidf)
+        except OSError:
+            pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--conf", default="/etc/janus/idle_stop.conf")
     ap.add_argument("--dry-run", action="store_true", help="decide and print, never stop/wall")
     ap.add_argument("--status", action="store_true", help="show busy reasons + idle time (read-only)")
+    ap.add_argument("--watch", action="store_true",
+                    help="§207: loop in user space until the box is idle, then stop it")
+    ap.add_argument("--idle-minutes", type=float, default=None, help="override IDLE_MINUTES")
+    ap.add_argument("--interval", type=float, default=60.0, help="--watch tick seconds")
     a = ap.parse_args(argv)
     c = load_conf(a.conf)
+    if a.idle_minutes is not None:
+        c["IDLE_MINUTES"] = str(a.idle_minutes)
+        if float(c["WARN_MINUTES"]) >= a.idle_minutes:
+            c["WARN_MINUTES"] = str(max(0.0, a.idle_minutes / 3))
+    if a.watch:
+        _watch_defaults(c)
+        return watch(c, interval=a.interval, dry_run=a.dry_run)[0]
     if a.status:
         now = time.time()
         r = busy_reasons(c, now)
