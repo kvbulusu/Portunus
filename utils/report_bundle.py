@@ -732,14 +732,41 @@ def _after_stage(fname: str, failed_stage: str) -> bool:
             and _STAGE_IDX[st] > _STAGE_IDX[failed_stage])
 
 
-def _stage_timing_fallback(reports_dir: Optional[str], failed_stage: str) -> Dict[str, object]:
-    """Timing from the newest janus_NN_*_paths.rpt not after `failed_stage`."""
+_STALE_SLACK_S = 60.0
+
+
+def _stale_vs_logs(fname: str, logs_dir: Optional[str]) -> bool:
+    """§198c: True if report `fname` is OLDER than a log of an EARLIER stage in
+    `logs_dir` (it was written by a previous run; this run re-ran the earlier
+    stage after it). Run 20261103_130839 failed at 4_1 cts but quoted the
+    11-02 janus_06_cts_paths.rpt (-2488.19 / -1066.13) of an older run."""
+    st = stage_of(fname)
+    if st is None or not logs_dir or not os.path.isfile(fname):
+        return False
+    newest = None
+    for f in _ls(logs_dir):
+        lst = stage_of(f)
+        if not f.endswith(".log") or lst is None or _STAGE_IDX[lst] >= _STAGE_IDX[st]:
+            continue
+        mt = os.path.getmtime(f)
+        newest = mt if newest is None else max(newest, mt)
+    return newest is not None and os.path.getmtime(fname) + _STALE_SLACK_S < newest
+
+
+def _unusable(fname: str, failed_stage: str, logs_dir: Optional[str]) -> bool:
+    return _after_stage(fname, failed_stage) or _stale_vs_logs(fname, logs_dir)
+
+
+def _stage_timing_fallback(reports_dir: Optional[str], failed_stage: str,
+                           logs_dir: Optional[str] = None) -> Dict[str, object]:
+    """Timing from the newest janus_NN_*_paths.rpt not after `failed_stage`
+    and not older than this run's earlier-stage logs."""
     if _la is None:
         return {}
     cands = sorted(glob.glob(os.path.join(reports_dir or "#", "janus_[0-9][0-9]_*_paths.rpt")),
                    reverse=True)
     for f in cands:
-        if _after_stage(f, failed_stage):
+        if _unusable(f, failed_stage, logs_dir):
             continue
         try:
             with open(f, "r", errors="replace") as fh:
@@ -762,6 +789,11 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
               agent_log: Optional[str] = None, manifest_stage: str = "",
               tries: Optional[int] = None, note: str = "") -> Dict[str, object]:
     reached, failed = detect_stages(logs_dir, reports_dir, status, manifest_stage)
+    # §198c: files of later stages left by an older run must not make a failed
+    # run claim "Stage reached: finish" (run 20261103_130839 failed at cts).
+    if failed and reached in _STAGE_IDX and failed in _STAGE_IDX \
+            and _STAGE_IDX[reached] > _STAGE_IDX[failed]:
+        reached = failed
     q: Dict[str, object] = {
         "schema": "janus.qor/1", "block": block, "status": status,
         "generated": datetime.now().isoformat(timespec="seconds"),
@@ -784,9 +816,14 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
     # showed WNS -779.83 from a stale janus_08_detail_route_paths.rpt). Fall
     # back to the newest janus_NN_*_paths.rpt at or before the failed stage.
     stale_dropped = None
-    if failed and t.get("_source") and _after_stage(t["_source"], failed):
+    stale_why = None
+    if failed and t.get("_source") and _unusable(t["_source"], failed, logs_dir):
         stale_dropped = os.path.basename(t["_source"])
-        t = _stage_timing_fallback(reports_dir, failed)
+        stale_why = ("later stage than the failure" if _after_stage(t["_source"], failed)
+                     else "older than this run's earlier-stage logs")
+        t = _stage_timing_fallback(reports_dir, failed, logs_dir)
+    elif failed and not t:
+        t = _stage_timing_fallback(reports_dir, failed, logs_dir)
     pg = t.get("path_groups") or {"setup": {}, "hold": {}}
     counts = t.get("counts") or {}
     setup_worst = t.get("setup_worst")
@@ -810,6 +847,7 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
     }
     if stale_dropped:
         timing["stale_dropped"] = stale_dropped
+        timing["stale_why"] = stale_why
     # §154: an adopted post-route ECO replaces 6_final.* but NOT 6_finish.rpt
     # (§150). Without this the email header showed pre-ECO slack (ara
     # 20261024: header -61.32 while the ECO'd 6_final in force is -10.84).
@@ -835,7 +873,7 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
                                                 timing["hold_worst_slack"])
                              if _la else None)
     dbg, dbg_src = parse_debug_groups(reports_dir)
-    if failed and dbg_src and _after_stage(dbg_src, failed):
+    if failed and dbg_src and _unusable(os.path.join(reports_dir or "#", dbg_src), failed, logs_dir):
         dbg, dbg_src = {}, None
     if dbg:
         timing["class_split"] = dbg
@@ -859,7 +897,7 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
            "period_min": ex.get("period_min"), "source": None}
     sdc_all = parse_sdc_clocks(results_dir)
     cmin = ex.get("clocks_min") or {}
-    if not cmin and os.path.isfile(fin):
+    if not cmin and os.path.isfile(fin) and not (failed and _unusable(fin, failed, logs_dir)):
         cmin = parse_finish_extras(_read(fin)).get("clocks_min") or {}
     prim = pick_primary_clock(sdc_all, cmin) if len(sdc_all) > 1 else None
     if prim:
@@ -982,7 +1020,8 @@ def render_email_body(q: Dict[str, object]) -> str:
     L.append(f"  Hold       : worst slack {_f(t.get('hold_worst_slack'))}  violators {_f(v.get('hold'), '{}')}")
     L.append(f"  Verdict    : {t.get('verdict') or 'UNKNOWN'}")
     if t.get("stale_dropped"):
-        L.append(f"  NOTE       : {t['stale_dropped']} is from a later stage than the failure "
+        L.append(f"  NOTE       : {t['stale_dropped']} is "
+                 f"{t.get('stale_why') or 'from a later stage than the failure'} "
                  f"(older run) -> not quoted")
     pe = t.get("pre_eco")
     if pe:
