@@ -1886,18 +1886,25 @@ class JANUSAutonomousAgent:
         # config/SDC is newer than 1_1_yosys_canonicalize.rtlil, so that bare
         # make re-ran synth -> ... -> route single-threaded on the default
         # corner, overwriting the finished .odbs (agent_domain 2026-10-08).
-        cmd = self._post_build_make_cmd(block, [target])
-        self.ui.step(f"{block}: generating abstract (.lef/.lib) via '{target}'")
+        base_cmd = self._post_build_make_cmd(block, [target])
         log_path = self._block_log(block)
-        try:
-            with open(log_path, "ab", buffering=0) as logf:
-                logf.write(f"\n===== {block} : {' '.join(cmd)} @ {datetime.now()} =====\n".encode())
-                proc = subprocess.run(cmd, cwd=self.flow_dir, stdout=logf,
-                                      stderr=subprocess.STDOUT)
-        except (OSError, subprocess.SubprocessError) as e:
-            self.ui.warn(f"{block}: abstract generation could not run: {e}")
-            return
-        if proc.returncode == 0:
+        rc = 0
+        for corner in self._abstract_corner_passes(base_cmd):
+            cmd = self._with_corners(base_cmd, corner)
+            what = f" corner={corner}" if corner else ""
+            self.ui.step(f"{block}: generating abstract (.lef/.lib){what} via '{target}'")
+            try:
+                with open(log_path, "ab", buffering=0) as logf:
+                    logf.write(f"\n===== {block} : {' '.join(cmd)} @ {datetime.now()} =====\n".encode())
+                    proc = subprocess.run(cmd, cwd=self.flow_dir, stdout=logf,
+                                          stderr=subprocess.STDOUT)
+            except (OSError, subprocess.SubprocessError) as e:
+                self.ui.warn(f"{block}: abstract generation could not run: {e}")
+                return
+            if proc.returncode != 0:
+                rc = proc.returncode
+                break
+        if rc == 0:
             lef = self._find_abstract(block, ".lef")
             lib = self._find_abstract(block, ".lib")
             self.results[block].note += "  +abstract"
@@ -1906,9 +1913,77 @@ class JANUSAutonomousAgent:
                          f"lib={os.path.basename(lib) if lib else 'n/a'}")
             self._check_abstract_corners(block)
         else:
-            self.ui.warn(f"{block}: abstract target rc={proc.returncode} "
+            self.ui.warn(f"{block}: abstract target rc={rc} "
                          f"(GDS is still valid; see {os.path.basename(log_path)}). "
                          "Top-level integration will need this .lef/.lib.")
+
+    @staticmethod
+    def _abstract_corner_passes(cmd: List[str]) -> List[Optional[str]]:
+        """§202: one openroad session PER CORNER for the abstract.
+
+        openroad 26Q2-2270 (EC2) `write_timing_model -scene fast` in a
+        multi-corner session emits SLOW clk->out arrivals + the SS header
+        (etm_corner_selftest.sh on EC2, 2026-11-03: A/B SUSPECT ratio 1.014,
+        C single-corner fast OK ratio 2.009; leaf libs user_core_ara/cva6
+        median ratio 0.998/1.001). A single-corner session is correct, so emit
+        each <blk>_<corner>.lib from its own session (CORNERS=<corner>; the
+        matching <CORNER>_LIB_FILES list is already on the make line).
+        Returns [None] (one stock pass) when the make line is single-corner or
+        JANUS_ETM_PER_CORNER=0."""
+        cs = [t.split("=", 1)[1].split() for t in cmd if t.startswith("CORNERS=")]
+        if not cs or len(cs[-1]) < 2 or os.environ.get("JANUS_ETM_PER_CORNER", "1") == "0":
+            return [None]
+        return list(cs[-1])
+
+    @staticmethod
+    def _with_corners(cmd: List[str], corner: Optional[str]) -> List[str]:
+        """cmd with every CORNERS=... replaced by CORNERS=<corner> (None = as-is)."""
+        if not corner:
+            return list(cmd)
+        return [f"CORNERS={corner}" if t.startswith("CORNERS=") else t for t in cmd]
+
+    def _abstract_only(self) -> int:
+        """§202 --abstract-only: regenerate the .lef/.lib abstract of each
+        --blocks block from its EXISTING 6_final (per-corner sessions), then
+        run the §201 corner check. Blocks run children-first (DEFAULT_GRAPH),
+        so a parent's ETM is written against its children's regenerated libs.
+        No stamp check, no build, no manifest/golden/signoff. Exit 0 = all OK,
+        1 = abstract rc!=0, 3 = no routed odb, 5 = corner check SUSPECT."""
+        blocks = list(self.args.blocks or [])
+        if not blocks:
+            self.ui.err("--abstract-only needs --blocks (children first is automatic), "
+                        "e.g. --blocks user_core_ara user_core_cva6 user_core user_domain")
+            return 2
+        order: List[str] = []
+        def visit(b: str) -> None:
+            for d in sorted(DEFAULT_GRAPH.get(b, ())):
+                if d in blocks:
+                    visit(d)
+            if b not in order:
+                order.append(b)
+        for b in blocks:
+            visit(b)
+        os.makedirs(self.run_dir, exist_ok=True)
+        rc_all = 0
+        for b in order:
+            if b not in self.results:
+                self.results[b] = BlockResult(block=b)
+            if not self._find_routed_odb(b):
+                self.ui.err(f"{b}: no routed .odb (block must have finished routing)")
+                rc_all = rc_all or 3
+                continue
+            if self.args.dry_run:
+                self.ui.info(f"  (dry-run) would regenerate the abstract of {b}")
+                continue
+            note0 = self.results[b].note
+            self._run_abstract(b)
+            note = self.results[b].note[len(note0):]
+            if "+abstract" not in note:
+                rc_all = rc_all or 1
+            elif "ETM-FAST-SUSPECT" in note:
+                rc_all = rc_all or 5
+        self.ui.info("abstract-only order: " + " -> ".join(order) + f"  rc={rc_all}")
+        return rc_all
 
     def _abstract_base_dirs(self, block: str) -> List[str]:
         """Candidate results/<...>/base dirs for a block, bare block name FIRST.
@@ -4313,6 +4388,8 @@ class JANUSAutonomousAgent:
             return self._signoff_only()
         if getattr(self.args, "eco_drv_only", False):
             return self._eco_drv_only()
+        if getattr(self.args, "abstract_only", False):
+            return self._abstract_only()
         self._preflight()
         if self.dashboard is not None:
             try:
@@ -5619,7 +5696,7 @@ _SKIP_MAP = {
 
 # Read-only / exit-early modes: at most one per invocation.
 _EXCLUSIVE_MODES = ("status", "gc", "gc_dry_run", "resume_preview", "estimate",
-                    "signoff_only", "triage_slew", "eco_drv_only")
+                    "signoff_only", "triage_slew", "eco_drv_only", "abstract_only")
 _ADAPTIVE_MAX_PASSES_CAP = 5
 
 
@@ -5667,6 +5744,8 @@ def _validate_args(args: argparse.Namespace) -> Tuple[List[str], List[str]]:
         warn.append("--golden-dir ignored under --skip golden")
     if g("signoff_only") and g("no_signoff"):
         err.append("--signoff-only conflicts with --skip signoff (--no-signoff)")
+    if g("abstract_only") and g("no_abstract"):
+        err.append("--abstract-only conflicts with --skip abstract (--no-abstract)")
     if g("interactive") and g("no_llm"):
         warn.append("--interactive with --skip llm only prompts before "
                     "deterministic fixes (no LLM calls will be made)")
@@ -5890,6 +5969,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="§183: run ONLY the max-slew ECO on the EXISTING routed result "
                         "of each --blocks block; if adopted, re-run abstract, sign-off "
                         "and golden. Exit 0 adopted, 5 discarded, 3 no routed odb.")
+    p.add_argument("--abstract-only", action="store_true",
+                   help="§202: regenerate ONLY the .lef/.lib abstract of each --blocks "
+                        "block from its EXISTING 6_final (one openroad session per "
+                        "corner), children first, then the §201 corner check. No "
+                        "build/stamp/signoff/golden. Exit 0 OK, 1 abstract failed, "
+                        "3 no routed odb, 5 corner check SUSPECT.")
     p.add_argument("--no-debug-dump", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--no-debug-images", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--drc-handful", type=int, default=20,
