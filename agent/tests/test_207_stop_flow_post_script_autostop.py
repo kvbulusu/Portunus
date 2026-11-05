@@ -271,8 +271,17 @@ def _autorun_repos(tmp_path):
     _sh(f"{g} commit -qam golden", box)
     (box / "cfg.txt").write_text("a\nedit\n")
     home.mkdir()
-    (home / ".bashrc").write_text('[ -z "$PS1" ] && return\nsource ~/.bashrc_aliases\n')
-    (home / ".bashrc_aliases").write_text("export SMTP_HOST=smtp.x\nalias ll=ls\n")
+    (tmp_path / "orfs").mkdir()
+    # kiran's layout: ~/.bashrc returns when non-interactive and sources
+    # ~/.bash_aliases, whose janus() sources the untracked repo env file
+    (box / "asic_flow/janus_asic_env.sh").write_text(f"export ORFS_DIR={tmp_path}/orfs\n")
+    (home / ".bashrc").write_text('case $- in *i*) ;; *) return;; esac\n'
+                                  'if [ -f ~/.bash_aliases ]; then . ~/.bash_aliases; fi\n')
+    (home / ".bash_aliases").write_text(
+        "export SMTP_HOST=smtp.x\nalias ll=ls\n"
+        f"janus() {{\n  cd {box} || return 1\n  local n=4\n  export OMP_NUM_THREADS=$n\n"
+        "  source asic_flow/janus_asic_env.sh || return 1\n"
+        "  export JANUS_GDRIVE_ROOT_ID=abc\n  echo JANUS_FN_RAN\n}\njanus\n")
     return g, dev, box, home
 
 
@@ -293,7 +302,9 @@ def test_autorun_rebases_local_commits_keeps_edits(tmp_path):
     _sh(f"git add new.txt && {g} commit -qm upstream && git push -q origin main", dev)
     rc, log = _run_autorun(box, home)
     assert rc == 0, log
-    assert "1 ahead / 1 behind" in log and "env: 1 export(s)" in log
+    assert "1 ahead / 1 behind" in log and "JANUS_FN_RAN" in log
+    assert "ORFS_DIR=" + str(tmp_path / "orfs") in log and "OMP_NUM_THREADS=4" in log
+    assert "JANUS_GDRIVE_ROOT_ID=set" in log and "SMTP_HOST=smtp.x" in log
     assert (box / "new.txt").exists() and (box / "golden.txt").read_text() == "g2\n"
     assert (box / "cfg.txt").read_text() == "a\nedit\n"
     subj = subprocess.run("git log --format=%s", cwd=box, shell=True,
@@ -317,6 +328,15 @@ def test_autorun_conflict_restores_and_aborts(tmp_path, clash):
     assert (box / "golden.txt").read_text() == "g2\n"
     assert subprocess.run("git stash list", cwd=box, shell=True,
                           capture_output=True, text=True).stdout == ""
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git")
+def test_autorun_aborts_without_orfs_dir(tmp_path):
+    g, dev, box, home = _autorun_repos(tmp_path)
+    (box / "asic_flow/janus_asic_env.sh").unlink()
+    (home / ".bash_aliases").write_text("export SMTP_HOST=smtp.x\n")
+    rc, log = _run_autorun(box, home)
+    assert rc == 6 and "ORFS_DIR not set" in log and "AGENT" not in log
 
 
 def test_autorun_no_pull_no_args(tmp_path):
