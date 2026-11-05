@@ -89,7 +89,7 @@ def test_mk_enables_align_and_abort_in_hier_block():
     hier = hier[:hier.index("\nendif")]
     for k, v in (("JANUS_CTS_MACRO_ALIGN", "1"), ("JANUS_CTS_MACRO_ALIGN_MODE", "isolate"),
                  ("JANUS_CTS_MACRO_ALIGN_CLOCKS", "clk_user"),
-                 ("JANUS_CTS_MACRO_ALIGN_MAXPUSH", "5000"), ("JANUS_CTS_HOLD_ABORT_PS", "-1500")):
+                 ("JANUS_CTS_MACRO_ALIGN_MAXPUSH", "5000"), ("JANUS_CTS_HOLD_ABORT_PS", "-700")):
         assert re.search(r"^export %s\s*=\s*%s\s*$" % (k, re.escape(v)), hier, re.M), k
     # §199 widened the list; u_user must stay first
     assert re.search(r"^export JANUS_CTS_MACRO_ALIGN_ISOLATE\s*=\s*u_user/user_clk\b", hier, re.M)
