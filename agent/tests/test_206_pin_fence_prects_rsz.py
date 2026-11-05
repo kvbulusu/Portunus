@@ -37,9 +37,9 @@ def _need_or():
 
 def test_rtl_pin_side_cut_and_msip_reg():
     cut = TOP[TOP.index("`ifndef JANUS_SOC_NO_UCUT"):TOP.index("`else", TOP.index("`ifndef JANUS_SOC_NO_UCUT"))]
-    assert re.search(r"axi4_link_slice u_ucut_mn \(.*?\.s_m2s_i\(user_m_req\),\s*\.s_s2m_o\(user_m_rsp\),"
+    assert re.search(r"axi4_link_slice (#\(\.MODE\(2\)\) )?u_ucut_mn \(.*?\.s_m2s_i\(user_m_req\),\s*\.s_s2m_o\(user_m_rsp\),"
                      r"\s*\.m_m2s_o\(user_m_mid_req\), \.m_s2m_i\(user_m_mid_rsp\)\);", cut, re.S)
-    assert re.search(r"axi4_link_slice u_ucut_m \(.*?\.s_m2s_i\(user_m_mid_req\), \.s_s2m_o\(user_m_mid_rsp\),"
+    assert re.search(r"axi4_link_slice (#\(\.MODE\(2\)\) )?u_ucut_m \(.*?\.s_m2s_i\(user_m_mid_req\), \.s_s2m_o\(user_m_mid_rsp\),"
                      r"\s*\.m_m2s_o\(noc_m_req\[0\]\)", cut, re.S)
     assert ".clint_msip_i   (clint_msip_q)" in TOP
     assert "clint_msip_q <= clint_msip;" in TOP

@@ -438,6 +438,51 @@ def parse_grt(text: str) -> Optional[int]:
 # ---------------------------------------------------------------------------
 # per-stage collection
 # ---------------------------------------------------------------------------
+# §211: ORFS writes the stage report (3_detailed_place.rpt) and metrics json
+# BEFORE POST_<STEP>_TCL runs; the JANUS debug dump is written at the end of
+# the hook chain. Run 20261104_224244: 3_detailed_place.rpt -3963.6 (pre
+# post-DPL repair) vs janus_05_detail_place_paths.rpt -1435.4 (what is in
+# 3_place.odb). When the dump is newer than the ORFS report it wins.
+POST_HOOK_DUMPS: Dict[str, str] = {
+    "3_place": "janus_05_detail_place_paths.rpt",
+    "4_cts": "janus_06_cts_paths.rpt",
+}
+_RE_DUMP = {
+    "setup_ws": re.compile(r"^worst slack max\s+(-?[\d.]+)", re.M),
+    "hold_ws": re.compile(r"^worst slack min\s+(-?[\d.]+)", re.M),
+    "setup_tns": re.compile(r"^tns max\s+(-?[\d.]+)", re.M),
+}
+_RE_PDR_AFTER = re.compile(r"JANUS_POST_DPL: after .*?slew_viol (-?\d+) cap_viol (-?\d+)")
+
+
+def _post_hook_override(row: Dict[str, object], key: str, reports_dir: Optional[str],
+                        since: Optional[float], log_text: str) -> None:
+    name = POST_HOOK_DUMPS.get(key)
+    if not name or not reports_dir:
+        return
+    dp = os.path.join(reports_dir, name)
+    if not os.path.isfile(dp) or not _fresh(dp, since):
+        return
+    dm = os.path.getmtime(dp)
+    for rn in _SPEC[key][4]:
+        rp = os.path.join(reports_dir, rn)
+        if os.path.isfile(rp) and os.path.getmtime(rp) > dm:
+            return  # ORFS report is the later state
+    t = _read(dp, 8 << 20)
+    vals = {k: float(m.group(1)) for k, rx in _RE_DUMP.items() for m in [rx.search(t)] if m}
+    if "setup_ws" not in vals:
+        return
+    row.update(vals)
+    row.pop("setup_viol", None)  # pre-hook count; the dump has none
+    p = parse_paths(t)
+    if p.get("max") or p.get("min"):
+        row["paths"] = p
+    m = _RE_PDR_AFTER.findall(log_text or "")
+    if m:
+        row["slew_viol"], row["cap_viol"] = int(m[-1][0]), int(m[-1][1])
+    row["timing_src"] = name
+
+
 def collect_stage(key: str, logs_dir: Optional[str], reports_dir: Optional[str],
                   metrics: Optional[Dict] = None, since: Optional[float] = None) -> Dict[str, object]:
     """QoR + runtime for one stage. Never raises (missing -> absent key).
@@ -482,6 +527,7 @@ def collect_stage(key: str, logs_dir: Optional[str], reports_dir: Optional[str],
                     break
         row["paths"] = parse_paths(rpt_text)
         log_text = "\n".join(_read(p) for p in stage_logs(logs_dir, key, since))
+        _post_hook_override(row, key, reports_dir, since, log_text)
         rep = parse_repair(log_text)
         for k in ("setup_pre_wns", "setup_post_wns", "hold_pre_wns", "hold_post_wns",
                   "hold_bufs_peak", "rsz0060"):
