@@ -121,3 +121,27 @@ def test_report_keeps_orfs_when_dump_older(tmp_path):
     logs, rep = _mk(tmp_path, dump_newer=False)
     r = sr.collect_stage("3_place", logs, rep, metrics={})
     assert r["setup_ws"] == -3963.60 and "timing_src" not in r
+
+
+# (4) fetch_enable_i registered on agent_clk before u_agent (113025 4_cts
+#     in2reg -510.3: 1500 ps input delay on a ~1300 ps refpin vs isolated
+#     u_agent/agent_clk ~684 ps). u_user keeps the raw port.
+def test_fetch_enable_agent_reg():
+    assert re.search(r"always_ff @\(posedge agent_clk or negedge agent_rst_n\) begin\s*"
+                     r"if \(!agent_rst_n\) fetch_enable_agent_q <= 1'b0;\s*"
+                     r"else\s+fetch_enable_agent_q <= fetch_enable_i;", TOP)
+    agent = TOP[TOP.index("agent_cluster_top u_agent ("):]
+    agent = agent[:agent.index(");")]
+    assert ".fetch_enable_i (fetch_enable_agent_q)" in agent
+    user = TOP[TOP.index("user_cluster_top u_user ("):]
+    assert ".fetch_enable_i (fetch_enable_i)" in user[:user.index(");")]
+
+
+# (5) post-DPL repair_design iterates while the slew count drops (max 4) and
+#     cleans up after repair_timing (224244: 60 -> 63 slew).
+def test_post_dpl_adaptive_iters_and_cleanup():
+    mk = (ROOT / "asic_flow/configs/janus_soc_top.mk").read_text()
+    assert re.search(r"^export JANUS_POST_DPL_ITERS\s*=\s*4\b", mk, re.M)
+    assert "proc janus_pdr::nslew" in PDR
+    assert re.search(r"if \{ \$k >= 2 && \(\$cur == 0 \|\| \(\$prev >= 0 && \$cur >= \$prev\)\) \} \{ break \}", PDR)
+    assert "JANUS_POST_DPL: cleanup repair_design" in PDR
