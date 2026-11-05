@@ -1,0 +1,3 @@
+library(big) { delay_model : table_lookup; time_unit : "1ps"; capacitive_load_unit (1,ff); voltage_unit : "1V"; current_unit : "1mA"; leakage_power_unit : "1nW"; pulling_resistance_unit : "1kohm";
+ cell(BIGM) { area : 160000; pin(a) { direction : input; capacitance : 1; } }
+}

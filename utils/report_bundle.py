@@ -797,6 +797,7 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
               agent_log: Optional[str] = None, manifest_stage: str = "",
               tries: Optional[int] = None, note: str = "") -> Dict[str, object]:
     reached, failed = detect_stages(logs_dir, reports_dir, status, manifest_stage)
+    stopped = str(status).upper() == "STOPPED"
     # §198c: files of later stages left by an older run must not make a failed
     # run claim "Stage reached: finish" (run 20261103_130839 failed at cts).
     if failed and reached in _STAGE_IDX and failed in _STAGE_IDX \
@@ -806,7 +807,11 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
         "schema": "janus.qor/1", "block": block, "status": status,
         "generated": datetime.now().isoformat(timespec="seconds"),
         "units": {"time": "ps", "area": "um^2", "power": "W", "freq": "MHz"},
-        "stage_reached": reached, "failed_stage": failed or None,
+        "stage_reached": reached, "failed_stage": (failed or None) if not stopped else None,
+        # §210: a normal --stop-flow-at end (status STOPPED) is not a failure:
+        # no "Failed at", no FAILURE TRIAGE (run 20261104_201235 mailed
+        # "oom-killed" for a clean stop after 3_place, peak 14.3G).
+        "stopped_at": (failed or reached or None) if stopped else None,
         "tries": tries, "note": note or None,
         "dirs": {"logs": logs_dir, "reports": reports_dir, "results": results_dir,
                  "agent_log": agent_log},
@@ -827,7 +832,8 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
     stale_why = None
     if failed and t.get("_source") and _unusable(t["_source"], failed, logs_dir):
         stale_dropped = os.path.basename(t["_source"])
-        stale_why = ("later stage than the failure" if _after_stage(t["_source"], failed)
+        stale_why = (("later stage than the stop" if stopped else "later stage than the failure")
+                     if _after_stage(t["_source"], failed)
                      else "older than this run's earlier-stage logs")
         t = _stage_timing_fallback(reports_dir, failed, logs_dir)
     elif failed and not t:
@@ -980,7 +986,7 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
     q["power"] = {"corners": pw, "total": (pw.get("slow") or next(iter(pw.values()), {})).get("total") if pw else _mget(m, "power__total"),
                   "source": "6_finish.rpt" if pw else (msrc or None)}
     # ---- failure triage ----
-    if str(status).upper() != "DONE":
+    if str(status).upper() not in ("DONE", "STOPPED"):
         texts: List[Tuple[str, str]] = []
         for f in sorted(_ls(logs_dir), key=os.path.getmtime, reverse=True):
             if f.endswith(".log") and stage_of(f) == failed:
@@ -1013,6 +1019,8 @@ def render_email_body(q: Dict[str, object]) -> str:
          f"Stage reached: {q.get('stage_reached') or 'n/a'}"]
     if q.get("failed_stage"):
         L.append(f"Failed at    : {q['failed_stage']}")
+    elif q.get("stopped_at"):
+        L.append(f"Stopped at   : {q['stopped_at']} (--stop-flow-at)")
     if q.get("tries"):
         L.append(f"Tries        : {q['tries']}")
     L.append(f"Generated    : {q.get('generated')}")
@@ -1277,7 +1285,7 @@ def build_bundle(block: str, status: str, out_dir: str, *,
         plan.append((pk, want, trunc))
         included.append((pk.arc, sz, want, (pk.mode + " truncated") if trunc else "full", pk.reason))
         budget -= want
-    stage_s = "" if str(status).upper() == "DONE" else f"_{q.get('failed_stage') or 'fail'}"
+    stage_s = "" if str(status).upper() == "DONE" else f"_{q.get('failed_stage') or q.get('stopped_at') or 'fail'}"
     root = f"{block}{stage_s}"
     idx = render_index(q, included, skipped, cap_bytes)
     res = {"qor": q, "included": included, "skipped": skipped, "index": idx,

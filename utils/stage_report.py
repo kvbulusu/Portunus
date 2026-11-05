@@ -561,6 +561,14 @@ def build_rows(logs_dir: Optional[str], reports_dir: Optional[str],
     # older run, never "reused" (run 20261104_172222 failed at 3_place yet
     # mailed the old 4_cts "reused" row and a RED 6191-hold-buffer flag).
     barrier = next((i for i, k in enumerate(STAGE_KEYS) if k in (failed, current)), None)
+    # §210: with nothing running/failed (stage email after a --stop-flow-at
+    # stop) the barrier is the last stage done / logged in THIS run: make
+    # always reruns downstream, so a later stage can never be "reused" (run
+    # 20261104_201235 stopped after 3_place, mailed old 4_cts + RED 6191 hbuf).
+    if barrier is None and run_start:
+        now = [i for i, k in enumerate(STAGE_KEYS)
+               if k in done or ((lambda t: bool(t and t >= run_start))(_log_mtime(logs_dir, k)))]
+        barrier = max(now) if now else None
     for idx, key in enumerate(STAGE_KEYS):
         if barrier is not None and idx > barrier:
             r = collect_stage(key, logs_dir, reports_dir, {}, since=float("inf"))
