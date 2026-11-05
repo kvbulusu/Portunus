@@ -558,6 +558,14 @@ TRIAGE_RULES: List[Tuple[re.Pattern, str, str, str]] = [
      "target too high for the available area, or routability/timing-driven mode thrashing.",
      "Lower PLACE_DENSITY (or PLACE_DENSITY_LB_ADDON) / CORE_UTILIZATION; try "
      "GPL_TIMING_DRIVEN=0 and/or GPL_ROUTABILITY_DRIVEN=0 for a first pass."),
+    (re.compile(r"\bDPL-0036|Detailed placement failed", re.I), "dpl-legalize",
+     "Detailed placement could not legalize some cells (DPL-0034/35/36): a cell's "
+     "legal site is beyond the diamond search limit (+/-500 sites, +/-100 rows ~ "
+     "27 um in ASAP7), typically region/fence members placed far outside their "
+     "region, non-members trapped inside a fence (DPL fences are exclusive), or a "
+     "local density hotspot. DPL-0035 lists the cells: group them by hierarchy.",
+     "Check region/fence hooks (JANUS_PIN_FENCE*), lower PLACE_DENSITY locally, or "
+     "add DETAIL_PLACEMENT_ARGS '-max_displacement {X Y}' for a first pass."),
     (re.compile(r"\bRSZ-\d{4}", re.I), "resizer",
      "The resizer (repair_design / repair_timing) errored (RSZ-*), e.g. no buffer "
      "cell available, dont_use too broad, or a max-wire-length it cannot meet.",

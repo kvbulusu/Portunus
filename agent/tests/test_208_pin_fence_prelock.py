@@ -24,7 +24,7 @@ PLAT = os.environ.get("JANUS_TEST_ASAP7",
                       "/home/ubuntu/dk/rootfs/OpenROAD-flow-scripts/flow/platforms/asap7")
 
 
-def _run(tmp_path, mode):
+def _run(tmp_path, mode, **extra):
     if not (os.access(OR, os.X_OK) and os.path.isdir(PLAT)):
         pytest.skip("openroad / asap7 platform not available")
     d = tmp_path / f"t208_{mode}"
@@ -45,7 +45,7 @@ lassign [$rx getLocation] x y
 puts [format "T208 dp rx %.1f %.1f" [expr {{$x/1000.0}}] [expr {{$y/1000.0}}]]
 """)
     env = dict(os.environ, T198_PLATFORM=PLAT, JANUS_PIN_FENCE="fx:u_m:rx",
-               JANUS_PIN_FENCE_MODE=mode)
+               JANUS_PIN_FENCE_MODE=mode, **extra)
     r = subprocess.run([OR, "-no_init", "-exit", "pf.tcl"], cwd=d, env=env,
                        capture_output=True, text=True, timeout=180)
     return r.returncode, r.stdout + r.stderr
@@ -60,7 +60,8 @@ def _in_strip(out, tag):
 
 
 def test_prelock_no_gpl_region_member_stays_in_strip(tmp_path):
-    rc, out = _run(tmp_path, "prelock")
+    # §209: post-GPL bind is opt-in (JANUS_PIN_FENCE_POST_BIND=all = §208)
+    rc, out = _run(tmp_path, "prelock", JANUS_PIN_FENCE_POST_BIND="all")
     assert rc == 0, out[-3000:]
     assert "T208 pre status FIRM regions 0" in out, out[-3000:]
     assert "fx members 1 area" in out and "prelocked 1 (mode prelock)" in out

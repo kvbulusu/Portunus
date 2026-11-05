@@ -105,12 +105,15 @@ read_db pf.odb
 set r [[ord::get_db_block] findRegion fx]
 puts "T206 readback [$r getRegionType] groups [llength [$r getGroups]] insts [llength [[lindex [$r getGroups] 0] getInsts]]"
 """)
-    env = dict(os.environ, T198_PLATFORM=PLAT, JANUS_PIN_FENCE="fx:u_m:rx")
+    # §209: post-GPL region is opt-in; =all exercises the bind/readback path
+    env = dict(os.environ, T198_PLATFORM=PLAT, JANUS_PIN_FENCE="fx:u_m:rx",
+               JANUS_PIN_FENCE_POST_BIND="all")
     r = subprocess.run([OR, "-no_init", "-exit", "pf.tcl"], cwd=d, env=env,
                        capture_output=True, text=True, timeout=180)
     out = r.stdout + r.stderr
     # u_m at (230,230) 20x20; rx/D <- u_m/dout pin on the W edge at y=242.05
-    assert "JANUS_PIN_FENCE: fx edge W pins 1 strip (190.0,222.1)-(230.0,262.1) um" in out, out[-3000:]
+    # §209: pin discovery follows one INV/BUF hop -> u_m/din2 via ubl also counts
+    assert "JANUS_PIN_FENCE: fx edge W pins 2 strip (190.0,222.1)-(230.0,266.1) um" in out, out[-3000:]
     m = re.search(r"T206 rx ([\d.]+) ([\d.]+)", out)
     assert m, out[-3000:]
     x, y = float(m.group(1)), float(m.group(2))
