@@ -55,7 +55,9 @@ def test_plic_choice_is_registered_190b():
 def test_link_slice_registers_all_five_channels_190b():
     src = _code(LINK)
     for ch in ("aw", "w", "ar", "b", "r"):
-        assert re.search(rf"\.MODE\(1\)\)\s*u_{ch}\b", src), f"{ch} channel not MODE-1"
+        # §211: channels take the wrapper MODE (default 1 = classic skid)
+        assert re.search(rf"\.MODE\(MODE\)[^;]*?\)\s*u_{ch}\b", src), f"{ch} channel not MODE-param"
+    assert re.search(r"parameter\s+int\s+MODE\s*=\s*1\b", src)
     assert ".MODE(0)" not in src
 
 
@@ -64,7 +66,7 @@ def test_soc_top_cuts_user_noc_190b():
     m = re.search(r"`ifndef\s+JANUS_SOC_NO_UCUT(.*?)`else(.*?)`endif", src, re.S)
     assert m, "u_ucut block (with JANUS_SOC_NO_UCUT bypass) missing"
     cut, byp = m.group(1), m.group(2)
-    assert re.search(r"axi4_link_slice\s+u_ucut_m\s*\(", cut)
+    assert re.search(r"axi4_link_slice\s+(#\(.*?\)\s*)?u_ucut_m\s*\(", cut)
     assert re.search(r"axi4_link_slice\s+u_ucut_s3\s*\(", cut)
     for sig in ("user_m_req", "noc_m_req[0]", "npu_ctrl_req", "noc_s_req[3]"):
         assert sig in cut and sig in byp, sig
