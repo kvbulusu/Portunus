@@ -1096,12 +1096,20 @@ class Pick:
 def select_files(block: str, status: str, stage_reached: str, failed_stage: str,
                  logs_dir: Optional[str], reports_dir: Optional[str],
                  results_dir: Optional[str], agent_log: Optional[str],
-                 signoff_dir: Optional[str] = None
+                 signoff_dir: Optional[str] = None,
+                 extra_dirs: Optional[Dict[str, str]] = None,
+                 limit_stage: Optional[str] = None
                  ) -> Tuple[List[Pick], List[Tuple[str, str]]]:
     """Candidates in priority order + skipped (path, reason). Only this block's
-    dirs are ever read, so another block's logs cannot leak in."""
+    dirs are ever read, so another block's logs cannot leak in.
+
+    §207: *limit_stage* (--stop-flow-at) forces the last stage so later-stage
+    files left over from an earlier run are skipped as stale; *extra_dirs*
+    {arc_prefix: dir} are walked recursively and bundled at high priority
+    (the --post-custom-script log + outputs)."""
     ok = str(status).upper() == "DONE"
-    limit_stage = failed_stage if (not ok and failed_stage) else (stage_reached or "finish")
+    if limit_stage not in _STAGE_IDX:
+        limit_stage = failed_stage if (not ok and failed_stage) else (stage_reached or "finish")
     lim_idx = _STAGE_IDX.get(limit_stage, len(STAGES) - 1)
     roots = {"logs": logs_dir, "reports": reports_dir, "results": results_dir}
     picks: List[Pick] = []
@@ -1141,6 +1149,21 @@ def select_files(block: str, status: str, stage_reached: str, failed_stage: str,
             if p.endswith((".json", ".txt", ".rpt", ".log")):
                 picks.append(Pick(p, "signoff/" + os.path.basename(p), 36, "head",
                                   1 << 20, "agent signoff result for this block"))
+    for prefix, d in sorted((extra_dirs or {}).items()):
+        if not d or not os.path.isdir(d):
+            continue
+        for root_, _dirs, files in os.walk(d):
+            for fn in sorted(files):
+                p = os.path.join(root_, fn)
+                arc = prefix + "/" + os.path.relpath(p, d).replace(os.sep, "/")
+                low = fn.lower()
+                if any(low.endswith(e) for e in HEAVY_EXTS):
+                    skipped.append((arc, "heavy binary/PD database (never bundled)"))
+                elif low.endswith(IMAGE_EXTS) and os.environ.get("JANUS_BUNDLE_IMAGES", "0") != "1":
+                    skipped.append((arc, "image: bundle is text-only (JANUS_BUNDLE_IMAGES=1 to attach)"))
+                else:
+                    picks.append(Pick(p, arc, 20, "tail" if low.endswith(".log") else "head",
+                                      2 << 20, f"{prefix} output (user script)"))
     # remaining files in each root
     for root, d in roots.items():
         for p in _ls(d):
@@ -1215,14 +1238,17 @@ def build_bundle(block: str, status: str, out_dir: str, *,
                  signoff_dir: Optional[str] = None, manifest_stage: str = "",
                  cap_bytes: int = 40 << 20, tries: Optional[int] = None,
                  note: str = "", qor: Optional[Dict] = None,
-                 dry_run: bool = False, archive_fmt: str = "tar.gz") -> Dict[str, object]:
+                 dry_run: bool = False, archive_fmt: str = "tar.gz",
+                 extra_dirs: Optional[Dict[str, str]] = None,
+                 limit_stage: Optional[str] = None) -> Dict[str, object]:
     """Build qor + INDEX + tar.gz. Returns {tar, qor, qor_path, index, included,
     skipped, body}. Never touches other blocks' files."""
     q = qor or build_qor(block, status, logs_dir, reports_dir, results_dir,
                          agent_log, manifest_stage, tries, note)
     picks, skipped = select_files(block, status, q.get("stage_reached") or "",
                                   q.get("failed_stage") or "", logs_dir,
-                                  reports_dir, results_dir, agent_log, signoff_dir)
+                                  reports_dir, results_dir, agent_log, signoff_dir,
+                                  extra_dirs=extra_dirs, limit_stage=limit_stage)
     qor_bytes = json.dumps(q, indent=2, default=str).encode()
     budget = cap_bytes - len(qor_bytes) - (64 << 10)  # reserve for INDEX.md
     included: List[Tuple[str, int, int, str, str]] = []  # arc, size, kept, how, reason
