@@ -3,6 +3,7 @@
 Run: python3 -m pytest asic_flow/agent/tests/test_207_stop_flow_post_script_autostop.py -q"""
 import inspect
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -243,9 +244,79 @@ def test_ec2_autorun_wired():
     assert "autorun)      preflight; resolve_id; do_autorun" in s
     assert "ssh -n -o BatchMode=yes" in s and "janus_autorun.sh" in s
     r = (ROOT / "asic_flow/scripts/janus_autorun.sh").read_text()
-    for needle in ("idle_stop.py\" --watch", "git pull --ff-only",
-                   "03_setup_janus_configs.sh", "--auto-stop-idle", "flock -n 9"):
+    for needle in ("idle_stop.py\" --watch", 'git rebase -q "origin/$TGT"',
+                   "git stash push", "03_setup_janus_configs.sh", "--auto-stop-idle",
+                   "flock -n 9"):
         assert needle in r
+
+
+def _sh(cmd, cwd):
+    subprocess.run(cmd, cwd=cwd, shell=True, check=True, capture_output=True)
+
+
+def _autorun_repos(tmp_path):
+    """origin + dev clone + 'box' clone with a local (golden) commit and a
+    dirty tracked edit; dev then pushes an upstream commit."""
+    src = ROOT / "asic_flow/scripts/janus_autorun.sh"
+    g = "git -c user.email=a@b -c user.name=t"
+    _sh("git init -q --bare -b main origin.git && git clone -q origin.git dev", tmp_path)
+    dev, box, home = tmp_path / "dev", tmp_path / "box", tmp_path / "home"
+    _sh("git checkout -q -b main && mkdir -p asic_flow/scripts asic_flow/agent", dev)
+    (dev / "asic_flow/scripts/janus_autorun.sh").write_text(src.read_text())
+    (dev / "asic_flow/agent/janus_agent.py").write_text("print('AGENT')\n")
+    (dev / "cfg.txt").write_text("a\n"); (dev / "golden.txt").write_text("g\n")
+    _sh(f"git add -A && {g} commit -qm base && git push -q origin main", dev)
+    _sh(f"git clone -q origin.git box", tmp_path)
+    (box / "golden.txt").write_text("g2\n")
+    _sh(f"{g} commit -qam golden", box)
+    (box / "cfg.txt").write_text("a\nedit\n")
+    home.mkdir()
+    (home / ".bashrc").write_text('[ -z "$PS1" ] && return\nsource ~/.bashrc_aliases\n')
+    (home / ".bashrc_aliases").write_text("export SMTP_HOST=smtp.x\nalias ll=ls\n")
+    return g, dev, box, home
+
+
+def _run_autorun(box, home):
+    env = {k: v for k, v in os.environ.items() if k not in ("TMUX",)}
+    env["HOME"] = str(home)
+    env["JANUS_AUTORUN_NO_TMUX"] = "1"          # agent runs inline
+    r = subprocess.run(["bash", "asic_flow/scripts/janus_autorun.sh", "--idle-min", "0",
+                        "--", "--blocks", "x"], cwd=box, env=env, capture_output=True,
+                       text=True, timeout=120)
+    return r.returncode, (home / "janus_autorun/latest.log").read_text()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git")
+def test_autorun_rebases_local_commits_keeps_edits(tmp_path):
+    g, dev, box, home = _autorun_repos(tmp_path)
+    (dev / "new.txt").write_text("up\n")
+    _sh(f"git add new.txt && {g} commit -qm upstream && git push -q origin main", dev)
+    rc, log = _run_autorun(box, home)
+    assert rc == 0, log
+    assert "1 ahead / 1 behind" in log and "env: 1 export(s)" in log
+    assert (box / "new.txt").exists() and (box / "golden.txt").read_text() == "g2\n"
+    assert (box / "cfg.txt").read_text() == "a\nedit\n"
+    subj = subprocess.run("git log --format=%s", cwd=box, shell=True,
+                          capture_output=True, text=True).stdout.split()
+    assert subj[:2] == ["golden", "upstream"]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git")
+@pytest.mark.parametrize("clash", ["golden.txt", "cfg.txt"])
+def test_autorun_conflict_restores_and_aborts(tmp_path, clash):
+    g, dev, box, home = _autorun_repos(tmp_path)
+    head = subprocess.run("git rev-parse HEAD", cwd=box, shell=True,
+                          capture_output=True, text=True).stdout
+    (dev / clash).write_text("UPSTREAM\n")
+    _sh(f"{g} commit -qam up && git push -q origin main", dev)
+    rc, log = _run_autorun(box, home)
+    assert rc == 4 and "agent NOT started" in log and "AGENT" not in log
+    assert subprocess.run("git rev-parse HEAD", cwd=box, shell=True,
+                          capture_output=True, text=True).stdout == head
+    assert (box / "cfg.txt").read_text() == "a\nedit\n"
+    assert (box / "golden.txt").read_text() == "g2\n"
+    assert subprocess.run("git stash list", cwd=box, shell=True,
+                          capture_output=True, text=True).stdout == ""
 
 
 def test_autorun_no_pull_no_args(tmp_path):
