@@ -557,7 +557,17 @@ def build_rows(logs_dir: Optional[str], reports_dir: Optional[str],
     fresh_metrics = load_metrics(logs_dir, run_start) if run_start else metrics
     reused, done = set(reused or ()), set(done or ())
     rows = []
-    for key in STAGE_KEYS:
+    # §208: stages after the failed / running one are stale leftovers of an
+    # older run, never "reused" (run 20261104_172222 failed at 3_place yet
+    # mailed the old 4_cts "reused" row and a RED 6191-hold-buffer flag).
+    barrier = next((i for i, k in enumerate(STAGE_KEYS) if k in (failed, current)), None)
+    for idx, key in enumerate(STAGE_KEYS):
+        if barrier is not None and idx > barrier:
+            r = collect_stage(key, logs_dir, reports_dir, {}, since=float("inf"))
+            r["status"] = "PENDING"
+            r["_ran_now"] = False
+            rows.append(r)
+            continue
         art = _artifact(results_dir, key)
         lt = _log_mtime(logs_dir, key)
         ran_now = bool(run_start and lt and lt >= run_start)
