@@ -110,6 +110,7 @@ def test_stale_stages_after_failure_not_reused_or_flagged(tmp_path):
     assert st["2_floorplan"] in ("REUSED", "DONE")
     assert all(st[k] == "PENDING" for k in sr.STAGE_KEYS[sr.STAGE_KEYS.index("3_place") + 1:]), st
     assert not [f for f in sr.red_flags(rows) if "4_cts" in f[1]], sr.red_flags(rows)
-    # without a failure barrier the old 4_cts is still reported as reused
+    # §210: even without a failure barrier, the last stage logged in THIS run
+    # is a barrier (make reruns downstream) -> old 4_cts is never "reused"
     st2 = {r["key"]: r["status"] for r in sr.build_rows(logs, rpt, res, run_start=run_start)}
-    assert st2["4_cts"] == "REUSED", st2
+    assert st2["4_cts"] == "PENDING", st2
