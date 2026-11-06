@@ -512,6 +512,23 @@ def parse_sdc_period(results_dir: Optional[str]) -> Optional[Tuple[str, float]]:
 # ---------------------------------------------------------------------------
 # (regex, category, diagnosis, suggested knob). Order = priority.
 TRIAGE_RULES: List[Tuple[re.Pattern, str, str, str]] = [
+    # §214: JANUS CTS hook fail-fast aborts (Tcl `error` -> 'Error: cts.tcl, N ...').
+    (re.compile(r"JANUS_CTS_HOLD_ABORT\b"),
+     "cts_hold_abort",
+     "The §198b fail-fast fired: pre-repair hold WNS after CTS (+ tap split / "
+     "macro align / legalize) was below JANUS_CTS_HOLD_ABORT_PS, so 4_cts stopped "
+     "before repair_timing. This is clock skew between macro/boundary taps, not "
+     "logic: read 4_cts_pre_repair.rpt (worst min paths, full_clock_expanded) and "
+     "the JANUS_CTS_DIAG histogram / outlier lines in the 4_1_cts log to find the "
+     "hierarchy whose clock arrives early/late.",
+     "Fix the skew source (JANUS_CTS_MACRO_ALIGN / TAP_SPLIT hold credit, early "
+     "taps); only as a probe, raise or unset JANUS_CTS_HOLD_ABORT_PS."),
+    (re.compile(r"\bJANUS_CTS_[A-Z_]+:"),
+     "cts_hook_abort",
+     "A JANUS CTS hook (janus_cts_*.tcl) raised an error and aborted 4_cts; the "
+     "quoted JANUS_CTS_<HOOK> tag names the hook.",
+     "Read the hook's log lines just above the error (JANUS_CTS_<HOOK>: ...) and "
+     "its env knobs; disable the hook to bisect."),
     (re.compile(r"JANUS SDC:.*empty|object list is empty|matched no objects", re.I),
      "sdc-empty-list",
      "An SDC collection resolved to an empty list and the JANUS guard aborted the "
@@ -623,6 +640,17 @@ def find_first_error(text: str) -> Tuple[Optional[str], Optional[str], List[str]
     return first, code, errs[-10:]
 
 
+def _cts_diag_evidence(text: str) -> str:
+    """§214: quote the JANUS_CTS_DIAG outlier / histogram + last pre-repair
+    timing lines so the triage names the offending hierarchy."""
+    keep = [ln.strip() for ln in (text or "").splitlines()
+            if "JANUS_CTS_DIAG:" in ln and ("outlier" in ln or "histogram" in ln)]
+    pre = [ln.strip() for ln in (text or "").splitlines()
+           if re.search(r"JANUS_CTS_[A-Z_]+:.*\bafter setup\s+-?[\d.]+\s+hold", ln)]
+    ev = keep[-3:] + pre[-1:]
+    return (" Evidence: " + " | ".join(x[:220] for x in ev)) if ev else ""
+
+
 def triage_failure(texts: List[Tuple[str, str]], failed_stage: str) -> Dict[str, object]:
     """Classify the first real error across (name, text) logs, failing-stage
     log first. Returns {category, diagnosis, knob, first_error, code, source,
@@ -635,6 +663,8 @@ def triage_failure(texts: List[Tuple[str, str]], failed_stage: str) -> Dict[str,
         hay = first
         for rx, cat, diag, knob in TRIAGE_RULES:
             if rx.search(hay):
+                if cat == "cts_hold_abort":
+                    diag = diag + _cts_diag_evidence(text)
                 return {"category": cat, "diagnosis": diag, "knob": knob,
                         "first_error": first, "code": code, "source": name,
                         "last_errors": last}

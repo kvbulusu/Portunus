@@ -483,6 +483,39 @@ def _post_hook_override(row: Dict[str, object], key: str, reports_dir: Optional[
     row["timing_src"] = name
 
 
+# §214: 4_cts aborted before repair_timing (JANUS_CTS_HOLD_ABORT) leaves no
+# 4_cts_final.rpt / metrics, so the QoR row was '—/—'. Fill it from the last
+# pre-repair timing the hooks printed (JANUS_CTS_LEGALIZE / TAP_SPLIT /
+# MACRO_ALIGN '... after setup X hold Y'), else 4_cts_pre_repair.rpt.
+PRE_REPAIR_RPT = "4_cts_pre_repair.rpt"
+_RE_PRE_AFTER = re.compile(
+    r"(JANUS_CTS_[A-Z_]+):.*?\bafter setup\s+(-?[\d.]+)\s+hold\s+(-?[\d.]+)")
+
+
+def _pre_repair_fill(row: Dict[str, object], reports_dir: Optional[str],
+                     since: Optional[float], log_text: str) -> None:
+    t = ""
+    if reports_dir:
+        rp = os.path.join(reports_dir, PRE_REPAIR_RPT)
+        if os.path.isfile(rp) and _fresh(rp, since):
+            t = _read(rp, 8 << 20)
+    hits = _RE_PRE_AFTER.findall(log_text or "")
+    if hits:
+        tag, s, h = hits[-1]
+        row.update(setup_ws=float(s), hold_ws=float(h), pre_repair=True, timing_src=tag)
+    elif t:
+        vals = {k: float(m.group(1)) for k, rx in _RE_DUMP.items() for m in [rx.search(t)] if m}
+        if not ("setup_ws" in vals or "hold_ws" in vals):
+            return
+        row.update(vals)
+        row.update(pre_repair=True, timing_src=PRE_REPAIR_RPT)
+    else:
+        return
+    p = parse_paths(t)
+    if p.get("max") or p.get("min"):
+        row["paths"] = p
+
+
 def collect_stage(key: str, logs_dir: Optional[str], reports_dir: Optional[str],
                   metrics: Optional[Dict] = None, since: Optional[float] = None) -> Dict[str, object]:
     """QoR + runtime for one stage. Never raises (missing -> absent key).
@@ -548,6 +581,8 @@ def collect_stage(key: str, logs_dir: Optional[str], reports_dir: Optional[str],
         a = _RE_ANT.findall(log_text)
         if a:
             row.setdefault("antenna", int(a[-1]))
+        if key == "4_cts" and row.get("setup_ws") is None and row.get("hold_ws") is None:
+            _pre_repair_fill(row, reports_dir, since, log_text)
         if key == "4_cts":
             mo = [ln.strip() for ln in log_text.splitlines() if "JANUS_CTS_MACRO_OFS:" in ln]
             if mo:
@@ -688,7 +723,7 @@ def red_flags(rows: List[Dict[str, object]]) -> List[Tuple[str, str]]:
         if isinstance(hp, (int, float)) and hp < HOLD_PRE_KILL_PS:
             out.append(("RED", f"{k}: pre-repair hold WNS {hp:.0f} ps < {HOLD_PRE_KILL_PS:.0f} ps"))
         hw = r.get("hold_ws")
-        if (k == "4_cts" and r.get("status") in ("DONE", "FAILED")
+        if (k == "4_cts" and r.get("status") in ("DONE", "FAILED") and not r.get("pre_repair")
                 and isinstance(hw, (int, float)) and hw < 0):
             out.append(("KILL", f"{k}: hold WNS {hw:.1f} ps after repair (not closed) -> KILL RUN"))
         if r.get("rsz0060"):
@@ -728,6 +763,8 @@ def key_qor(r: Dict[str, object]) -> str:
         parts.append(f"ovfl {r['grt_overflow']}")
     if k == "5_drt" and r.get("drt_viol") is not None:
         parts.append(f"DRC {fmt_int(r['drt_viol'])}")
+    if r.get("pre_repair"):
+        parts.append("pre-repair")
     return " · ".join(parts) or DASH
 
 
@@ -741,6 +778,9 @@ _ST_SHORT = {"DONE": "done", "RUNNING": "running", "FAILED": "FAILED",
 
 
 def _main_cells(r) -> List[str]:
+    if r.get("_post"):   # §214
+        return [str(r.get("key")), _post_status(r), fmt_dur(r.get("wall")),
+                fmt_dur(r.get("cpu")), fmt_mem(r.get("peak_kb")), r.get("post_note") or DASH]
     if r.get("status") == "PENDING":   # logs on disk (if any) are from an older run
         return [str(r.get("key")), _ST_SHORT["PENDING"], DASH, DASH, DASH, DASH]
     return [str(r.get("key")), _ST_SHORT.get(str(r.get("status")), str(r.get("status"))),
@@ -751,9 +791,14 @@ def _main_cells(r) -> List[str]:
 def _det_cells(r) -> List[str]:
     def wt(w, t, n):
         return f"{fmt_ps(w)}/{fmt_ps(t)} {fmt_int(n) if n is not None else ''}".strip()
+    if r.get("_post"):   # §214
+        return [str(r.get("key")), DASH, DASH, DASH, DASH,
+                r.get("post_note") or _post_status(r)]
     util = r.get("util")
     cu = f"{fmt_int(r.get('cells'))}·{(f'{float(util) * 100:.0f}%' if isinstance(util, (int, float)) and util <= 1.5 else fmt_int(util) if util is not None else DASH)}"
     notes = []
+    if r.get("pre_repair"):
+        notes.append(f"pre-repair ({r.get('timing_src') or '?'})")
     if r.get("hold_pre_wns") is not None:
         notes.append(f"pre-hold {fmt_ps(r['hold_pre_wns'])}")
     if r.get("setup_pre_wns") is not None:
@@ -777,6 +822,109 @@ def _det_cells(r) -> List[str]:
             ", ".join(notes) or DASH]
 
 
+# ---------------------------------------------------------------------------
+# §214: post-custom-script rows ('4_cts+post (soc_cts_probe)')
+# ---------------------------------------------------------------------------
+# A post script is described by a dict (the agent writes the same dict to
+# <run_dir>/post_script/<block>/post_script.json):
+#   script  path            name    label (default: script basename w/o ext)
+#   after   STAGES key it follows (None -> failed / stopped / last stage)
+#   status  DONE | FAILED | SKIPPED          reason  why skipped / failed
+#   rc, wall, cpu, peak_kb (measured)        log, out_dir   for notes
+#   notes   precomputed note (else derived from log / out_dir)
+_POST_OWN = ("post_custom_script.log", "post_script.json")
+_RE_POST_SUMMARY = re.compile(r"\b(SUMMARY|RESULT|VERDICT)\b", re.I)
+
+
+def post_script_name(ps: Dict[str, object]) -> str:
+    n = ps.get("name") or os.path.splitext(os.path.basename(str(ps.get("script") or "post")))[0]
+    return str(n) or "post"
+
+
+def post_script_notes(log: Optional[str], out_dir: Optional[str],
+                      rc: Optional[int] = None) -> str:
+    """Short note: first summary-ish line of the script log (or its first
+    error when rc != 0) + the report(s) it wrote to JANUS_POST_SCRIPT_OUT."""
+    parts: List[str] = []
+    lines = [ln.strip() for ln in _read(log, 4 << 20).splitlines()
+             if ln.strip() and not ln.lstrip().startswith("#")]
+    pick = None
+    if rc not in (None, 0):
+        pick = next((ln for ln in lines if _RE_ERRLINE.search(ln)), None)
+    if pick is None:
+        pick = next((ln for ln in lines if _RE_POST_SUMMARY.search(ln)), None)
+    if pick:
+        parts.append(pick[:100])
+    outs: List[str] = []
+    if out_dir and os.path.isdir(out_dir):
+        for root, _d, files in os.walk(out_dir):
+            for fn in sorted(files):
+                if fn not in _POST_OWN:
+                    outs.append(os.path.relpath(os.path.join(root, fn), out_dir))
+    if outs:
+        parts.append("out: " + outs[0] + (f" (+{len(outs) - 1})" if len(outs) > 1 else ""))
+    elif log and os.path.isfile(log):
+        parts.append("log: post_script/" + os.path.basename(log))
+    return " · ".join(parts)
+
+
+def _post_row(ps: Dict[str, object], after: str) -> Dict[str, object]:
+    st = str(ps.get("status") or "SKIPPED").upper()
+    r: Dict[str, object] = {"key": f"{after}+post ({post_script_name(ps)})", "_post": True,
+                            "after": after, "status": st, "rc": ps.get("rc"),
+                            "reason": ps.get("reason") or "",
+                            "wall": ps.get("wall"), "cpu": ps.get("cpu"),
+                            "peak_kb": ps.get("peak_kb")}
+    log = ps.get("log")
+    if st != "SKIPPED" and log and r["cpu"] is None:
+        el = parse_elapsed(_read_tail_text(str(log))) if os.path.isfile(str(log)) else []
+        if el:   # ORFS/GNU-time banner(s) inside the script log
+            r["cpu"] = sum(e["cpu"] for e in el)
+            r["peak_kb"] = r["peak_kb"] or max(e["peak_kb"] for e in el)
+            r["wall"] = r["wall"] if r["wall"] is not None else sum(e["wall"] for e in el)
+    note = ps.get("notes")
+    if note is None and st != "SKIPPED":
+        note = post_script_notes(log, ps.get("out_dir"), ps.get("rc"))
+    r["post_note"] = str(note or "")
+    return r
+
+
+def merge_post_rows(rows: List[Dict[str, object]], post_scripts: Optional[Iterable[Dict]],
+                    default_after: Optional[str] = None) -> List[Dict[str, object]]:
+    """Insert one row per post script right after the stage it follows
+    (several scripts on one stage keep their order). No scripts -> *rows*
+    returned unchanged."""
+    pss = [p for p in (post_scripts or []) if isinstance(p, dict)]
+    if not pss:
+        return rows
+    keys = [r.get("key") for r in rows]
+    active = [r.get("key") for r in rows if r.get("key") in STAGE_KEYS
+              and r.get("status") != "PENDING"]
+    fallback = default_after if default_after in keys else (active[-1] if active else None)
+    out = list(rows)
+    for ps in pss:
+        after = ps.get("after") if ps.get("after") in keys else fallback
+        row = _post_row(ps, after or "run")
+        if after is None:
+            idx = next((i for i, r in enumerate(out) if r.get("key") == "signoff"), len(out))
+        else:
+            idx = next(i for i, r in enumerate(out) if r.get("key") == after) + 1
+            while idx < len(out) and out[idx].get("_post"):
+                idx += 1
+        out.insert(idx, row)
+    return out
+
+
+def _post_status(r) -> str:
+    st = str(r.get("status"))
+    if st == "SKIPPED":
+        return f"skipped ({r['reason']})" if r.get("reason") else "skipped"
+    if st == "FAILED":
+        why = r.get("reason") or (f"rc {r['rc']}" if r.get("rc") not in (None, 0) else "")
+        return f"FAILED ({why})" if why else "FAILED"
+    return _ST_SHORT.get(st, st.lower())
+
+
 def _txt_table(head: Sequence[str], body: List[List[str]]) -> str:
     w = [max(len(x[i]) for x in [list(head)] + body) for i in range(len(head))]
     ln = lambda c: "  ".join(c[i].ljust(w[i]) for i in range(len(c))).rstrip()  # noqa: E731
@@ -784,7 +932,8 @@ def _txt_table(head: Sequence[str], body: List[List[str]]) -> str:
 
 
 _TD = "border:1px solid #bbb;padding:2px 4px;"
-_STC = {"DONE": "#d4edda", "FAILED": "#f8d7da", "RUNNING": "#cce5ff", "REUSED": "#e2e3e5"}
+_STC = {"DONE": "#d4edda", "FAILED": "#f8d7da", "RUNNING": "#cce5ff", "REUSED": "#e2e3e5",
+        "SKIPPED": "#fff3cd"}
 
 
 def _html_table(head: Sequence[str], rows_cells: List[List[str]], statuses: List[str],
@@ -852,8 +1001,13 @@ def build_report(block: str, kind: str, *, stage: Optional[str] = None,
                  run_start: Optional[float] = None, elapsed: Optional[float] = None,
                  ctx: Optional[Dict[str, object]] = None,
                  tail_lines: Optional[int] = None,
-                 drive_note: Optional[str] = None) -> Dict[str, object]:
+                 drive_note: Optional[str] = None,
+                 post_scripts: Optional[Iterable[Dict]] = None) -> Dict[str, object]:
     """kind: 'stage' (stage just completed) | 'final' (block DONE) | 'failed'.
+
+    §214: *post_scripts* (see merge_post_rows) add one '<stage>+post (<name>)'
+    row per --post-custom-script right after the stage it follows, in both
+    the stage table and the QoR detail table.
 
     Returns {subject, text, html, rows, flags, failed_stage}. Never raises:
     on an internal error a minimal report naming the error is returned.
@@ -873,6 +1027,8 @@ def build_report(block: str, kind: str, *, stage: Optional[str] = None,
                           failed=failed, done=set(done or ()) | ({stage} if kind == "stage" and stage else set()),
                           reused=reused, run_start=run_start, signoff_dir=signoff_dir)
         flags = red_flags(rows)
+        rows = merge_post_rows(rows, post_scripts,
+                               failed if kind == "failed" else stage if kind == "stage" else None)
         # failure details
         errs: List[str] = []
         tail: List[str] = []
@@ -893,7 +1049,8 @@ def build_report(block: str, kind: str, *, stage: Optional[str] = None,
                                flags, code, elapsed)
 
         main_body = [_main_cells(r) for r in rows]
-        det_rows = [r for r in rows if r.get("key") in STAGE_KEYS and r.get("status") != "PENDING"]
+        det_rows = [r for r in rows if r.get("_post") or (r.get("key") in STAGE_KEYS
+                                                           and r.get("status") != "PENDING")]
         det_body = [_det_cells(r) for r in det_rows]
         focus_key = failed or (stage if kind == "stage" else None)
         if focus_key is None:
