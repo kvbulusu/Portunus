@@ -55,8 +55,9 @@ def test_plic_choice_is_registered_190b():
 def test_link_slice_registers_all_five_channels_190b():
     src = _code(LINK)
     for ch in ("aw", "w", "ar", "b", "r"):
-        # §211: channels take the wrapper MODE (default 1 = classic skid)
-        assert re.search(rf"\.MODE\(MODE\)[^;]*?\)\s*u_{ch}\b", src), f"{ch} channel not MODE-param"
+        # §211: channels take the wrapper MODE (default 1 = classic skid);
+        # §216: via MODE_SM (AW/W/AR) / MODE_MS (B/R), both = MODE unless 3
+        assert re.search(rf"\.MODE\(MODE(_SM|_MS)?\)[^;]*?\)\s*u_{ch}\b", src), f"{ch} channel not MODE-param"
     assert re.search(r"parameter\s+int\s+MODE\s*=\s*1\b", src)
     assert ".MODE(0)" not in src
 

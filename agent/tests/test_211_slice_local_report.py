@@ -53,9 +53,14 @@ def test_mode2_enables_do_not_use_s_valid():
 
 def test_link_slice_param_and_top_usage():
     assert "parameter int MODE         = 1" in LS
-    assert _code(LS).count(".MODE(MODE), .CTRL_SLICE_W(CTRL_SLICE_W))") == 5
+    # §216: AW/W/AR use MODE_SM (= MODE), B/R MODE_MS (= MODE unless MODE 3)
+    cl = _code(LS)
+    assert re.search(r"MODE_SM = MODE;", cl)
+    assert re.search(r"MODE_MS = \(MODE == 3\) \? 4 : MODE;", cl)
+    assert cl.count(".MODE(MODE_SM), .CTRL_SLICE_W(CTRL_SLICE_W)") == 3
+    assert cl.count(".MODE(MODE_MS), .CTRL_SLICE_W(CTRL_SLICE_W)") == 2
     c = _code(TOP)
-    assert "axi4_link_slice #(.MODE(2)) u_ucut_mn (" in c
+    assert "axi4_link_slice #(.MODE(3), .INGRESS_BYPASS(1'b0)) u_ucut_mn (" in c  # §216
     assert "axi4_link_slice #(.MODE(2)) u_ucut_m (" in c
     assert "axi4_link_slice u_ucut_s3 (" in c  # others unchanged
 
