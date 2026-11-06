@@ -4706,7 +4706,8 @@ class JANUSAutonomousAgent:
                     reused=self._reused_keys(block),
                     run_start=getattr(self, "_block_t0", {}).get(block),
                     elapsed=self._block_elapsed(block),
-                    ctx=self._stage_ctx(block, reports_dir))
+                    ctx=self._stage_ctx(block, reports_dir),
+                    post_scripts=(getattr(self, "_post_runs", None) or {}).get(block))
                 if stop and sr.get("subject"):
                     sr["subject"] = f"[STOPPED@{stop}] " + sr["subject"]
                 elif res.status != "DONE" and sr.get("subject"):
@@ -4786,16 +4787,32 @@ class JANUSAutonomousAgent:
         script = getattr(self.args, "post_custom_script", None)
         if not script:
             return None
+        stop = self._stop_stage()
+        # §214: one record per post script -> its own row in the email tables
+        rec: Dict[str, object] = {
+            "script": script, "after": _STOP_SR_KEY.get(stop) if stop else (
+                "6_finish" if res.status == "DONE" else None),
+            "status": "SKIPPED", "reason": "", "rc": None, "wall": None,
+            "cpu": None, "peak_kb": None, "log": None, "out_dir": None}
+        self._post_runs = getattr(self, "_post_runs", None) or {}
+        self._post_runs[block] = [rec]
         if res.status not in ("DONE", "STOPPED") and not getattr(
                 self.args, "post_custom_on_fail", False):
             self.ui.info(f"{block}: post-custom-script skipped (status {res.status}; "
                          "--post-custom-on-fail to run it anyway)")
+            rec["reason"] = ("stage failed" if res.status == "FAILED"
+                             else f"block {str(res.status).lower()}")
+            rec["notes"] = (f"not run: block {res.status} (--post-custom-on-fail "
+                            "runs it anyway)")
             return None
         if getattr(self.args, "dry_run", False):
             self.ui.info(f"{block}: [dry-run] would run post-custom-script {script}")
+            rec["reason"] = "dry-run"
+            rec["notes"] = "not run: --dry-run"
             return None
         out = self._post_script_out(block)
         log_path = os.path.join(out, "post_custom_script.log")
+        rec.update(log=log_path, out_dir=out)
         rc: Optional[int] = None
         try:
             os.makedirs(out, exist_ok=True)
@@ -4827,26 +4844,59 @@ class JANUSAutonomousAgent:
                          f"# cmd={' '.join(shlex.quote(c) for c in cmd)}\n"
                          f"# JANUS_POST_SCRIPT_OUT={out}\n\n")
                 lf.flush()
-                try:
-                    rc = subprocess.run(cmd, cwd=self.flow_dir or None, env=env,
-                                        stdout=lf, stderr=subprocess.STDOUT,
-                                        timeout=tmo).returncode
-                except subprocess.TimeoutExpired:
-                    rc = 124
+                rc, ru, timed_out = self._run_measured(
+                    cmd, cwd=self.flow_dir or None, env=env, stdout=lf, timeout=tmo)
+                if timed_out:
                     lf.write(f"\n# TIMEOUT after {tmo:.0f} s (--post-custom-timeout)\n")
                 lf.write(f"\n# rc={rc} elapsed={time.time() - t0:.0f}s\n")
+            rec.update(rc=rc, wall=time.time() - t0,
+                       status="DONE" if rc == 0 else "FAILED",
+                       reason="timeout" if timed_out else "")
+            if ru is not None:   # this script's own process tree only
+                rec.update(cpu=ru.ru_utime + ru.ru_stime, peak_kb=ru.ru_maxrss or None)
             (self.ui.good if rc == 0 else self.ui.warn)(
                 f"{block}: post-custom-script rc={rc} ({time.time() - t0:.0f}s); "
                 "output bundled with the report")
             res.note = (f"{res.note or ''} | post-script rc={rc}").strip(" |")[:240]
         except Exception as e:  # never let the user script affect the run
             self.ui.warn(f"{block}: post-custom-script error (ignored): {e}")
+            rec.update(status="FAILED", reason="agent error")
             try:
                 with open(log_path, "a") as lf:
                     lf.write(f"\n# agent error launching script: {e}\n")
             except OSError:
                 pass
+        try:
+            with open(os.path.join(out, "post_script.json"), "w") as fh:
+                json.dump(self._post_runs[block], fh, indent=2, default=str)
+        except (OSError, TypeError, ValueError):
+            pass
         return rc
+
+    @staticmethod
+    def _run_measured(cmd: List[str], cwd: Optional[str], env: Dict[str, str],
+                      stdout, timeout: Optional[float]):
+        """§214: run *cmd* and reap it with os.wait4 so CPU / peak RSS are the
+        script's own process tree (RUSAGE_CHILDREN would mix in other blocks
+        under --parallel). Returns (rc, rusage|None, timed_out); rc 124 on
+        timeout (process killed)."""
+        proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=stdout,
+                                stderr=subprocess.STDOUT)
+        deadline = (time.time() + timeout) if timeout else None
+        timed_out = False
+        while True:
+            pid, status, ru = os.wait4(proc.pid, os.WNOHANG)
+            if pid:
+                break
+            if deadline and time.time() > deadline:
+                timed_out = True
+                proc.kill()
+                pid, status, ru = os.wait4(proc.pid, 0)
+                break
+            time.sleep(0.2)
+        rc = os.waitstatus_to_exitcode(status)
+        proc.returncode = rc
+        return (124 if timed_out else rc), ru, timed_out
 
     def _milestone_tracker(self, block: str):
         """§157: per-make-run milestone parser, or None when milestone emails
@@ -5520,12 +5570,23 @@ class JANUSAutonomousAgent:
                     "hold_ps": r.hold_ps if (r and settled) else None,
                     "drc": r.drc_violations if (r and settled) else None,
                     "slew": r.max_slew_violations if (r and settled) else None,
-                    "note": ("adaptive PROMOTED" if r and "PROMOTED" in (r.note or "")
-                             else ""),
+                    "note": " · ".join(x for x in (
+                        "adaptive PROMOTED" if r and "PROMOTED" in (r.note or "") else "",
+                        self._post_note(b)) if x),
                 })
         except Exception as e:
             self.ui.debug(f"run table error (ignored): {e}")
         return rows
+
+    def _post_note(self, block: str) -> str:
+        """§214: run-table note per post script, e.g. 'post soc_cts_probe:
+        skipped (stage failed)'. '' when no post script ran for *block*."""
+        out = []
+        for p in (getattr(self, "_post_runs", None) or {}).get(block) or []:
+            st = str(p.get("status") or "").lower()
+            why = p.get("reason") or (f"rc {p['rc']}" if p.get("rc") not in (None, 0) else "")
+            out.append(f"post {_sr.post_script_name(p)}: {st}" + (f" ({why})" if why else ""))
+        return " · ".join(out)
 
     def _load_resumed_qor(self, block: str) -> None:
         """§145: a resume-skipped DONE block still shows its on-disk QoR in the
