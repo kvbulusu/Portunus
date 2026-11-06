@@ -11,8 +11,18 @@ be one janus_agent.py really accepts (checked with its own argparse). Shell
 metacharacters, absolute/~/.. paths and the SMTP/creds/interactive options
 are refused. Then it is launched detached:
 
-  JANUS_MAIL_LAUNCH=ec2   (default, for WSL) asic_flow/scripts/janus_ec2.sh autorun -- <args>
-  JANUS_MAIL_LAUNCH=local (on the box)       nohup python3 asic_flow/agent/janus_agent.py <args>
+  JANUS_MAIL_LAUNCH=wsl2  (default)    janus_ec2.sh autorun -- <args>
+  JANUS_MAIL_LAUNCH=local (on the box) python3 asic_flow/agent/janus_agent.py <args>
+  ("ec2" is still accepted as an alias of wsl2.)
+
+§217 standalone: on WSL2 no repo checkout is needed. Copy this one file
+anywhere (e.g. ~/utils/) and keep janus_ec2.sh where you already run it. The
+script is looked up in this order: $JANUS_EC2_SH, next to this file, ~/janus_ec2.sh,
+~/utils/janus_ec2.sh, the repo copy (if a repo is found), then $PATH. It runs
+from the script's own directory. Without a repo, options are checked against
+AGENT_FLAGS / AGENT_VALUE_OPTS / AGENT_BLOCKS below (a snapshot of
+janus_agent.py's argparse; a pytest fails if it drifts). Cross-option checks
+(_validate_args) then happen on the box. local mode needs the repo.
 
 Every matching mail is marked read first (a mail can never start two runs),
 and a short accepted/rejected reply goes to JANUS_MAIL_REPLY_TO.
@@ -23,11 +33,13 @@ Env (only SMTP_USER + SMTP_PASS are required; same names notification.py uses):
   IMAP_HOST, IMAP_PORT        default imap.gmail.com / 993
   IMAP_USER, IMAP_PASS        override if the inbox differs from SMTP_USER
   JANUS_MAIL_TAG              subject tag (default "[janus-lsf]")
-  JANUS_MAIL_LAUNCH           ec2 | local (default ec2)
+  JANUS_MAIL_LAUNCH           wsl2 | local (default wsl2; ec2 = alias of wsl2)
+  JANUS_EC2_SH                path to janus_ec2.sh (wsl2 mode; default: searched, see above)
   JANUS_MAIL_REPLY_TO         status replies (default NOTIFY_EMAIL, else SMTP_USER)
   JANUS_MAIL_ALLOW_FROM       optional comma list of allowed senders (empty = any)
   JANUS_MAIL_COOLDOWN_MIN     refuse a new trigger within N min of the last (default 10)
-  JANUS_REPO                  repo root (default: this file's ../..)
+  JANUS_REPO                  repo root (optional; default: this file's ../.. if it is
+                              a checkout, else standalone)
 
 CLI: mail_trigger.py [--once | --interval SEC] [--dry-run] [--check]
 
@@ -47,6 +59,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import smtplib
 import subprocess
 import sys
@@ -55,8 +68,122 @@ from email.header import decode_header, make_header
 from email.mime.text import MIMEText
 from pathlib import Path
 
-REPO = Path(os.environ.get("JANUS_REPO") or Path(__file__).resolve().parents[2])
 AGENT_REL = "asic_flow/agent/janus_agent.py"
+HERE = Path(__file__).resolve().parent
+
+
+def find_repo():
+    """Repo root containing janus_agent.py, or None (standalone copy)."""
+    cands = [os.environ.get("JANUS_REPO", "").strip()]
+    if len(HERE.parents) >= 2:
+        cands.append(str(HERE.parents[1]))
+    for c in cands:
+        if c and (Path(c).expanduser() / AGENT_REL).is_file():
+            return Path(c).expanduser().resolve()
+    return None
+
+
+REPO = find_repo()
+
+# §217 snapshot of janus_agent.py build_parser() for standalone validation.
+# test_217 fails if it drifts from the real parser: refresh it then.
+AGENT_FLAGS = frozenset("""
+--resume --clean --resume-preview --status --gc --gc-dry-run --yes
+--skip-stamp-check --dry-run --triage-slew --signoff-only --post-triage-slew
+--estimate --no-llm --interactive --no-git-commit --git-push --reason
+--no-physical --no-sram-regen --no-abstract --no-post-route-opt --eco-drv
+--eco-drv-only --abstract-only --no-debug-dump --no-debug-images --no-golden
+--golden-include-heavy --no-signoff --verbose -v --tmux --gdrive-upload
+--dashboard --no-signoff-sta --post-custom-on-fail --debug-on-fail
+""".split())
+# option: (action, nargs, type, choices)
+AGENT_VALUE_OPTS = {
+    '--blocks': ('store', '+', None, None),
+    '--parallel': ('store', None, 'int', None),
+    '--num-cores': ('store', None, 'int', None),
+    '--max-retries': ('store', None, 'int', None),
+    '--orfs': ('store', None, None, None),
+    '--rtl-root': ('store', None, None, None),
+    '--run-dir': ('store', None, None, None),
+    '--variant': ('store', None, None, None),
+    '--extra-make': ('store', '*', None, None),
+    '--variants': ('store', '+', None, None),
+    '--variants-reserve-cores': ('store', None, 'int', None),
+    '--manifest': ('store', None, None, None),
+    '--force-blocks': ('store', '+', None, None),
+    '--resume-from': ('store', None, None,
+                      ('1_synth', '2_floorplan', '3_place', '4_cts', '5_route', '6_final')),
+    '--git-sync-branches': ('store', '+', None, None),
+    '--reports-dir': ('store', None, None, None),
+    '--drc-handful': ('store', None, 'int', None),
+    '--golden-dir': ('store', None, None, None),
+    '--golden-wns-margin-ps': ('store', None, 'float', None),
+    '--golden-hold-margin-ps': ('store', None, 'float', None),
+    '--signoff-stage': ('store', None, None, ('rcx', 'lvs', 'both')),
+    '--signoff-timeout': ('store', None, 'int', None),
+    '--llm-interval': ('store', None, 'float', None),
+    '--llm-retries': ('store', None, 'int', None),
+    '--heartbeat': ('store', None, 'float', None),
+    '--progress': ('store', None, None, ('auto', 'dashboard', 'plain', 'quiet')),
+    '--notify-email': ('store', None, None, None),
+    '--smtp-host': ('store', None, None, None),
+    '--smtp-port': ('store', None, 'int', None),
+    '--smtp-user': ('store', None, None, None),
+    '--smtp-pass': ('store', None, None, None),
+    '--gdrive-creds': ('store', None, None, None),
+    '--dashboard-port': ('store', None, 'int', None),
+    '--dashboard-host': ('store', None, 'str', None),
+    '--skip': ('extend', '+', None,
+               ('llm', 'git-commit', 'macro-reshape', 'physical', 'sram', 'abstract',
+                'post-route-opt', 'debug-dump', 'debug-images', 'golden', 'signoff',
+                'signoff-sta', 'stamp-check')),
+    '--adaptive': ('store', None, None, ('off', 'advise', 'auto')),
+    '--adaptive-max-passes': ('store', None, 'int', None),
+    '--adaptive-thresholds': ('store', None, None, None),
+    '--stop-flow-at': ('store', None, None,
+                       ('synth', 'floorplan', 'place', 'cts', 'grt', 'route')),
+    '--post-custom-script': ('store', None, None, None),
+    '--post-custom-args': ('store', None, None, None),
+    '--post-custom-env': ('append', None, None, None),
+    '--post-custom-timeout': ('store', None, 'float', None),
+    '--auto-stop-idle': ('store', None, 'int', None),
+}
+AGENT_BLOCKS = ('security', 'noc', 'ampo', 'agent_domain', 'user_core_cva6',
+                'user_core_ara_lane', 'user_core_ara', 'user_core', 'user_domain',
+                'janus_soc_top')
+
+
+def spec_parser():
+    """argparse rebuilt from the snapshot (same nargs/types/choices)."""
+    p = argparse.ArgumentParser(prog="janus_agent.py", add_help=False,
+                                allow_abbrev=False)
+    for o in sorted(AGENT_FLAGS):
+        if o != "-v":
+            p.add_argument(o, *(["-v"] if o == "--verbose" else []), action="store_true")
+    types = {"int": int, "float": float, "str": str, None: None}
+    for o, (act, nargs, typ, ch) in AGENT_VALUE_OPTS.items():
+        kw = {"action": act, "type": types[typ]}
+        if nargs is not None:
+            kw["nargs"] = nargs
+        if ch:
+            kw["choices"] = list(ch)
+        p.add_argument(o, **kw)
+    return p
+
+
+def find_ec2_sh():
+    """janus_ec2.sh for wsl2 mode, or None."""
+    cands = [os.environ.get("JANUS_EC2_SH", "").strip(), str(HERE / "janus_ec2.sh"),
+             "~/janus_ec2.sh", "~/utils/janus_ec2.sh"]
+    if REPO:
+        cands.append(str(REPO / "asic_flow/scripts/janus_ec2.sh"))
+    cands.append(shutil.which("janus_ec2.sh") or "")
+    for c in cands:
+        if c and Path(c).expanduser().is_file():
+            return Path(c).expanduser().resolve()
+    return None
+
+
 STATE = Path(os.environ.get("JANUS_MAIL_STATE",
                             Path.home() / ".janus_mail_trigger.json"))
 LOG = Path(os.environ.get("JANUS_MAIL_LOG",
@@ -141,6 +268,8 @@ def extract_cmd(body):
 
 
 def _agent_module():
+    if REPO is None:
+        return None
     try:
         sys.path.insert(0, str(REPO / "asic_flow" / "agent"))
         import janus_agent  # noqa: E402
@@ -158,13 +287,10 @@ def _agent_parser():
         return None
 
 
-def _agent_opts():
-    src = (REPO / AGENT_REL).read_text(errors="replace")
-    return set(re.findall(r"""add_argument\(\s*['"](--[a-z0-9-]+)['"]""", src))
-
-
 def validate_cmd(cmd, parser="auto"):
-    """-> (agent_args list, None) or (None, reason)."""
+    """-> (agent_args list, None) or (None, reason).
+    parser: "auto" = janus_agent's own if a repo is found, else the snapshot;
+    None = always the snapshot (standalone)."""
     if not cmd:
         return None, "no 'cmd :' line in the body"
     bad = sorted(set(cmd) & META)
@@ -191,33 +317,32 @@ def validate_cmd(cmd, parser="auto"):
             return None, f"absolute/home/parent paths not allowed: {val}"
     if parser == "auto":
         parser = _agent_parser()
-    if parser is not None:
+    ja = _agent_module() if parser is not None else None
+    if parser is None:                       # standalone: snapshot of the parser
+        parser = spec_parser()
+    try:
+        parser.exit = lambda status=0, message=None: (_ for _ in ()).throw(
+            ValueError((message or "").strip() or f"exit {status}"))
+        parser.error = lambda message: (_ for _ in ()).throw(ValueError(message))
+        ns = parser.parse_args(args)
+    except ValueError as e:
+        msg = str(e)
+        if msg.startswith("unrecognized arguments"):
+            msg = "unknown option(s)/argument(s): " + msg.split(":", 1)[-1].strip()
+        return None, f"janus_agent.py rejects the options: {msg}"
+    graph = getattr(ja, "DEFAULT_GRAPH", None) if ja else AGENT_BLOCKS
+    bad = [b for b in (getattr(ns, "blocks", None) or []) if graph and b not in graph]
+    if bad:
+        return None, f"unknown block(s): {', '.join(bad)}"
+    if ja is not None:                       # cross-option checks (repo only)
         try:
-            parser.exit = lambda status=0, message=None: (_ for _ in ()).throw(
-                ValueError((message or "").strip() or f"exit {status}"))
-            parser.error = lambda message: (_ for _ in ()).throw(ValueError(message))
-            ns = parser.parse_args(args)
-        except ValueError as e:
-            return None, f"janus_agent.py rejects the options: {e}"
-        ja = _agent_module()
-        if ja is not None:
-            graph = getattr(ja, "DEFAULT_GRAPH", None)
-            bad = [b for b in (getattr(ns, "blocks", None) or []) if graph and b not in graph]
-            if bad:
-                return None, f"unknown block(s): {', '.join(bad)}"
-            try:
-                if hasattr(ja, "_apply_skips"):
-                    ja._apply_skips(ns)
-                errs = ja._validate_args(ns)[0] if hasattr(ja, "_validate_args") else []
-            except Exception:
-                errs = []
-            if errs:
-                return None, "janus_agent.py rejects the options: " + "; ".join(errs)
-    else:
-        known = _agent_opts()
-        for a in args:
-            if a.startswith("--") and a.split("=", 1)[0] not in known:
-                return None, f"unknown janus_agent.py option {a.split('=', 1)[0]}"
+            if hasattr(ja, "_apply_skips"):
+                ja._apply_skips(ns)
+            errs = ja._validate_args(ns)[0] if hasattr(ja, "_validate_args") else []
+        except Exception:
+            errs = []
+        if errs:
+            return None, "janus_agent.py rejects the options: " + "; ".join(errs)
     return args, None
 
 
@@ -243,20 +368,46 @@ def save_state(st):
         log(f"WARN cannot write {STATE}: {e}")
 
 
+MODES = {"wsl2": "wsl2", "ec2": "wsl2", "local": "local"}
+
+
+def norm_mode(m):
+    return MODES.get((m or "wsl2").strip().lower())
+
+
+def launch_target(mode):
+    """-> (script Path, cwd Path) or raises RuntimeError with a fix hint."""
+    if norm_mode(mode) == "local":
+        if REPO is None:
+            raise RuntimeError("JANUS_MAIL_LAUNCH=local needs the repo: set JANUS_REPO "
+                               f"to the checkout containing {AGENT_REL}")
+        return REPO / AGENT_REL, REPO
+    sh = find_ec2_sh()
+    if sh is None:
+        raise RuntimeError("janus_ec2.sh not found: set JANUS_EC2_SH=/path/to/janus_ec2.sh "
+                           "(searched: next to this file, ~/janus_ec2.sh, ~/utils/, $PATH)")
+    return sh, sh.parent
+
+
 def launch_argv(args, mode):
-    if mode == "local":
-        return [sys.executable, str(REPO / AGENT_REL)] + args
-    return ["bash", str(REPO / "asic_flow/scripts/janus_ec2.sh"), "autorun", "--"] + args
+    script, _ = launch_target(mode)
+    if norm_mode(mode) == "local":
+        return [sys.executable, str(script)] + args
+    return ["bash", str(script), "autorun", "--"] + args
 
 
 def launch(args, mode):
     """Detached; returns (ok, info)."""
-    argv = launch_argv(args, mode)
+    try:
+        argv = launch_argv(args, mode)
+        cwd = launch_target(mode)[1]
+    except RuntimeError as e:
+        return False, str(e)
     out = Path.home() / "janus_mail_runs"
     out.mkdir(exist_ok=True)
     lf = out / time.strftime("%Y%m%d_%H%M%S.log")
     with lf.open("w") as f:
-        p = subprocess.Popen(argv, cwd=str(REPO), stdout=f, stderr=subprocess.STDOUT,
+        p = subprocess.Popen(argv, cwd=str(cwd), stdout=f, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, start_new_session=True)
     time.sleep(5)
     rc = p.poll()
@@ -298,7 +449,10 @@ def handle(msg, cfg, st, dry=False):
     if not dry and time.time() - last < cfg["cooldown"] * 60:
         return "reject", (f"cooldown: last run launched "
                           f"{int((time.time() - last) / 60)} min ago (< {cfg['cooldown']})")
-    shown = " ".join(shlex.quote(a) for a in launch_argv(args, cfg["mode"]))
+    try:
+        shown = " ".join(shlex.quote(a) for a in launch_argv(args, cfg["mode"]))
+    except RuntimeError as e:
+        return "error", str(e)
     if dry:
         return "dry", shown
     ok, info = launch(args, cfg["mode"])
@@ -364,7 +518,7 @@ def poll(cfg, dry=False):
 def config():
     return {
         "tag": env("JANUS_MAIL_TAG", "[janus-lsf]"),
-        "mode": env("JANUS_MAIL_LAUNCH", "ec2").lower(),
+        "mode": norm_mode(env("JANUS_MAIL_LAUNCH", "wsl2")),
         "reply_to": env("JANUS_MAIL_REPLY_TO", env("NOTIFY_EMAIL", env("SMTP_USER"))),
         "allow": env("JANUS_MAIL_ALLOW_FROM"),
         "cooldown": float(env("JANUS_MAIL_COOLDOWN_MIN", "10")),
@@ -380,8 +534,14 @@ def main(argv=None):
     ap.add_argument("--check", action="store_true", help="test IMAP+SMTP login and exit")
     a = ap.parse_args(argv)
     cfg = config()
-    if cfg["mode"] not in ("ec2", "local"):
-        sys.exit("JANUS_MAIL_LAUNCH must be ec2 or local")
+    if cfg["mode"] is None:
+        sys.exit("JANUS_MAIL_LAUNCH must be wsl2 (default) or local")
+    try:
+        script, cwd = launch_target(cfg["mode"])
+    except RuntimeError as e:
+        sys.exit(str(e))
+    where = (f"launcher={script} cwd={cwd} | validation="
+             f"{'janus_agent.py argparse (' + str(REPO) + ')' if REPO else 'built-in snapshot (standalone)'}")
     if not (env("IMAP_USER", env("SMTP_USER")) and env("IMAP_PASS", env("SMTP_PASS"))):
         sys.exit("set SMTP_USER and SMTP_PASS (Gmail address + app password)")
     if a.check:
@@ -394,10 +554,10 @@ def main(argv=None):
             s.starttls()
             s.login(env("SMTP_USER"), env("SMTP_PASS"))
         print(f"SMTP login OK  | tag={cfg['tag']} mode={cfg['mode']} reply_to={cfg['reply_to']}"
-              f" allow={cfg['allow'] or 'ANY'} repo={REPO}")
+              f" allow={cfg['allow'] or 'ANY'}\n{where}")
         return 0
     log(f"mail_trigger up: tag={cfg['tag']} mode={cfg['mode']} allow={cfg['allow'] or 'ANY'}"
-        f"{' DRY-RUN' if a.dry_run else ''}")
+        f"{' DRY-RUN' if a.dry_run else ''} | {where}")
     while True:
         try:
             poll(cfg, a.dry_run)
