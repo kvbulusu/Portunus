@@ -382,6 +382,7 @@ def parse_repair(text: str) -> Dict[str, object]:
         m = _RE_HOLD_INS.search(line)
         if m:
             r["hold_bufs"] = int(m.group(1))
+            r["hold_bufs_final"] = True
         m = _RE_BUF_INS.search(line)
         if m:
             r["setup_bufs"] = int(r.get("setup_bufs", 0)) + int(m.group(1))
@@ -563,7 +564,7 @@ def collect_stage(key: str, logs_dir: Optional[str], reports_dir: Optional[str],
         _post_hook_override(row, key, reports_dir, since, log_text)
         rep = parse_repair(log_text)
         for k in ("setup_pre_wns", "setup_post_wns", "hold_pre_wns", "hold_post_wns",
-                  "hold_bufs_peak", "rsz0060"):
+                  "hold_bufs_peak", "hold_bufs_final", "rsz0060"):
             if k in rep:
                 row[k] = rep[k]
         for k in ("hold_bufs", "setup_bufs"):
@@ -714,7 +715,11 @@ def red_flags(rows: List[Dict[str, object]]) -> List[Tuple[str, str]]:
         if r.get("status") == "PENDING":
             continue
         k = r.get("key")
-        hb = r.get("hold_bufs_peak") or r.get("hold_bufs")
+        # §218: RSZ-0032 (final, after any RSZ journal restore) wins; the
+        # table peak only while the stage is still running. Run 110339: the
+        # hold table peaked at 8052, RSZ restored, final RSZ-0032 = 292.
+        hb = r.get("hold_bufs") if r.get("hold_bufs_final") else (
+            r.get("hold_bufs_peak") or r.get("hold_bufs"))
         if isinstance(hb, (int, float)) and hb > HOLD_BUF_KILL:
             out.append(("KILL", f"{k}: {int(hb)} hold buffers > {HOLD_BUF_KILL} -> KILL RUN"))
         elif isinstance(hb, (int, float)) and hb > HOLD_BUF_WARN:
