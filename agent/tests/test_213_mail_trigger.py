@@ -141,7 +141,7 @@ def test_first_poll_baselines_then_launches_new(env):
     assert env["launch"] == []                       # existing mail never launches
     FakeIMAP.box.append(mk("[JANUS-LSF] go", f"cmd : {CMD}", mid="<new>"))
     T.poll(T.config())
-    assert len(env["launch"]) == 1 and env["launch"][0][1] == "ec2"
+    assert len(env["launch"]) == 1 and env["launch"][0][1] == "wsl2"
     to, subj, _ = env["reply"][0]
     assert to == "owner@example.com" and "STARTED" in subj and "janus-lsf" not in subj.lower()
     T.poll(T.config())                               # same mail again -> nothing
