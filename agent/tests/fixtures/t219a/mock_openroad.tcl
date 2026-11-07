@@ -198,6 +198,8 @@ proc exit { args } { puts "MOCK_EXIT"; flush stdout; ::_real_exit 0 }
 foreach w {write_db orfs_write_db write_def write_verilog write_spef write_sdc} {
   proc $w { args } "lappend ::writes $w; error {mock: $w called}"
 }
+# optional per-test extension (e.g. fixtures/t220/mock_ext.tcl)
+if { [info exists ::env(MOCK_EXT)] && $::env(MOCK_EXT) ne "" } { source $::env(MOCK_EXT) }
 if { [catch { source [lindex $argv 0] } e] } {
   puts stderr "MOCK_ERROR: $::errorInfo"
   ::_real_exit 3
