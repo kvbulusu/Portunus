@@ -348,12 +348,19 @@ def parse_repair(text: str) -> Dict[str, object]:
     r: Dict[str, object] = {}
     mode = None
     cols: List[str] = []
+    # §219: the hold table 'Buffers' column restarts per RSZ pass (run 110339:
+    # 8052 at iter 4140 -> 2 at 4150 -> 292 final, TNS continuous, hold9740x
+    # and hold10307x both still in the 4_cts odb). RSZ-0032 and the ORFS
+    # hold_buffer metric report only the LAST pass. Total = sum of pass peaks.
+    hbase, hlast = 0, 0
     for line in (text or "").splitlines():
         if "RSZ-0094]" in line or "RSZ-0099]" in line:
             mode = "setup"
             continue
         if "RSZ-0046]" in line:
             mode = "hold"
+            # §219: a new hold repair call -> close the previous pass
+            hbase, hlast = hbase + hlast, 0
             continue
         if "|" in line and ("WNS" in line) and ("Iter" in line):
             cols = [c.strip() for c in line.split("|")]
@@ -376,6 +383,10 @@ def parse_repair(text: str) -> Dict[str, object]:
                         try:
                             b = int(cells[cols.index(name)])
                             r["hold_bufs_peak"] = max(int(r.get("hold_bufs_peak", 0)), b)
+                            if b < hlast:
+                                hbase += hlast
+                                r["hold_passes"] = int(r.get("hold_passes", 1)) + 1
+                            hlast = b
                         except (ValueError, IndexError):
                             pass
                         break
@@ -390,6 +401,11 @@ def parse_repair(text: str) -> Dict[str, object]:
             r["rsz0060"] = True
     if "hold_bufs" not in r and "hold_bufs_peak" in r:
         r["hold_bufs"] = r["hold_bufs_peak"]
+    if hbase or hlast:
+        # RSZ-0032 can exceed the last table row (rows every 10 iterations)
+        last = max(hlast, int(r["hold_bufs"])) if r.get("hold_bufs_final") else hlast
+        r["hold_bufs_total"] = hbase + last
+        r.setdefault("hold_passes", 1)
     return r
 
 
@@ -564,7 +580,8 @@ def collect_stage(key: str, logs_dir: Optional[str], reports_dir: Optional[str],
         _post_hook_override(row, key, reports_dir, since, log_text)
         rep = parse_repair(log_text)
         for k in ("setup_pre_wns", "setup_post_wns", "hold_pre_wns", "hold_post_wns",
-                  "hold_bufs_peak", "hold_bufs_final", "rsz0060"):
+                  "hold_bufs_peak", "hold_bufs_final", "hold_bufs_total", "hold_passes",
+                  "rsz0060"):
             if k in rep:
                 row[k] = rep[k]
         for k in ("hold_bufs", "setup_bufs"):
@@ -708,6 +725,16 @@ def build_rows(logs_dir: Optional[str], reports_dir: Optional[str],
 # ---------------------------------------------------------------------------
 # verdicts
 # ---------------------------------------------------------------------------
+def hold_buf_count(r: Dict[str, object]):
+    """§219: hold buffers actually inserted = sum over RSZ passes
+    (hold_bufs_total from the hold table). §218 used the final RSZ-0032 (292
+    in run 110339) and called the 8052 table peak a false alarm -- wrong: the
+    counter restarts per pass, the 8052 were kept (true total ~8344)."""
+    vals = [v for v in (r.get("hold_bufs_total"), r.get("hold_bufs"), r.get("hold_bufs_peak"))
+            if isinstance(v, (int, float))]
+    return max(vals) if vals else None
+
+
 def red_flags(rows: List[Dict[str, object]]) -> List[Tuple[str, str]]:
     """(level, text). level KILL means the user's kill rule fired."""
     out: List[Tuple[str, str]] = []
@@ -715,11 +742,7 @@ def red_flags(rows: List[Dict[str, object]]) -> List[Tuple[str, str]]:
         if r.get("status") == "PENDING":
             continue
         k = r.get("key")
-        # §218: RSZ-0032 (final, after any RSZ journal restore) wins; the
-        # table peak only while the stage is still running. Run 110339: the
-        # hold table peaked at 8052, RSZ restored, final RSZ-0032 = 292.
-        hb = r.get("hold_bufs") if r.get("hold_bufs_final") else (
-            r.get("hold_bufs_peak") or r.get("hold_bufs"))
+        hb = hold_buf_count(r)
         if isinstance(hb, (int, float)) and hb > HOLD_BUF_KILL:
             out.append(("KILL", f"{k}: {int(hb)} hold buffers > {HOLD_BUF_KILL} -> KILL RUN"))
         elif isinstance(hb, (int, float)) and hb > HOLD_BUF_WARN:
@@ -762,8 +785,8 @@ def key_qor(r: Dict[str, object]) -> str:
         parts.append(f"H {fmt_ps(r['hold_ws'])}")
     if k == "1_synth" and r.get("cells") is not None:
         parts.append(f"{fmt_int(r['cells'])} cells")
-    if k == "4_cts" and r.get("hold_bufs") is not None:
-        parts.append(f"hbuf {fmt_int(r['hold_bufs'])}")
+    if k == "4_cts" and hold_buf_count(r) is not None:
+        parts.append(f"hbuf {fmt_int(hold_buf_count(r))}")
     if k == "5_grt" and r.get("grt_overflow") is not None:
         parts.append(f"ovfl {r['grt_overflow']}")
     if k == "5_drt" and r.get("drt_viol") is not None:
@@ -823,7 +846,7 @@ def _det_cells(r) -> List[str]:
     notes += drv
     return [str(r.get("key")), wt(r.get("setup_ws"), r.get("setup_tns"), r.get("setup_viol")),
             wt(r.get("hold_ws"), r.get("hold_tns"), r.get("hold_viol")), cu,
-            f"{fmt_int(r.get('hold_bufs'))}/{fmt_int(r.get('setup_bufs'))}",
+            f"{fmt_int(hold_buf_count(r))}/{fmt_int(r.get('setup_bufs'))}",
             ", ".join(notes) or DASH]
 
 
