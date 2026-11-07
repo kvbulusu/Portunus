@@ -206,15 +206,23 @@ class MilestoneTracker:
 
     def _hold_watch(self, line: str, st: str, out: List[Event]) -> None:
         """§175: parse repair_timing's hold table live; fire KILL events."""
+        # §219: the 'Buffers' column restarts per RSZ pass and RSZ-0032 is the
+        # last pass only (run 110339: 8052 -> 2 ... 292). Track the sum.
+        base = getattr(self, "hold_base", 0)
+        last = getattr(self, "hold_last", 0)
         if "RSZ-0046]" in line:
             self.hold_mode, self.hold_cols = True, []
+            self.hold_base, self.hold_last = base + last, 0
             return
         if "RSZ-0094]" in line or "RSZ-0032]" in line:
             m = _RE_HOLD.search(line)
-            if m and int(m.group(1)) > HOLD_BUF_KILL:
-                self._ev(out, "kill_hold_bufs", "KILL RUN?",
-                         f"{m.group(1)} hold buffers inserted at '{st or '?'}' "
-                         f"(> {HOLD_BUF_KILL})")
+            if m:
+                tot = base + max(last, int(m.group(1)))
+                if tot > HOLD_BUF_KILL:
+                    self._ev(out, "kill_hold_bufs", "KILL RUN?",
+                             f"{tot} hold buffers inserted at '{st or '?'}' "
+                             f"(RSZ-0032 last pass {m.group(1)}; > {HOLD_BUF_KILL})")
+                self.hold_base, self.hold_last = tot, 0
             self.hold_mode = False
             return
         if not self.hold_mode or "|" not in line:
@@ -239,9 +247,13 @@ class MilestoneTracker:
                     b = int(cells[self.hold_cols.index(name)])
                 except (ValueError, IndexError):
                     break
-                if b > HOLD_BUF_KILL:
+                if b < last:
+                    base += last
+                    self.hold_base = base
+                self.hold_last = b
+                if base + b > HOLD_BUF_KILL:
                     self._ev(out, "kill_hold_bufs", "KILL RUN?",
-                             f"hold repair already at {b} buffers at '{st or '?'}' "
+                             f"hold repair already at {base + b} buffers at '{st or '?'}' "
                              f"(> {HOLD_BUF_KILL}) and still going")
                 break
 
