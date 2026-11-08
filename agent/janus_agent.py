@@ -1106,6 +1106,33 @@ class JANUSAutonomousAgent:
         """
         return read_block_timing(self._reports_dir(block))
 
+    def _stopped_stage_timing(self, block: str) -> Optional[Dict]:
+        """§223: --stop-flow-at timing from the newest janus_NN_<stage>_paths.rpt
+        written by THIS run (mtime >= block start), else None. The run log has
+        no final STA print at cts, so its generic 'wns' fallback could pick a
+        hook line (run 20261108_121357 noted setup WNS -414.1 = pre-repair HOLD)."""
+        try:
+            from log_analyzer import parse_stage_timing_rpt
+            rdir = self._reports_dir(block)
+            t0 = getattr(self, "_block_t0", {}).get(block)
+            if not rdir or t0 is None:
+                return None
+            rpts = [p for p in glob.glob(os.path.join(rdir, "janus_[0-9][0-9]_*_paths.rpt"))
+                    if os.path.getmtime(p) >= t0]
+            if not rpts:
+                return None
+            p = max(rpts, key=os.path.getmtime)
+            with open(p, "r", errors="replace") as fh:
+                t = parse_stage_timing_rpt(fh.read(8192))
+            t = {k: v for k, v in t.items() if v is not None}
+            if not t:
+                return None
+            t["_source"] = os.path.basename(p)
+            return t
+        except Exception as e:
+            self.ui.debug(f"{block}: stopped-stage timing read failed: {e}")
+            return None
+
     def _path_group_timing_from_rpt(
             self, block: str) -> Optional[Dict[str, Dict[str, float]]]:
         """Worst slack per path group (reg2reg/reg2out/gated clock) for setup
@@ -3697,10 +3724,20 @@ class JANUSAutonomousAgent:
                     res.wns_ns, res.hold_ps, res.tns_ns = (
                         report.wns_ns, report.hold_ps, report.tns_ns)
                     res.timing_source = f"run log (stopped after {stop})"
+                    st_t = self._stopped_stage_timing(block)
+                    if st_t:
+                        res.wns_ns = st_t.get("setup_ws", res.wns_ns)
+                        res.hold_ps = st_t.get("hold_ws", res.hold_ps)
+                        res.tns_ns = st_t.get("setup_tns", res.tns_ns)
+                        res.timing_source = f"{st_t['_source']} (stopped after {stop})"
                     res.path_groups = None
                     res.max_slew_violations = res.max_cap_violations = None
-                    res.note = (f"stopped after {stop} (--stop-flow-at); "
-                                f"{report.headline()}")[:240]
+                    _hl = (f"{block}/{stop}: setup WNS={res.wns_ns:+.1f}ps"
+                           + (f", hold WS={res.hold_ps:+.1f}ps"
+                              if res.hold_ps is not None else "")
+                           + f" [{st_t['_source']}]"
+                           if st_t and res.wns_ns is not None else report.headline())
+                    res.note = (f"stopped after {stop} (--stop-flow-at); {_hl}")[:240]
                     self.ui.good(f"{block}: STOPPED after {stop} as requested "
                                  f"(--stop-flow-at) — {report.headline()}")
                     return res
@@ -3748,6 +3785,11 @@ class JANUSAutonomousAgent:
 
             # --- failed -----------------------------------------------------
             self.ui.warn(f"{block}: make rc={rc}; {report.headline()}")
+            # §223: rc=0 + FAILED means the log scan matched a line — name it, so
+            # the email never says "(no ERROR line found)" without a reason.
+            make_rc = rc
+            rc0_why = (f" [make rc=0; log match: {report.error_lines[0][:120]}]"
+                       if make_rc == 0 and report.error_lines else "")
 
             # Deterministic triage FIRST: if this is a known environment /
             # infrastructure error (missing .so, OOM, missing tool, etc.) the
@@ -3839,7 +3881,8 @@ class JANUSAutonomousAgent:
 
             if self.args.no_llm or not self.llm.available():
                 res.status = "FAILED"
-                res.note = reason_tag + "failed; LLM disabled — see log: " + res.log_path
+                res.note = (reason_tag + "failed; LLM disabled" + rc0_why
+                            + " — see log: " + res.log_path)
                 self.ui.err(f"{block}: stopping (no LLM). Inspect {res.log_path}")
                 return res
 

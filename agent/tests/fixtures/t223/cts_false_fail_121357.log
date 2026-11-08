@@ -1,0 +1,94 @@
+Elapsed time: 0:05.95[h:]min:sec. CPU time: user 5.50 sys 0.19 (95%). Peak memory: 242028KB.
+Elapsed time: 4:30.89[h:]min:sec. CPU time: user 264.03 sys 8.26 (100%). Peak memory: 1096332KB.
+Elapsed time: 0:17.31[h:]min:sec. CPU time: user 16.62 sys 0.61 (99%). Peak memory: 1629616KB.
+Elapsed time: 8:38.96[h:]min:sec. CPU time: user 624.08 sys 42.80 (128%). Peak memory: 1879856KB.
+Elapsed time: 0:48.11[h:]min:sec. CPU time: user 105.08 sys 24.12 (268%). Peak memory: 1884092KB.
+Elapsed time: 0:14.54[h:]min:sec. CPU time: user 13.99 sys 0.55 (99%). Peak memory: 1359696KB.
+Elapsed time: 1:18.87[h:]min:sec. CPU time: user 77.83 sys 1.04 (99%). Peak memory: 2457540KB.
+cp ./results/asap7/janus_soc_top/base/2_4_floorplan_pdn.odb ./results/asap7/janus_soc_top/base/2_floorplan.odb
+cp ./results/asap7/janus_soc_top/base/2_1_floorplan.sdc ./results/asap7/janus_soc_top/base/2_floorplan.sdc
+Elapsed time: 5:42.29[h:]min:sec. CPU time: user 750.47 sys 1.71 (219%). Peak memory: 2874724KB.
+Elapsed time: 0:25.45[h:]min:sec. CPU time: user 24.62 sys 0.83 (99%). Peak memory: 1823752KB.
+Elapsed time: 37:17.65[h:]min:sec. CPU time: user 5026.08 sys 76.39 (228%). Peak memory: 19052692KB.
+JANUS_PRNC: repair_timing -repair_tns 100 -setup_margin 0 -hold_margin 0 -verbose
+Elapsed time: 3:17.57[h:]min:sec. CPU time: user 342.56 sys 44.59 (195%). Peak memory: 3584472KB.
+JANUS_POST_DPL: before wns -465.5 slew_viol 498 cap_viol 24 insts 252502
+JANUS_POST_DPL: iter 1 repair_design -slew_margin 20 -cap_margin 20 -max_wire_length 200 evicted 1906 wns -43.5 slew_viol 178 cap_viol 0
+JANUS_POST_DPL: iter 2 repair_design -slew_margin 20 -cap_margin 20 -max_wire_length 200 evicted 169 wns -33.9 slew_viol 49 cap_viol 0
+JANUS_POST_DPL: iter 3 repair_design -slew_margin 20 -cap_margin 20 -max_wire_length 200 evicted 26 wns -49.9 slew_viol 9 cap_viol 0
+JANUS_POST_DPL: iter 4 repair_design -slew_margin 20 -cap_margin 20 -max_wire_length 200 evicted 16 wns -75.1 slew_viol 7 cap_viol 0
+JANUS_POST_DPL: repair_timing evicted 0 wns 19.6 slew_viol 7 cap_viol 0
+JANUS_POST_DPL: cleanup repair_design evicted 7 wns 52.8 slew_viol 3 cap_viol 0
+JANUS_POST_DPL: after  wns 52.8 (was -465.5) slew_viol 3 cap_viol 0 insts 255022
+Elapsed time: 10:56.58[h:]min:sec. CPU time: user 899.79 sys 68.50 (147%). Peak memory: 14475820KB.
+cp ./results/asap7/janus_soc_top/base/3_5_place_dp.odb ./results/asap7/janus_soc_top/base/3_place.odb
+cp ./results/asap7/janus_soc_top/base/2_floorplan.sdc ./results/asap7/janus_soc_top/base/3_place.sdc
+JANUS_CTS_PRE_RSZ: before slew_viol 3 cap_viol 0
+JANUS_CTS_PRE_RSZ: repair_design -verbose -slew_margin 20 -cap_margin 20 -max_wire_length 400
+JANUS_CTS_PRE_RSZ: evicted 0 cells from macro areas
+JANUS_CTS_PRE_RSZ: after  slew_viol 1 cap_viol 0
+JANUS_CTS_HOLD_ABORT: armed (abort if pre-repair hold WNS < -700 ps)
+JANUS_CTS_LEGALIZE: post_cts before setup -5805.2 hold -5152.1 after setup -5923.7 hold -5270.6
+JANUS_CTS_CLK_REDISP: post_cts round 1 repair_clock_nets+legalize before setup -5923.7 hold -5270.6 after setup -5865.1 hold -5212.0
+JANUS_CTS_CLK_REDISP: post_cts round 2 repair_clock_nets+legalize before setup -5865.1 hold -5212.0 after setup -5839.3 hold -5186.3
+JANUS_CTS_CLK_REDISP: post_cts round 3 repair_clock_nets+legalize before setup -5839.3 hold -5186.3 after setup -5839.3 hold -5186.3
+JANUS_CTS_CLK_REDISP: post_cts round 4 repair_clock_nets+legalize before setup -5839.3 hold -5186.3 after setup -5839.3 hold -5186.3
+JANUS_CTS_CLK_REDISP: post_cts round 5 repair_clock_nets+legalize before setup -5839.3 hold -5186.3 after setup -5839.3 hold -5186.3
+JANUS_CTS_MACRO_ALIGN: isolate before setup -4367.0 hold -3889.7 (hold credit 300 tol 25 maxpush 5000 dryrun 0 isolate 'u_user/user_clk u_kv_secure_subsystem/clk u_noc/clk u_periph/u_ampo/user_clk')
+JANUS_CTS_MACRO_ALIGN: clk_user u_kv_secure_subsystem/clk clk 3426.4 reg median 2180.4 D -1246.0 | movable-only setup_out -1044.3 hold_in -1755.2 setup_in 2037.5 hold_out 1536.3 -> a -1455.2 b 1836.3 want 1645.7 -> target D 399.7 (all-path a -1455.2 b 116.5 want 785.8)
+JANUS_CTS_MACRO_ALIGN: clk_user u_noc/clk clk 3393.1 reg median 2180.4 D -1212.7 | movable-only setup_out -1019.8 hold_in -1257.4 setup_in 1945.0 hold_out 1153.4 -> a -1019.8 b 1453.4 want 1236.6 -> target D 23.9 (all-path a -1019.8 b -1019.8 want 0.0)
+JANUS_CTS_MACRO_ALIGN: clk_user u_periph/u_ampo/user_clk clk 3232.7 reg median 2180.4 D -1052.3 | movable-only setup_out 1389.7 hold_in -965.9 setup_in 2525.6 hold_out 424.3 -> a -665.9 b 724.3 want 695.1 -> target D -357.1 (all-path a -665.9 b -24.7 want 320.6)
+JANUS_CTS_MACRO_ALIGN: clk_user u_user/user_clk clk 3507.9 reg median 2180.4 D -1327.5 | movable-only setup_out -4367.0 hold_in -3889.7 setup_in 3224.8 hold_out 2345.9 -> a -4367.0 b 2645.9 want 3506.4 -> target D 2179.0 (all-path a -4367.0 b -169.7 want 2098.7)
+JANUS_CTS_MACRO_ALIGN: after setup -350.1 hold -414.1
+JANUS_CTS_LEGALIZE: macro_align before setup -350.1 hold -414.1 after setup -520.4 hold -414.1
+JANUS_CTS_CLK_REDISP: macro_align round 1 repair_clock_nets+legalize before setup -520.4 hold -414.1 after setup -345.8 hold -414.1
+JANUS_CTS_CLK_REDISP: macro_align round 2 repair_clock_nets+legalize before setup -345.8 hold -414.1 after setup -362.2 hold -414.1
+JANUS_CTS_CLK_REDISP: macro_align round 3 repair_clock_nets+legalize before setup -362.2 hold -414.1 after setup -388.7 hold -414.1
+JANUS_CTS_CLK_REDISP: macro_align round 4 repair_clock_nets+legalize before setup -388.7 hold -414.1 after setup -388.7 hold -414.1
+JANUS_CTS_TAP_SPLIT: before setup -388.7 hold -414.1 (clock clk_user target 0 hold_target 0 guard 25 hold credit 0 setup credit 0 maxps 1200 bin 50 dryrun 0)
+JANUS_CTS_TAP_SPLIT: iter 0 EARLY re-tapped 1 pin(s) (pruned 0), trim 0 buf, error min -24.3 max -24.3 ps
+JANUS_CTS_TAP_SPLIT: iter 0 LATE 33 group(s) 150 buf, error min -16.5 max 21.0 ps
+JANUS_CTS_TAP_SPLIT: iter 0 after setup -120.3 hold -414.1 (buffers left 5850)
+JANUS_CTS_TAP_SPLIT: iter 1 EARLY re-tapped 2 pin(s) (pruned 0), trim 0 buf, error min -28.3 max -28.3 ps
+JANUS_CTS_TAP_SPLIT: iter 1 LATE 7 group(s) 7 buf, error min -19.0 max -8.2 ps
+JANUS_CTS_TAP_SPLIT: iter 1 after setup -120.3 hold -414.1 (buffers left 5843)
+JANUS_CTS_TAP_SPLIT: u_user done setup_out 1.2 setup_in -2.1 hold_in 25.0 hold_out 36.8
+JANUS_CTS_TAP_SPLIT: after setup -120.3 hold -414.1
+JANUS_CTS_LEGALIZE: tap_split before setup -120.3 hold -414.1 after setup -120.3 hold -414.1
+JANUS_CTS_LEAF_RETAP: start clocks {clk_agent} radius 150 um min_gain 150 ps max 8 dryrun 0 | hold -414.1/-129476.6 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: leaves with sink D-hold < 0 ps: 6 | candidate nets: 133
+JANUS_CTS_LEAF_RETAP: leaf clkbuf_leaf_95_agent_clk_regs (clk_agent) in<-wire104026 arr 1078.3 worst sink D-hold -203.6: 4 option(s) best wire104023 6.5 um gain 242.4
+JANUS_CTS_LEAF_RETAP: ACCEPT clkbuf_leaf_95_agent_clk_regs -> net of wire104023 (6.5 um, est gain 242.4) | hold -414.1/-129476.6 setup -120.3/-7787.0 -> hold -414.1/-126475.2 setup -120.3/-7787.0 | pruned 0 repeaters
+JANUS_CTS_LEAF_RETAP: leaf clkbuf_leaf_126_agent_clk_regs (clk_agent) in<-max_length104034 arr 845.2 worst sink D-hold -78.9: 31 option(s) best delaybuf_5_clk_agent 15.4 um gain 738.3
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_126_agent_clk_regs -> net of delaybuf_5_clk_agent (15.4 um): hold TNS not improved | hold -1049.1/-131870.3 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_126_agent_clk_regs -> net of delaybuf_3_clk_agent (15.5 um): hold TNS not improved | hold -1111.8/-132232.0 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_126_agent_clk_regs -> net of clkbuf_regs_3_clk_agent (16.2 um): hold TNS not improved | hold -955.7/-131343.9 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: leaf clkbuf_leaf_68_agent_clk_regs (clk_agent) in<-clkbuf_4_13_1_agent_clk_regs arr 852.1 worst sink D-hold -6.0: 29 option(s) best clkbuf_3_7_1_agent_clk_regs 34.1 um gain 234.5
+JANUS_CTS_LEAF_RETAP: ACCEPT clkbuf_leaf_68_agent_clk_regs -> net of clkbuf_3_7_1_agent_clk_regs (34.1 um, est gain 234.5) | hold -414.1/-126475.2 setup -120.3/-7787.0 -> hold -414.1/-126407.5 setup -120.3/-7787.0 | pruned 0 repeaters
+JANUS_CTS_LEAF_RETAP: leaf clkbuf_leaf_106_agent_clk_regs (clk_agent) in<-wire104024 arr 822.7 worst sink D-hold -4.0: 8 option(s) best clkbuf_3_5_0_agent_clk_regs 65.1 um gain 241.0
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_106_agent_clk_regs -> net of clkbuf_3_5_0_agent_clk_regs (65.1 um): hold TNS not improved | hold -414.1/-130993.5 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_106_agent_clk_regs -> net of clkbuf_3_4_0_agent_clk_regs (65.6 um): hold TNS not improved | hold -414.1/-131179.3 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_106_agent_clk_regs -> net of clkbuf_2_2_2_agent_clk_regs (66.3 um): hold TNS not improved | hold -417.0/-130897.5 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: leaf clkbuf_leaf_11_agent_clk_regs (clk_agent) in<-clkbuf_4_2_1_agent_clk_regs arr 762.4 worst sink D-hold -2.4: 9 option(s) best clkbuf_2_0_0_agent_clk_regs 62.2 um gain 273.3
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_11_agent_clk_regs -> net of clkbuf_2_0_0_agent_clk_regs (62.2 um): hold TNS not improved | hold -414.1/-126421.4 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_11_agent_clk_regs -> net of clkbuf_2_0_1_agent_clk_regs (63.3 um): hold TNS not improved | hold -414.1/-126407.6 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_11_agent_clk_regs -> net of clkbuf_1_0_7_agent_clk_regs (75.6 um): hold TNS not improved | hold -414.1/-126614.2 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: leaf clkbuf_leaf_0_agent_clk_regs (clk_agent) in<-clkbuf_4_0_1_agent_clk_regs arr 783.5 worst sink D-hold -1.3: 4 option(s) best clkbuf_3_0_1_agent_clk_regs 100.2 um gain 163.4
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_0_agent_clk_regs -> net of clkbuf_3_0_1_agent_clk_regs (100.2 um): hold TNS not improved | hold -414.1/-126628.3 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_0_agent_clk_regs -> net of clkbuf_3_0_0_agent_clk_regs (146.1 um): hold TNS not improved | hold -414.1/-126629.3 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: REVERT clkbuf_leaf_0_agent_clk_regs -> net of clkbuf_3_1_0_agent_clk_regs (146.3 um): hold TNS not improved | hold -414.1/-126567.6 setup -120.3/-7787.0
+JANUS_CTS_LEAF_RETAP: done tried 6 accepted 2 reverted 12 pruned 0 | before hold -414.1/-129476.6 setup -120.3/-7787.0 after hold -414.1/-126407.5 setup -120.3/-7787.0
+JANUS_CTS_MACRO_RETRIM: start pins {u_noc/clk} chain_re ^janus_maltrim step 2 max_stages 12 dryrun 0 | hold -414.1/-126407.5 setup -120.3/-7787.0
+JANUS_CTS_MACRO_RETRIM: u_noc/clk: trial k=2 -> net of janus_maltrimbuf104177 clk 3279.8 | hold -414.1/-126407.5 setup -120.3/-7787.0 | hold TNS not improved
+JANUS_CTS_MACRO_RETRIM: u_noc/clk: trial k=4 -> net of janus_maltrimbuf104179 clk 3214.4 | hold -414.1/-126407.5 setup -120.3/-7787.0 | hold TNS not improved
+JANUS_CTS_MACRO_RETRIM: u_noc/clk: trial k=6 -> net of janus_maltrimbuf104181 clk 3150.9 | hold -414.1/-126407.5 setup -120.3/-7787.0 | hold TNS not improved
+JANUS_CTS_MACRO_RETRIM: u_noc/clk: trial k=8 -> net of janus_maltrimbuf104183 clk 3088.2 | hold -414.1/-126407.5 setup -120.3/-7787.0 | hold TNS not improved
+JANUS_CTS_MACRO_RETRIM: u_noc/clk: trial k=10 -> net of janus_maltrimbuf104185 clk 3024.8 | hold -414.1/-126407.5 setup -120.3/-7787.0 | hold TNS not improved
+JANUS_CTS_MACRO_RETRIM: u_noc/clk: trial k=12 -> net of janus_maltrimbuf104187 clk 2961.9 | hold -414.1/-126407.5 setup -120.3/-7808.0 | hold TNS not improved
+JANUS_CTS_MACRO_RETRIM: u_noc/clk: REVERT (k=12 hold TNS not improved) | hold -414.1/-126407.5 setup -120.3/-7787.0
+JANUS_CTS_MACRO_RETRIM: done accepted 0 pruned 0 | before hold -414.1/-126407.5 setup -120.3/-7787.0 after hold -414.1/-126407.5 setup -120.3/-7787.0
+JANUS_CTS_HOLD_ABORT: pre-repair hold WNS -414.1 ps >= -700 ps; continue
+[INFO RSZ-0046] Found 2817 endpoints with hold violations.
+[INFO RSZ-0032] Inserted 7946 hold buffers.
+Elapsed time: 53:33.71[h:]min:sec. CPU time: user 7622.37 sys 478.57 (252%). Peak memory: 16615564KB.
+cp ./results/asap7/janus_soc_top/base/4_1_cts.odb ./results/asap7/janus_soc_top/base/4_cts.odb
