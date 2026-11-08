@@ -1,6 +1,6 @@
 """§218: run 20261106_110339 follow-ups.
  - stage_report: hold-buffer accounting (the §218 "final RSZ-0032 wins" rule
-   was wrong and is reversed in §219: 8052 + 292 = 8344 across passes).
+   is the right one: §219's 8052 + 292 = 8344 cross-drop sum was reversed in §222).
  - soc_cts_probe.tcl: brackets in the bbox format string escaped (rc=2).
  - janus_soc_top.mk / janus_cts_balance.tcl: JANUS_CTS_LEGALIZE_PRE, REDISP ITERS=5.
  - janus_soc_top.sv: u_ucut_npun NoC-side cut on NoC master 1, gated by
@@ -47,13 +47,11 @@ def test_parse_repair_final_vs_peak():
     assert r["hold_post_wns"] == pytest.approx(-229.274)
 
 
-def test_red_flags_use_cross_pass_total():
-    # §219 reverses §218: the Buffers column restarts per RSZ pass and
-    # RSZ-0032 covers the last pass only, so 8052 + 292 = 8344 is real.
+def test_red_flags_use_rsz0032_per_call():
+    # §222: one RSZ-0046 call; the in-call drop is not a new pass -> 292
     r = sr.parse_repair(HOLD_LOG)
-    assert r["hold_bufs_total"] == 8344
-    row = dict(r, key="4_cts", status="FAILED")
-    assert ("RED", "4_cts: 8344 hold buffers > %d" % sr.HOLD_BUF_WARN) in sr.red_flags([row])
+    assert r["hold_bufs_total"] == 292
+    assert sr.hold_buf_count(r) == 292
 
 
 def test_red_flags_peak_while_running():

@@ -348,19 +348,23 @@ def parse_repair(text: str) -> Dict[str, object]:
     r: Dict[str, object] = {}
     mode = None
     cols: List[str] = []
-    # §219: the hold table 'Buffers' column restarts per RSZ pass (run 110339:
-    # 8052 at iter 4140 -> 2 at 4150 -> 292 final, TNS continuous, hold9740x
-    # and hold10307x both still in the 4_cts odb). RSZ-0032 and the ORFS
-    # hold_buffer metric report only the LAST pass. Total = sum of pass peaks.
-    hbase, hlast = 0, 0
+    # §222: one hold-repair CALL = one RSZ-0046 line; OpenROAD resets its
+    # inserted-buffer counter only there. The printed 'Buffers' column can drop
+    # inside one call (run 203342: 542 -> 2, 6061 -> 6, final 5647 = RSZ-0032;
+    # the 4_cts odb held ~1970 hold cells). §219 counted each drop as a new
+    # pass and summed them (12250 -> false KILL); that is reversed here.
+    # Per call: RSZ-0032 if printed, else the last table row. Total = sum of calls.
+    hbase, hlast, hfinal = 0, 0, None
     for line in (text or "").splitlines():
         if "RSZ-0094]" in line or "RSZ-0099]" in line:
             mode = "setup"
             continue
         if "RSZ-0046]" in line:
             mode = "hold"
-            # §219: a new hold repair call -> close the previous pass
-            hbase, hlast = hbase + hlast, 0
+            if hlast or hfinal is not None:
+                hbase += hfinal if hfinal is not None else hlast
+                r["hold_passes"] = int(r.get("hold_passes", 1)) + 1
+            hlast, hfinal = 0, None
             continue
         if "|" in line and ("WNS" in line) and ("Iter" in line):
             cols = [c.strip() for c in line.split("|")]
@@ -383,16 +387,13 @@ def parse_repair(text: str) -> Dict[str, object]:
                         try:
                             b = int(cells[cols.index(name)])
                             r["hold_bufs_peak"] = max(int(r.get("hold_bufs_peak", 0)), b)
-                            if b < hlast:
-                                hbase += hlast
-                                r["hold_passes"] = int(r.get("hold_passes", 1)) + 1
-                            hlast = b
+                            hlast = b   # §222: a drop is NOT a new pass
                         except (ValueError, IndexError):
                             pass
                         break
         m = _RE_HOLD_INS.search(line)
         if m:
-            r["hold_bufs"] = int(m.group(1))
+            r["hold_bufs"] = hfinal = int(m.group(1))
             r["hold_bufs_final"] = True
         m = _RE_BUF_INS.search(line)
         if m:
@@ -401,10 +402,8 @@ def parse_repair(text: str) -> Dict[str, object]:
             r["rsz0060"] = True
     if "hold_bufs" not in r and "hold_bufs_peak" in r:
         r["hold_bufs"] = r["hold_bufs_peak"]
-    if hbase or hlast:
-        # RSZ-0032 can exceed the last table row (rows every 10 iterations)
-        last = max(hlast, int(r["hold_bufs"])) if r.get("hold_bufs_final") else hlast
-        r["hold_bufs_total"] = hbase + last
+    if hbase or hlast or hfinal is not None:
+        r["hold_bufs_total"] = hbase + (hfinal if hfinal is not None else hlast)
         r.setdefault("hold_passes", 1)
     return r
 
@@ -726,13 +725,15 @@ def build_rows(logs_dir: Optional[str], reports_dir: Optional[str],
 # verdicts
 # ---------------------------------------------------------------------------
 def hold_buf_count(r: Dict[str, object]):
-    """§219: hold buffers actually inserted = sum over RSZ passes
-    (hold_bufs_total from the hold table). §218 used the final RSZ-0032 (292
-    in run 110339) and called the 8052 table peak a false alarm -- wrong: the
-    counter restarts per pass, the 8052 were kept (true total ~8344)."""
-    vals = [v for v in (r.get("hold_bufs_total"), r.get("hold_bufs"), r.get("hold_bufs_peak"))
-            if isinstance(v, (int, float))]
-    return max(vals) if vals else None
+    """§222: hold buffers = sum over repair CALLS of RSZ-0032 (or the last
+    table row while a call is still running). The in-call table peak is NOT
+    used: the column drops inside one call (run 203342 peak 6061, RSZ-0032
+    5647, odb ~1970). §219's cross-drop sum (8344 / 12250) was wrong."""
+    for k in ("hold_bufs_total", "hold_bufs", "hold_bufs_peak"):
+        v = r.get(k)
+        if isinstance(v, (int, float)):
+            return v
+    return None
 
 
 def red_flags(rows: List[Dict[str, object]]) -> List[Tuple[str, str]]:

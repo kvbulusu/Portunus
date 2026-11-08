@@ -3,8 +3,9 @@
    (leaf_96/97 detour, ~1046 um hop) onto a nearer tree-internal net; accept
    only if hold TNS improves without setup loss, else revert.
  - janus_cts_balance.tcl: sourced/called after tap_split legalize, before DIAG.
- - stage_report / milestones: hold buffers summed across RSZ passes (8052 + 292
-   = 8344); reverses the §218 "final RSZ-0032 wins" rule.
+ - stage_report / milestones: hold-buffer accounting. §219 summed table drops
+   (8052 + 292 = 8344); §222 reversed that -- a drop inside one RSZ-0046 call
+   is not a new pass, so the count is RSZ-0032 per call (292 here).
  - soc_hold_probe.tcl: SHP_ONLY, no PathEnd reuse (segfault), unconstrained
    fallback, section R (in-memory retap trial).
 NOT an OpenROAD run on soc_top.
@@ -106,19 +107,20 @@ def test_probe_static():
 
 
 # --- accounting -------------------------------------------------------------------
-def test_parse_repair_sums_passes():
+def test_parse_repair_one_call_uses_rsz0032():
+    # §222: one RSZ-0046 call -> drop is not a new pass
     r = sr.parse_repair(HOLD_LOG)
     assert r["hold_bufs"] == 292
     assert r["hold_bufs_peak"] == 8052
-    assert r["hold_bufs_total"] == 8344
-    assert r["hold_passes"] == 2
-    assert sr.hold_buf_count(r) == 8344
+    assert r["hold_bufs_total"] == 292
+    assert r["hold_passes"] == 1
+    assert sr.hold_buf_count(r) == 292
 
 
 def test_red_flags_total():
     r = sr.parse_repair(HOLD_LOG)
-    row = dict(r, key="4_cts", status="FAILED")
-    assert ("RED", "4_cts: 8344 hold buffers > %d" % sr.HOLD_BUF_WARN) in sr.red_flags([row])
+    row = dict(r, key="4_cts", status="FAILED", hold_ws=0.0)
+    assert not any("hold buffers" in t for _, t in sr.red_flags([row]))
 
 
 def test_single_pass_small_not_flagged():
@@ -137,12 +139,13 @@ def _feed(lines):
     return out
 
 
-def test_live_kill_uses_cross_pass_sum():
-    big = HOLD_LOG.replace("|       2 |", "|    2100 |").replace("    292 |", "   2200 |") \
-        .replace("Inserted 292", "Inserted 2200")
-    # 8052 + 2200 = 10252 > 10000 even though no single pass exceeds it
-    ev = _feed(big)
+def test_live_kill_sums_separate_calls():
+    # §222: two real RSZ-0046 calls are summed (6000 + 6000 > 10000)
+    one = HOLD_LOG.replace("8052", "5000").replace("    292 |", "   6000 |") \
+        .replace("Inserted 292", "Inserted 6000")
+    ev = _feed(one + one)
     assert any("kill_hold_bufs" in str(e) or "KILL" in str(e) for e in ev), ev
+    assert not any("KILL" in str(e) for e in _feed(one))
 
 
 def test_live_no_kill_small():
