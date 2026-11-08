@@ -206,8 +206,10 @@ class MilestoneTracker:
 
     def _hold_watch(self, line: str, st: str, out: List[Event]) -> None:
         """§175: parse repair_timing's hold table live; fire KILL events."""
-        # §219: the 'Buffers' column restarts per RSZ pass and RSZ-0032 is the
-        # last pass only (run 110339: 8052 -> 2 ... 292). Track the sum.
+        # §222: OpenROAD resets the hold-buffer counter only per repair CALL
+        # (RSZ-0046). The 'Buffers' column can drop inside one call (run
+        # 203342: 6061 -> 6 ... 5647 = RSZ-0032); a drop is NOT a new pass
+        # (§219 summed drops -> false 12250 KILL). Sum = per-call RSZ-0032.
         base = getattr(self, "hold_base", 0)
         last = getattr(self, "hold_last", 0)
         if "RSZ-0046]" in line:
@@ -217,11 +219,11 @@ class MilestoneTracker:
         if "RSZ-0094]" in line or "RSZ-0032]" in line:
             m = _RE_HOLD.search(line)
             if m:
-                tot = base + max(last, int(m.group(1)))
+                tot = base + int(m.group(1))
                 if tot > HOLD_BUF_KILL:
                     self._ev(out, "kill_hold_bufs", "KILL RUN?",
                              f"{tot} hold buffers inserted at '{st or '?'}' "
-                             f"(RSZ-0032 last pass {m.group(1)}; > {HOLD_BUF_KILL})")
+                             f"(RSZ-0032 this call {m.group(1)}; > {HOLD_BUF_KILL})")
                 self.hold_base, self.hold_last = tot, 0
             self.hold_mode = False
             return
@@ -247,10 +249,7 @@ class MilestoneTracker:
                     b = int(cells[self.hold_cols.index(name)])
                 except (ValueError, IndexError):
                     break
-                if b < last:
-                    base += last
-                    self.hold_base = base
-                self.hold_last = b
+                self.hold_last = b   # §222: drop inside a call is not a new pass
                 if base + b > HOLD_BUF_KILL:
                     self._ev(out, "kill_hold_bufs", "KILL RUN?",
                              f"hold repair already at {base + b} buffers at '{st or '?'}' "
