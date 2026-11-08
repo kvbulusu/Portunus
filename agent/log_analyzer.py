@@ -86,6 +86,15 @@ _RE_PROV_START = re.compile(r"^-{3,} GIT PROVENANCE -*\s*$")
 _RE_PROV_END = re.compile(r"^-{20,}\s*$")
 _RE_PROV_NOGIT = re.compile(r"^GIT PROVENANCE: ")
 
+# §223: diagnostics printed by OUR OWN flow hooks ("JANUS_CTS_TAP_SPLIT: ...",
+# "[JANUS-DUMP] ...", "JANUS_PRNC: FAIL ...") are advisory by design — every
+# hook catches its own errors and never errors the stage; a real hook failure
+# surfaces as a Tcl "Error:" / make "*** Error" / nonzero rc instead. Run
+# 20261108_121357 (rc=0, 4_cts setup +0.8 hold 0.0) was falsely marked FAILED
+# because "JANUS_CTS_TAP_SPLIT: ... error min -24.3 max -24.3 ps" (latency-target
+# error) matched r"\bERROR\b". These lines are skipped by the text heuristics.
+_RE_JANUS_HOOK = re.compile(r"^\s*(?:\[JANUS-[A-Z0-9_-]+\]|JANUS_[A-Z0-9_]+:)")
+
 # Metric extractors (best-effort; ORFS report formats vary by version).
 #
 # UNITS: for the ASAP7 PDK the standard-cell Liberty declares time_unit = 1ps,
@@ -114,6 +123,7 @@ _RE_SETUP_TNS = re.compile(r"timing__setup__tns\"?\s*[:=]?\s*(-?\d+\.?\d*)", re.
 # matches left — and grabbing the LAST one yields a bogus WNS like -1.35 (ps?)
 # that is actually -1.35e-09 s of placement slack. Skip them.
 _RE_NONSIGNOFF = re.compile(r"GPL-0106|Timing-driven|\bGRT-\d|global\s+route", re.I)
+_RE_NONSIGNOFF_OR_HOLD = re.compile(_RE_NONSIGNOFF.pattern + r"|\bhold\b", re.I)
 
 # Per-stage detail-route .rpt header emitted by janus_stage_dump.tcl. This is the
 # AUTHORITATIVE signoff-comparable timing (design fully loaded, multi-corner).
@@ -394,6 +404,8 @@ class LogAnalyzer:
                 continue
             if _RE_AGENT_HEADER.match(line) or _RE_PROV_NOGIT.match(line):
                 continue
+            if _RE_JANUS_HOOK.match(line):
+                continue
             if any(p.search(line) for p in _IGNORE_PATTERNS):
                 continue
 
@@ -474,7 +486,9 @@ class LogAnalyzer:
         if setup is None:
             setup = grab(_RE_WS_MAX, skip=_RE_NONSIGNOFF)
         if setup is None:
-            setup = grab(_RE_WNS, skip=_RE_NONSIGNOFF)
+            # §223: a line that names "hold" ("JANUS_CTS_HOLD_ABORT: pre-repair
+            # hold WNS -414.1 ps") is never the setup WNS.
+            setup = grab(_RE_WNS, skip=_RE_NONSIGNOFF_OR_HOLD)
         if setup is None:
             setup = grab(_RE_SLACK, skip=_RE_NONSIGNOFF)
         rep.wns_ns = setup   # field name kept for checkpoint back-compat; value is ps
