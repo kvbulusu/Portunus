@@ -5163,6 +5163,13 @@ class JANUSAutonomousAgent:
             qor = rb.build_qor(block, res.status, self._logs_dir(block), reports,
                                self._results_dir(block))
             fq = ac.from_qor(qor)
+            try:   # §224: worst-path decomposition (macro arc / wire / gates)
+                fin = os.path.join(reports, "6_finish.rpt")
+                if os.path.isfile(fin):
+                    with open(fin, errors="replace") as fh:
+                        fq.update(ac.parse_worst_path(fh.read()))
+            except Exception:
+                pass
             eco = self._eco_adopted_timing(block)   # §150: base = what ships
             if eco:
                 for k_fq, k_eco in (("wns_ps", "setup_ws"), ("hold_wns_ps", "hold_ws"),
