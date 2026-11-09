@@ -104,6 +104,8 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     "ENABLE_RESISTANCE_AWARE": "5_route",
     # §109 read only by the PRE_GLOBAL_ROUTE hook
     "JANUS_GRT_INCR_ALLOW_CONGESTION": "5_route",
+    # §224 read only by janus_grt_hold_cap.tcl (PRE_GLOBAL_ROUTE hook)
+    "JANUS_GRT_HOLD_MAX_ITERS": "5_route",
     # §140: the kepler-formal LEC runs only inside 4_1_cts (repair_timing
     # before/after netlists 4_before_rsz_lec.v / 4_after_rsz_lec.v). Toggling it
     # must NOT force a re-synthesis (unknown keys default to 1_synth).

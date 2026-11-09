@@ -60,7 +60,9 @@ def _mk(k):
 
 
 def test_mk_keys():
-    assert _mk("JANUS_CTS_MACRO_RETRIM") == "1"
+    # §224: retired in favour of JANUS_CTS_NOC_HOLD_BAL (its global hold-TNS
+    # accept test could never see u_noc; every trial was reverted in 150122)
+    assert _mk("JANUS_CTS_MACRO_RETRIM") == "0"
     assert _mk("JANUS_CTS_MACRO_RETRIM_PINS") == "u_noc/clk"
     assert _mk("JANUS_CTS_MACRO_RETRIM_STEP") == "2"
     assert _mk("JANUS_CTS_MACRO_RETRIM_MAX_STAGES") == "12"

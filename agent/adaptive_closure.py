@@ -21,10 +21,13 @@ DEFAULT_THRESHOLDS = {
     "logic_depth_wns_frac": 0.10,   # reg2reg |WNS| > 10% of period ...
     "logic_wire_share_max": 0.30,   # ... with wire delay share <= 30%
     "drv_viol": 10,                 # slew+cap violations
+    "wire_macro_max_gates": 4,      # §224: worst path with <= N logic gates ...
+    "wire_macro_share": 0.50,       # ... and >= 50% of data delay in macro arc + buffers
     "max_extra_passes": 1,
 }
 CLASSES = ("EASY", "MODERATE", "CLOCK_SKEW_LIMITED", "IO_BUDGET_LIMITED",
-           "CONGESTION_LIMITED", "LOGIC_DEPTH_LIMITED", "DRV_LIMITED")
+           "CONGESTION_LIMITED", "LOGIC_DEPTH_LIMITED", "DRV_LIMITED",
+           "WIRE_MACRO_LIMITED")
 IO_GROUPS = ("in2reg", "reg2out", "in2out")
 PROTECTED_BLOCKS = {"user_core_ara_lane"}
 
@@ -36,6 +39,11 @@ ACTIONS = {
     "CONGESTION_LIMITED": ("congestion_pass", "lower PLACE_DENSITY / raise CELL_PAD_IN_SITES_* / GRT layer adjust; rerun from 3_place in new FLOW_VARIANT"),
     "LOGIC_DEPTH_LIMITED": ("needs_rtl", "stop PD iterations; report top cones; NEEDS_RTL"),
     "DRV_LIMITED": ("drv_pass", "repair_design with tightened max slew/cap or --post-triage-slew"),
+    # §224: few logic gates, delay in a hard-macro output arc and/or buffered
+    # long wire -> logic restructuring cannot help; no automatic PD rerun.
+    "WIRE_MACRO_LIMITED": ("wire_macro_pd", "worst path is macro-arc/wire dominated with few logic gates: "
+                           "add a register cut near the macro pins, pin-fence the cut flops, or shorten "
+                           "the route; NOT logic depth"),
 }
 
 
@@ -106,6 +114,13 @@ def classify(q: dict, th: dict | None = None) -> dict:
     # §161: hot utilisation alone is not congestion when GRT reports 0 overflow
     if util is not None and util >= t["util_hot"] and q.get("grt_overflow") is None:
         return {"class": "CONGESTION_LIMITED", "confidence": 0.6, "evidence": ev + [f"utilisation {util:.2f}"]}
+    # §224: 20261108_150122 was binned LOGIC_DEPTH->needs_rtl although its
+    # worst path had 3 logic gates: u_user clk->Q arc 4617 ps + ~820 ps of
+    # wire buffers = 95% of the data delay. Low gate count + macro/wire share
+    # is a pipelining/placement problem, checked before LOGIC_DEPTH.
+    wm = wire_macro_evidence(q, t)
+    if wm and not (per is None or abs(wns) <= t["moderate_wns_frac"] * per):
+        return {"class": "WIRE_MACRO_LIMITED", "confidence": 0.8, "evidence": ev + wm}
     r2r = _f((groups.get("reg2reg") or {}).get("wns_ps"))
     ws = _f(q.get("wire_share"))
     if per and r2r is not None and r2r < -t["logic_depth_wns_frac"] * per and (ws is None or ws <= t["logic_wire_share_max"]):
@@ -114,6 +129,22 @@ def classify(q: dict, th: dict | None = None) -> dict:
     if per is None or abs(wns) <= t["moderate_wns_frac"] * per:
         return {"class": "MODERATE", "confidence": 0.7, "evidence": ev}
     return {"class": "LOGIC_DEPTH_LIMITED", "confidence": 0.5, "evidence": ev + ["large negative, no wire/skew/IO explanation"]}
+
+
+def wire_macro_evidence(q: dict, t: dict) -> list:
+    """§224: evidence list when the worst setup path (parse_worst_path keys
+    path_*) has few logic gates and is dominated by a macro arc + buffers;
+    [] otherwise or when the path was not parsed."""
+    gates, data = q.get("path_logic_gates"), _f(q.get("path_data_ps"))
+    if gates is None or not data or data <= 0:
+        return []
+    macro, buf = _f(q.get("path_macro_arc_ps")) or 0.0, _f(q.get("path_buf_ps")) or 0.0
+    share = (macro + buf) / data
+    if int(gates) > t["wire_macro_max_gates"] or share < t["wire_macro_share"]:
+        return []
+    return [f"worst path {int(gates)} logic gate(s)",
+            f"macro arc {macro:.1f} ps + buffers/wire {buf:.1f} ps = {100 * share:.0f}% of {data:.1f} ps data delay"
+            + (f" (macro pin {q['path_macro_pin']})" if q.get("path_macro_pin") else "")]
 
 
 def variant_name(block: str, cls: str, n: int) -> str:
@@ -273,6 +304,71 @@ def parse_finish_rpt(text: str) -> dict:
     if m:
         q["tns_ps"] = float(m.group(1))
     return q
+
+
+_BUF_CELL = re.compile(r"^(BUF|INV|HB\d|CKINV|CKBUF|DLY)", re.I)
+_BUF_INST = re.compile(r"^(wire|max_length|place|rebuffer|split|hold|repeater|janus_\w*buf|clkbuf)\d*", re.I)
+_PATH_LINE = re.compile(r"^\s*((?:-?\d+(?:\.\d+)?\s+)+)[\^v]\s+(\S+)\s+\((\S+)\)\s*$")
+
+
+def parse_worst_path(text: str) -> dict:
+    """§224: decompose the worst VIOLATED max path of an OpenSTA report
+    (6_finish.rpt; compact or -fields fanout/cap/slew format) into launch arc,
+    wire + buffer delay and logic gates. Returns path_* keys for classify(),
+    {} if no violating max path is found. The launch arc is a macro arc when
+    its cell is not a std cell (no ASAP7 lib suffix), i.e. a hard-macro or
+    hierarchical-block output pin. In the full format input-pin rows carry
+    the net (wire) delay and output-pin rows the cell delay."""
+    best = None
+    for blk in re.split(r"(?=^Startpoint: )", text, flags=re.M):
+        if not re.search(r"^Path Type: max", blk, re.M):
+            continue
+        m = re.search(r"(-?\d+\.\d+)\s+slack \(VIOLATED\)", blk)
+        sp = re.match(r"Startpoint: (\S+)", blk)
+        if m and sp and (best is None or float(m.group(1)) < best[0]):
+            best = (float(m.group(1)), sp.group(1), blk)
+    if best is None:
+        return {}
+    slack, sp, blk = best
+    sp_inst = re.sub(r"\$_\w+$", "", sp)
+    rows = []
+    for ln in blk.split("data arrival time")[0].splitlines():
+        r = _PATH_LINE.match(ln)
+        if r:
+            nums = r.group(1).split()
+            if len(nums) >= 2:
+                rows.append((len(nums), float(nums[-2]), float(nums[-1]), r.group(2), r.group(3)))
+    full = any(r[0] >= 5 for r in rows)
+    k0 = next((i for i, r in enumerate(rows) if r[3].startswith((sp + "/", sp_inst + "/"))), None)
+    if k0 is None or k0 + 1 >= len(rows):
+        return {}
+    data_rows = rows[k0 + 1:]
+    out = {"path_slack_ps": slack, "path_startpoint": sp,
+           "path_data_ps": round(data_rows[-1][2] - rows[k0][2], 2),
+           "path_logic_gates": 0, "path_logic_ps": 0.0, "path_buf_ps": 0.0,
+           "path_wire_ps": 0.0, "path_macro_arc_ps": 0.0}
+    launch = True
+    for i, (n, d, _t, pin, cell) in enumerate(data_rows):
+        base = pin.rsplit("/", 1)[0].rsplit("/", 1)[-1]
+        if (full and n < 5) or i == len(data_rows) - 1:   # input pin / endpoint row: net delay
+            out["path_wire_ps"] += d
+        elif launch:                         # clk->Q or macro clk->out arc
+            if re.search(r"_ASAP7|_\d+t_", cell):
+                out["path_clk_q_ps"] = d
+            else:
+                out["path_macro_arc_ps"] = d
+                out["path_macro_pin"] = pin
+        elif _BUF_CELL.match(cell) or _BUF_INST.match(base):
+            out["path_buf_ps"] += d
+        else:
+            out["path_logic_gates"] += 1
+            out["path_logic_ps"] += d
+        if not (full and n < 5):
+            launch = False
+    out["path_buf_ps"] += out.pop("path_wire_ps")   # buffered-wire share = net + repeater delay
+    for k in ("path_logic_ps", "path_buf_ps"):
+        out[k] = round(out[k], 2)
+    return out
 
 
 def from_qor(qor: dict) -> dict:

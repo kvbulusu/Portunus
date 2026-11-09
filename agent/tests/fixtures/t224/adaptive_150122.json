@@ -1,0 +1,56 @@
+{
+  "mode": "advise",
+  "class": "LOGIC_DEPTH_LIMITED",
+  "confidence": 0.5,
+  "evidence": [
+    "worst setup WNS -199.0 ps (period 2857 ps)",
+    "secondary: slew+cap violations 156",
+    "setup skew 793.1 ps measured at macro clock pin u_agent/agent_clk; not flop-to-flop, ignored",
+    "large negative, no wire/skew/IO explanation"
+  ],
+  "action": "needs_rtl",
+  "reason": "stop PD iterations; report top cones; NEEDS_RTL",
+  "rerun": false,
+  "flow_variant": null,
+  "clean": false,
+  "input": {
+    "period_ps": 2857.1401,
+    "groups": {
+      "reg2reg": {
+        "wns_ps": -199.03,
+        "violators": 68
+      },
+      "reg2out": {
+        "wns_ps": 284.45,
+        "violators": 0
+      },
+      "in2reg": {
+        "wns_ps": 1119.68,
+        "violators": 0
+      }
+    },
+    "wns_ps": -199.03,
+    "hold_wns_ps": -254.61,
+    "tns_ps": -3690.03,
+    "slew_viol": 156,
+    "cap_viol": 0,
+    "grt_overflow": 0,
+    "util": 0.6616,
+    "skew_untrusted": "setup skew 793.1 ps measured at macro clock pin u_agent/agent_clk; not flop-to-flop, ignored",
+    "drc": 2,
+    "clock_name": "clk_user",
+    "latency_ps": 1103.31,
+    "uncertainty_ps": 60.0
+  },
+  "passes": [
+    {
+      "name": "base",
+      "wns_ps": -199.03,
+      "hold_wns_ps": -254.61,
+      "tns_ps": -3690.03,
+      "drc": 2,
+      "slew_viol": 156,
+      "timing_source": "6_finish.rpt"
+    }
+  ]
+}
