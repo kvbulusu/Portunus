@@ -141,7 +141,7 @@ def test_mk_keys():
     assert _mk("JANUS_CTS_NOC_HOLD_BAL_STEP") == "2"
     assert _mk("JANUS_CTS_NOC_HOLD_BAL_MAX_STAGES") == "20"
     assert _mk("JANUS_CTS_MACRO_RETRIM") == "0"
-    assert _mk("JANUS_GRT_HOLD_MAX_ITERS") == "400"
+    assert _mk("JANUS_GRT_HOLD_MAX_ITERS") == "0"   # §225: cap off
     s = MK.read_text()
     for k in ("JANUS_CTS_NOC_HOLD_BAL", "JANUS_GRT_HOLD_MAX_ITERS"):  # '=' not '?='
         assert re.search(rf"^export {k}\s+=", s, re.M), k

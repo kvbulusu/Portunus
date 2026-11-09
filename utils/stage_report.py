@@ -117,6 +117,8 @@ _RE_MSG = re.compile(r"\[(WARNING|ERROR|FATAL)\s+([A-Z]{2,6}-\d{3,4})\]")
 _RE_ERRLINE = re.compile(r"\[(ERROR|FATAL)\s+[A-Z]{2,6}-\d+\]|^\s*Error:|^ERROR:|"
                          r"make.*\*\*\*.*Error\s+\d+|Command terminated by signal|\bKilled\b")
 _BENIGN = ("GUI-0056", "STA-2204")
+# §225: janus_pin_fence.tcl "WARN '<glob>' matched 0 insts; skip <region>"
+_RE_FENCE_ZERO = re.compile(r"JANUS_PIN_FENCE: WARN '[^']*' matched 0 insts; skip (\S+)")
 _RE_HOLD_INS = re.compile(r"RSZ-0032\]\s+Inserted\s+(\d+)\s+hold buffers")
 _RE_BUF_INS = re.compile(r"RSZ-00(?:45|48)\]\s+Inserted\s+(\d+)\s+buffers")
 _RE_DRT = re.compile(r"DRT-0199\]\s+Number of violations\s*=\s*(\d+)")
@@ -400,6 +402,9 @@ def parse_repair(text: str) -> Dict[str, object]:
             r["setup_bufs"] = int(r.get("setup_bufs", 0)) + int(m.group(1))
         if "RSZ-0060]" in line:
             r["rsz0060"] = True
+        m = _RE_FENCE_ZERO.search(line)
+        if m and m.group(1) not in r.setdefault("fence_zero", []):
+            r["fence_zero"].append(m.group(1))   # §225
     if "hold_bufs" not in r and "hold_bufs_peak" in r:
         r["hold_bufs"] = r["hold_bufs_peak"]
     if hbase or hlast or hfinal is not None:
@@ -580,7 +585,7 @@ def collect_stage(key: str, logs_dir: Optional[str], reports_dir: Optional[str],
         rep = parse_repair(log_text)
         for k in ("setup_pre_wns", "setup_post_wns", "hold_pre_wns", "hold_post_wns",
                   "hold_bufs_peak", "hold_bufs_final", "hold_bufs_total", "hold_passes",
-                  "rsz0060"):
+                  "rsz0060", "fence_zero"):
             if k in rep:
                 row[k] = rep[k]
         for k in ("hold_bufs", "setup_bufs"):
@@ -757,6 +762,9 @@ def red_flags(rows: List[Dict[str, object]]) -> List[Tuple[str, str]]:
             out.append(("KILL", f"{k}: hold WNS {hw:.1f} ps after repair (not closed) -> KILL RUN"))
         if r.get("rsz0060"):
             out.append(("RED", f"{k}: RSZ-0060 buffer cap hit during repair_timing"))
+        fz = r.get("fence_zero")
+        if fz:
+            out.append(("RED", f"{k}: pin fence matched 0 insts: {' '.join(fz)}"))
         g = r.get("grt_overflow")
         if isinstance(g, int) and g > 0:
             out.append(("RED", f"{k}: GRT overflow {g}"))
