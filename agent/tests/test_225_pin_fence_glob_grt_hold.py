@@ -57,10 +57,11 @@ def test_hook_uses_name_match_everywhere():
     assert "string match $pat [$i getName]" not in s
 
 
-def test_fence_specs_unchanged():
+def test_fence_specs_present():
+    # §226 narrowed the globs to the g_ingress pin-capture flops
     m = re.search(r"^export JANUS_PIN_FENCE\s+=\s*(.*)$", MK, re.M)
-    assert "ucut_mn:u_user:u_ucut_mn/*" in m.group(1).split()
-    assert "ucut_s3n:u_user:u_ucut_s3n/*" in m.group(1).split()
+    assert "ucut_mn:u_user:u_ucut_mn/u_*/g_ingress/in_*" in m.group(1).split()
+    assert "ucut_s3n:u_user:u_ucut_s3n/u_*/g_ingress/in_*" in m.group(1).split()
 
 
 def test_fence_zero_red_flag():

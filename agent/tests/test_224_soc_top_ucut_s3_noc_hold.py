@@ -72,8 +72,8 @@ def test_top_ucut_s3n_inside_ifndef():
 
 def test_pin_fence_and_tb_registered():
     f = _mk("JANUS_PIN_FENCE").split()
-    assert "ucut_s3n:u_user:u_ucut_s3n/*" in f
-    for old in ("ucut_mn:u_user:u_ucut_mn/*", "upin:u_user:upin_*"):
+    assert "ucut_s3n:u_user:u_ucut_s3n/u_*/g_ingress/in_*" in f  # §226
+    for old in ("ucut_mn:u_user:u_ucut_mn/u_*/g_ingress/in_*", "upin:u_user:upin_*"):
         assert old in f
     rt = (ROOT / "scripts/run_tests.sh").read_text()
     assert '[tb_224_ucut_s3n]="rtl/noc/axi4_register_slice.sv rtl/noc/axi4_link_slice.sv tb/tb_224_ucut_s3n.sv"' in rt

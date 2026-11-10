@@ -49,7 +49,7 @@ def test_rtl_pin_side_cut_and_msip_reg():
 def test_mk_and_wiring():
     assert re.search(r"^export PRE_GLOBAL_PLACE_TCL\s*=.*hooks/janus_pin_fence\.tcl$", MK, re.M)
     m = re.search(r"^export JANUS_PIN_FENCE\s*=\s*(.+)$", MK, re.M)
-    assert m and m.group(1).split()[:2] == ["ucut_mn:u_user:u_ucut_mn/*", "msip_q:u_user:clint_msip_q*"]
+    assert m and m.group(1).split()[:2] == ["ucut_mn:u_user:u_ucut_mn/u_*/g_ingress/in_*", "msip_q:u_user:clint_msip_q*"]  # §226
     assert re.search(r"^export JANUS_CTS_PRE_RSZ\s*=\s*1$", MK, re.M)
     assert re.search(r"^export JANUS_CTS_PRE_RSZ_MAX_WIRE_UM\s*=\s*400$", MK, re.M)
     i = BAL.index("janus_cts_pre_rsz.tcl")
