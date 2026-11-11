@@ -243,6 +243,21 @@ def send_email(c, subject, body):
         return f"email failed: {type(e).__name__}: {e}"
 
 
+def gdrive_age_tick(c):
+    """§231: daily Drive token-age alert from the always-on watcher (the box
+    may sit idle between runs). Silent when the creds file is missing or the
+    module is not next to this file. Never raises."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import gdrive_token_age as gta
+    except Exception:
+        return ""
+    try:
+        return gta.check(send=lambda subj, body: send_email(c, subj, body) == "email sent")
+    except Exception as e:
+        return f"error: {e}"
+
+
 def wall(msg):
     try:
         subprocess.run(["wall", msg], timeout=10, capture_output=True)
@@ -347,6 +362,10 @@ def watch(c, interval=60.0, dry_run=False, max_ticks=None, sleep=time.sleep,
     try:
         while True:
             act, det = check(c, dry_run=dry_run, behavior_fn=behavior_fn)
+            if not dry_run and ticks % 30 == 0:  # ~every 30 ticks; stamp = daily
+                ga = gdrive_age_tick(c)
+                if ga in ("alerted", "send_failed"):
+                    log(c, f"WATCH gdrive token age alert: {ga}")
             if act != prev or act in ("WARN", "STOP", "REFUSED"):
                 log(c, f"WATCH {act} {det}")
             prev = act

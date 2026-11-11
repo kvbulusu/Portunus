@@ -126,6 +126,7 @@ from checkpoint import Checkpoint                                        # noqa:
 from flow_state import FlowState                                        # noqa: E402
 from reporter import Reporter                                           # noqa: E402
 from notification import NotificationManager                            # noqa: E402
+import gdrive_token_age as _gta                                         # noqa: E402
 from milestones import (MilestoneTracker, milestones_enabled,            # noqa: E402
                         config_uses_io_shadow, is_debug_event)
 import stage_report as _sr                                              # noqa: E402
@@ -820,6 +821,8 @@ class JANUSAutonomousAgent:
                 self._notify_log(
                     "startup: gdrive -> " + self.notifier.gdrive_target_desc()
                     + f" (creds {self.notifier.gdrive_creds})")
+        # §231: token-age alert (>= 6 d old -> one email/day), every launch.
+        self._gdrive_age_tick("startup")
 
         # --- GLOBAL flow-state manifest (outside all run-dirs / blocks) ------
         # A single JSON at <asic_flow>/.janus_state/janus_flow_state.json that
@@ -3656,6 +3659,7 @@ class JANUSAutonomousAgent:
                             logf.write(banner.encode())
                     if transitioned:
                         _push_dash("RUNNING")
+                        self._gdrive_age_tick(f"{block}:{stg}")  # §231, daily dedupe
                     if ms is not None:
                         self._send_milestones(block, ms.feed(line, state["stage"]))
                         # §175: one stage-table email per completed ORFS stage
@@ -5125,6 +5129,38 @@ class JANUSAutonomousAgent:
             except Exception as e:
                 self._notify_log(f"startup: gdrive preflight email error: {e}")
         return msg
+
+    def _gdrive_age_tick(self, where: str) -> None:
+        """§231: email once a day when the Drive OAuth creds file is >=
+        JANUS_GDRIVE_TOKEN_WARN_DAYS (6) old ('Testing' tokens die at 7 d).
+        Called at launch and on every major-stage transition; a stat() + stamp
+        read when nothing is due; the SMTP send runs in a daemon thread so the
+        log stream / launch never waits on it. Never raises."""
+        try:
+            nt = self.notifier
+            creds = getattr(nt, "gdrive_creds", None)
+            now = time.time()
+            if now - getattr(self, "_gta_last", 0.0) < 600:  # cheap rate limit
+                return
+            self._gta_last = now
+            age = _gta.token_age_days(_gta.creds_path(creds), now)
+            if age is None or age < _gta._env_f("JANUS_GDRIVE_TOKEN_WARN_DAYS", 6.0):
+                return
+
+            def _send(subj: str, body: str) -> bool:
+                if not (nt.enabled and nt.email_configured):
+                    return False
+                return bool(nt.send_email(subj, body))
+
+            def _run() -> None:
+                st = _gta.check(creds, send=_send, log=self._notify_log)
+                self._notify_log(f"{where}: gdrive token age {age:.1f} d -> {st}")
+            threading.Thread(target=_run, name="gdrive-age", daemon=True).start()
+        except Exception as e:
+            try:
+                self._notify_log(f"{where}: gdrive token age check error: {e}")
+            except Exception:
+                pass
 
     def _notify_log(self, msg: str) -> None:
         """§136: every notification line -> <run_dir>/notify.log (+ debug UI).

@@ -525,6 +525,21 @@ def config():
     }
 
 
+def _gdrive_age_tick(dry=False):
+    """§231: daily Drive token-age alert when a creds copy lives on this host
+    (gdrive_token_age.py next to this file; silent if absent). Never raises."""
+    if dry:
+        return
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import gdrive_token_age as gta
+        st = gta.check()
+        if st in ("alerted", "send_failed"):
+            log(f"gdrive token age alert: {st}")
+    except Exception:
+        pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--once", action="store_true", help="poll once and exit (cron)")
@@ -559,6 +574,7 @@ def main(argv=None):
     log(f"mail_trigger up: tag={cfg['tag']} mode={cfg['mode']} allow={cfg['allow'] or 'ANY'}"
         f"{' DRY-RUN' if a.dry_run else ''} | {where}")
     while True:
+        _gdrive_age_tick(a.dry_run)
         try:
             poll(cfg, a.dry_run)
         except Exception as e:      # network blips: keep the loop alive
