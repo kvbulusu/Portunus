@@ -812,10 +812,10 @@ class JANUSAutonomousAgent:
                              f"uncompressed, format {self.notifier.archive_fmt}")
         # §138: Drive channel state (independent of email).
         if self.notifier.gdrive_enabled:
-            _gp = self.notifier.gdrive_problem()
+            _gp = self._gdrive_preflight_startup(_np)
             if _gp:
-                self.ui.warn(f"Google Drive upload will be SKIPPED: {_gp}")
-                self._notify_log(f"startup: gdrive will be SKIPPED: {_gp}")
+                self.ui.warn(f"Google Drive upload will FAIL/SKIP: {_gp}")
+                self._notify_log(f"startup: gdrive will FAIL/SKIP: {_gp}")
             else:
                 self._notify_log(
                     "startup: gdrive -> " + self.notifier.gdrive_target_desc()
@@ -2337,6 +2337,33 @@ class JANUSAutonomousAgent:
         except ValueError:
             return "10"
 
+    _ECO_HOLD_MIN_GAIN_PS = 20.0  # §228 partial hold-pass adoption threshold
+
+    def _eco_hold_min_gain(self, block: str) -> float:
+        """§228: min hold-WNS gain (ps) for keeping a hold ECO that does not
+        close hold. Override with JANUS_ECO_HOLD_MIN_GAIN_PS (<= 0 disables)."""
+        v = self._janus_knob(block, "JANUS_ECO_HOLD_MIN_GAIN_PS")
+        try:
+            return float(v) if v else self._ECO_HOLD_MIN_GAIN_PS
+        except ValueError:
+            return self._ECO_HOLD_MIN_GAIN_PS
+
+    @staticmethod
+    def _eco_hold_partial_ok(eco, b_setup: Optional[float], b_hold: Optional[float],
+                             min_gain: float, tol: float) -> bool:
+        """§228 pure rule: hold pass ran OK, hold was open and is still open,
+        hold WNS gained >= min_gain (> 0), hold TNS did not get worse (when
+        known) and setup WNS lost <= tol. DRC is judged by the caller."""
+        if not (min_gain > 0 and eco.ok and b_hold is not None and b_hold < 0.0
+                and eco.hold_wns is not None and eco.hold_wns < 0.0
+                and b_setup is not None and eco.setup_wns is not None):
+            return False
+        if eco.hold_wns - b_hold < min_gain or b_setup - eco.setup_wns > tol:
+            return False
+        pre_htns = getattr(eco, "pre_hold_tns", None)
+        h_tns = getattr(eco, "hold_tns", None)
+        return not (pre_htns is not None and h_tns is not None and h_tns < pre_htns)
+
     def _eco_outputs(self, res_dir: str, mode: str) -> Dict[str, str]:
         tag = f"janus_eco_{mode}"
         return {k: os.path.join(res_dir, f"{tag}.{k}") for k in ("odb", "spef", "def", "v")}
@@ -2531,6 +2558,18 @@ class JANUSAutonomousAgent:
                 and b_setup is not None and eco.setup_wns is not None
                 and b_setup - eco.setup_wns <= self._ECO_HOLD_SETUP_TOL_PS):
             verdict, why = "adopt", (f"hold CLOSED {b_hold:+.3f}->{eco.hold_wns:+.3f} ps; "
+                                     f"setup {b_setup:+.3f}->{eco.setup_wns:+.3f} ps "
+                                     f"(within {self._ECO_HOLD_SETUP_TOL_PS:g} ps tolerance)")
+        # §228: ... and a hold pass that does NOT close hold but gains a lot is
+        # kept on the same setup tolerance (run 20261109_210551: hold -193.44 ->
+        # -120.73, TNS -31427 -> -646, setup -139.94 -> -142.62 was DISCARDED,
+        # throwing away 72.7 ps of the must-fix metric for 2.7 ps of setup).
+        if (verdict == "discard" and mode == "hold"
+                and self._eco_hold_partial_ok(eco, b_setup, b_hold,
+                                              self._eco_hold_min_gain(block),
+                                              self._ECO_HOLD_SETUP_TOL_PS)):
+            verdict, why = "adopt", (f"hold IMPROVED {b_hold:+.3f}->{eco.hold_wns:+.3f} ps "
+                                     f"(>= {self._eco_hold_min_gain(block):g} ps gain, not closed); "
                                      f"setup {b_setup:+.3f}->{eco.setup_wns:+.3f} ps "
                                      f"(within {self._ECO_HOLD_SETUP_TOL_PS:g} ps tolerance)")
         # a setup pass must never open hold that was closed (noise band incl.)
@@ -5058,6 +5097,34 @@ class JANUSAutonomousAgent:
             threading.Thread(target=_go, name=f"stage-{block}-{done_key}", daemon=True).start()
         except Exception as e:
             self._notify_log(f"stage email {block}/{done_key} error: {e}")
+
+    def _gdrive_preflight_startup(self, email_problem: str = "") -> str:
+        """§229: real Drive check at launch (token refresh + root lookup), not
+        only the cheap file/import check. Run 20261109_210551 found the
+        revoked token only after 19h38m. On failure an immediate email is sent
+        (stage emails come hours later); the message is kept on the notifier so
+        every later Drive status line repeats it. JANUS_GDRIVE_PREFLIGHT=0 =
+        cheap check only. Never raises; '' = OK."""
+        nt = self.notifier
+        try:
+            if os.environ.get("JANUS_GDRIVE_PREFLIGHT", "1") == "0":
+                return nt.gdrive_problem()
+            msg = nt.gdrive_preflight()
+        except Exception as e:  # never block a launch on Drive
+            msg = f"preflight error: {e}"
+        if msg and nt.enabled and not email_problem:
+            body = (f"Google Drive preflight FAILED at launch:\n  {msg}\n\n"
+                    "The run continues; the bundle stays on EC2 disk. After "
+                    "fixing the token, upload it with:\n  python3 "
+                    "asic_flow/utils/gdrive_upload.py --block <block> "
+                    "--subfolder <YYYY-MM-DD_HH-MM-SS> <bundle.tar.gz>\n")
+            try:
+                ok = nt.send_email("[JANUS] Google Drive preflight FAILED - "
+                                   "fix the token before the run ends", body)
+                self._notify_log(f"startup: gdrive preflight email sent={ok}")
+            except Exception as e:
+                self._notify_log(f"startup: gdrive preflight email error: {e}")
+        return msg
 
     def _notify_log(self, msg: str) -> None:
         """§136: every notification line -> <run_dir>/notify.log (+ debug UI).

@@ -197,6 +197,7 @@ class NotificationManager:
         self.last_drive_links: List[str] = []
         self.last_drive_outcome = ""
         self.last_drive_error = ""  # §142: raw API error behind a FAILED outcome
+        self.gdrive_preflight_msg = ""  # §229: launch-time preflight failure
         self.max_tar_bytes = int(max_tar_bytes)
         # §137: downstream consumers (e.g. a Google Apps Script mail->Drive
         # extractor with a 6-min execution limit) need smaller / zip bundles.
@@ -475,6 +476,66 @@ class NotificationManager:
                     "pip install google-api-python-client google-auth")
         return ""
 
+    # §229 run 20261109_210551: gdrive_problem() said OK at launch, then after
+    # 19h38m the upload failed with "invalid_grant: Token has been expired or
+    # revoked". An OAuth app whose consent screen is in "Testing" status gets
+    # refresh tokens that expire 7 days after consent (Google Cloud docs), so
+    # check the token for real at launch, not only at the end.
+    _GRANT_HINT = (" -- refresh token expired/revoked. Permanent fix: Google "
+                   "Cloud Console > APIs & Services > OAuth consent screen > "
+                   "Publishing status: PUBLISH APP (In production; 'Testing' "
+                   "tokens expire after 7 days), or use a service account + "
+                   "Shared Drive; then re-run asic_flow/utils/gdrive_auth.py once")
+
+    def gdrive_preflight(self, refresh=None) -> str:
+        """Network check ('' = OK): build creds, force a token refresh and
+        resolve the root folder. *refresh* (tests) replaces creds.refresh.
+        Never raises. Sets self.gdrive_preflight_msg."""
+        msg = self.gdrive_problem()
+        if not msg:
+            msg = self._gdrive_preflight_net(refresh)
+        self.gdrive_preflight_msg = msg
+        return msg
+
+    def _gdrive_preflight_net(self, refresh=None) -> str:
+        try:
+            with open(self.gdrive_creds) as fh:
+                info = json.load(fh)
+        except Exception as e:
+            return f"cannot read {self.gdrive_creds}: {e}"
+        scopes = ["https://www.googleapis.com/auth/drive"]
+        try:
+            if info.get("type") == "service_account":
+                from google.oauth2 import service_account  # type: ignore
+                creds = service_account.Credentials.from_service_account_info(
+                    info, scopes=scopes)
+                self.gdrive_identity = info.get("client_email", "")
+            else:
+                from google.oauth2.credentials import Credentials  # type: ignore
+                creds = Credentials.from_authorized_user_info(info, scopes)
+                self.gdrive_identity = "OAuth user token"
+            if refresh is not None:
+                refresh(creds)
+            else:
+                from google.auth.transport.requests import Request  # type: ignore
+                creds.refresh(Request())
+        except Exception as e:
+            s = str(e)
+            hint = self._GRANT_HINT if ("invalid_grant" in s or "expired" in s
+                                        or "revoked" in s) else ""
+            return f"token refresh FAILED: {s[:200]}{hint}"
+        try:
+            from googleapiclient.discovery import build  # type: ignore
+            service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        except Exception as e:
+            return f"Drive client build failed: {e}"
+        self.last_drive_error = ""
+        if not self._gdrive_root(service):
+            return (f"root folder '{self.gdrive_target_desc('')}' not visible to "
+                    f"{self.gdrive_identity or 'the credential'}"
+                    + self._drive_err_suffix())
+        return ""
+
     def gdrive_target_desc(self, block: str = "<block>") -> str:
         root = (f"id={self.gdrive_root_id}" if self.gdrive_root_id
                 else self.gdrive_root)
@@ -595,7 +656,8 @@ class NotificationManager:
                     "write to it (needs Editor), or the Drive scope was not "
                     "granted at consent (re-run gdrive_auth.py and tick Drive)")
         elif "invalid_grant" in e or "invalid_client" in e:
-            hint = " -- token revoked/expired: re-run gdrive_auth.py"
+            hint = (self._GRANT_HINT + "; upload this bundle afterwards with "
+                    "asic_flow/utils/gdrive_upload.py")
         return f" [{e[:240]}]{hint}"
 
     def _gdrive_service(self, build):
@@ -689,10 +751,18 @@ class NotificationManager:
         if self.last_drive_links:
             return ("Google Drive (" + self.gdrive_target_desc(dest) + "):\n  "
                     + "\n  ".join(self.last_drive_links))
+        pre = (f"Google Drive preflight FAILED at launch: {self.gdrive_preflight_msg}\n"
+               if self.gdrive_preflight_msg else "")
         if not tarball:
-            return "Google Drive: NOT uploaded (no bundle was built)"
-        return (f"Google Drive upload: {self.last_drive_outcome or 'not attempted'}"
-                f"\nBundle on EC2 disk: {tarball}")
+            return pre + "Google Drive: NOT uploaded (no bundle was built)"
+        retry = ""
+        if not self.last_drive_outcome.startswith("uploaded"):
+            retry = (f"\nRetry after re-auth: python3 asic_flow/utils/gdrive_upload.py "
+                     f"--block {block or '<block>'}"
+                     + (f" --subfolder {drive_subfolder}" if drive_subfolder else "")
+                     + f" {tarball}")
+        return (pre + f"Google Drive upload: {self.last_drive_outcome or 'not attempted'}"
+                f"\nBundle on EC2 disk: {tarball}" + retry)
 
     def _merge_stage_report(self, sr: dict, body: str, tarball: Optional[str],
                             summary_only: bool, run_table: Optional[List[dict]],

@@ -52,7 +52,8 @@ foreach {p n} {
 
 def test_hook_uses_name_match_everywhere():
     s = PF.read_text()
-    assert s.count("janus_pf::name_match $pat [$i getName]") == 1
+    # janus_pf::one + §227 janus_pf::split_one
+    assert s.count("janus_pf::name_match $pat [$i getName]") == 2
     assert s.count("janus_pf::name_match $ag [$i getName]") == 1
     assert "string match $pat [$i getName]" not in s
 
