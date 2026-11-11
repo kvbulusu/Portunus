@@ -92,6 +92,11 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     "SLEW_MARGIN": "3_place",
     "CAP_MARGIN": "3_place",
     "PRE_RESIZE_TCL": "3_place",
+    # §234 3_3 global_place.tcl pre-hook (janus_pin_fence.tcl on soc_top) and
+    # the 3_5 detail-place hooks: placement-only, never re-synthesise.
+    "PRE_GLOBAL_PLACE_TCL": "3_place",
+    "PRE_DETAIL_PLACE_TCL": "3_place",
+    "POST_DETAIL_PLACE_TCL": "3_place",
     # §73: first stage whose repair_timing actually fixes hold. Verified in the
     # agent_domain 20261007_202416 log: floorplan passes -hold_margin but runs
     # `-setup` only; the 3_4 resize call is issued without -hold_margin; the
@@ -156,6 +161,7 @@ _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("JANUS_UD_MACRO", "2_floorplan"),   # §164 user_domain_macros.tcl knobs
     ("JANUS_CTS_", "4_cts"),
     ("JANUS_RSZ_", "5_route"),           # §167 PRE_GLOBAL_ROUTE repair_design knobs
+    ("JANUS_PIN_FENCE", "3_place"),      # §234 janus_pin_fence.tcl knobs (read at 3_3 PRE_GLOBAL_PLACE only)
     ("JANUS_CONST_FOLD", "3_place"),     # §161 PRE_RESIZE constant-net fold knobs             # §114/§160 PRE_CTS hook knobs
 ]
 

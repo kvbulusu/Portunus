@@ -126,6 +126,7 @@ from checkpoint import Checkpoint                                        # noqa:
 from flow_state import FlowState                                        # noqa: E402
 from reporter import Reporter                                           # noqa: E402
 from notification import NotificationManager                            # noqa: E402
+import gdrive_token_age as _gta                                         # noqa: E402
 from milestones import (MilestoneTracker, milestones_enabled,            # noqa: E402
                         config_uses_io_shadow, is_debug_event)
 import stage_report as _sr                                              # noqa: E402
@@ -812,14 +813,16 @@ class JANUSAutonomousAgent:
                              f"uncompressed, format {self.notifier.archive_fmt}")
         # §138: Drive channel state (independent of email).
         if self.notifier.gdrive_enabled:
-            _gp = self.notifier.gdrive_problem()
+            _gp = self._gdrive_preflight_startup(_np)
             if _gp:
-                self.ui.warn(f"Google Drive upload will be SKIPPED: {_gp}")
-                self._notify_log(f"startup: gdrive will be SKIPPED: {_gp}")
+                self.ui.warn(f"Google Drive upload will FAIL/SKIP: {_gp}")
+                self._notify_log(f"startup: gdrive will FAIL/SKIP: {_gp}")
             else:
                 self._notify_log(
                     "startup: gdrive -> " + self.notifier.gdrive_target_desc()
                     + f" (creds {self.notifier.gdrive_creds})")
+        # §231: token-age alert (>= 6 d old -> one email/day), every launch.
+        self._gdrive_age_tick("startup")
 
         # --- GLOBAL flow-state manifest (outside all run-dirs / blocks) ------
         # A single JSON at <asic_flow>/.janus_state/janus_flow_state.json that
@@ -2179,7 +2182,12 @@ class JANUSAutonomousAgent:
         None. Cheap text scan - does not evaluate make."""
         bdir = os.path.join(self.design_root, block)
         val: Optional[str] = None
-        pat = re.compile(r"^\s*" + re.escape(name) + r"\s*[:?]?=\s*(.*?)\s*$")
+        # §233: accept `export NAME = v` / `override NAME := v` too. The block
+        # mk files are copied verbatim and mostly use `export`, so before this
+        # e.g. user_core.mk `export JANUS_ECO_HOLD_MARGIN_PS = 20` was never
+        # seen and the ECO ran with the 10 ps default.
+        pat = re.compile(r"^\s*(?:(?:export|override)\s+)*" + re.escape(name)
+                         + r"\s*[:?]?=\s*(.*?)\s*$")
         for fn in (os.path.join(bdir, "config.mk"), os.path.join(bdir, f"{block}_local.mk")):
             try:
                 with open(fn, encoding="utf-8", errors="replace") as fh:
@@ -2251,11 +2259,19 @@ class JANUSAutonomousAgent:
                                  f"{hold} ps (6_finish RCX)")
             if has_hold_viol:
                 setup, hold = self._eco_pass_orfs(block, "hold", setup, hold)
-            if setup is not None and setup < 0.0 and (hold is None or hold >= 0.0):
+            # §232 setup recovery: only once hold is closed. If THIS run's hold
+            # pass just closed it, require HOLD_SPARE ps of slack first (the
+            # setup pass's own hold guard re-fixes to the ECO margin, but a
+            # barely-closed hold has no room for its RCX shift).
+            spare = self._eco_tradeoff_knobs(block)["JANUS_ECO_HOLD_SPARE_PS"]
+            need = spare if has_hold_viol else 0.0
+            if setup is not None and setup < 0.0 and (hold is None or hold >= need):
                 setup, hold = self._eco_pass_orfs(block, "setup", setup, hold)
             elif setup is not None and setup < 0.0:
+                why = ("hold is closed first" if hold is None or hold < 0.0 else
+                       f"hold spare < {spare:g} ps (JANUS_ECO_HOLD_SPARE_PS)")
                 self._eco_log(block, f"setup ECO NOT attempted — hold still {hold} ps "
-                                     "(hold is closed first)")
+                                     f"({why})")
             timing_closed = (setup is not None and setup >= 0.0
                              and hold is not None and hold >= 0.0)
             drc = res.drc_violations
@@ -2315,7 +2331,7 @@ class JANUSAutonomousAgent:
     # 6_finish kept hold WS -4.55 ps / 9 violators. Through ORFS `make run` the
     # Tcl gets the block's real corners/libs/SDC/RCX_RULES/FILL_CELLS.
     _ECO_TIMEOUT_S = 14400        # ara 5_2_route took 12803 s from scratch
-    _ECO_HOLD_SETUP_TOL_PS = 5.0  # setup give-back allowed when a hold pass closes hold
+    _ECO_HOLD_SETUP_TOL_PS = 5.0  # legacy §149/§228 tolerance (only _eco_hold_partial_ok); §232 rule replaces it
 
     def _eco_log(self, block: str, msg: str) -> None:
         """Verdicts go to the block log too (ui.* may not reach it)."""
@@ -2336,6 +2352,131 @@ class JANUSAutonomousAgent:
             return f"{float(v):g}" if v else "10"
         except ValueError:
             return "10"
+
+    _ECO_HOLD_MIN_GAIN_PS = 20.0  # §228 partial hold-pass adoption threshold
+
+    def _eco_hold_min_gain(self, block: str) -> float:
+        """§228: min hold-WNS gain (ps) for keeping a hold ECO that does not
+        close hold. Override with JANUS_ECO_HOLD_MIN_GAIN_PS (<= 0 disables)."""
+        v = self._janus_knob(block, "JANUS_ECO_HOLD_MIN_GAIN_PS")
+        try:
+            return float(v) if v else self._ECO_HOLD_MIN_GAIN_PS
+        except ValueError:
+            return self._ECO_HOLD_MIN_GAIN_PS
+
+    @staticmethod
+    def _eco_hold_partial_ok(eco, b_setup: Optional[float], b_hold: Optional[float],
+                             min_gain: float, tol: float) -> bool:
+        """§228 pure rule: hold pass ran OK, hold was open and is still open,
+        hold WNS gained >= min_gain (> 0), hold TNS did not get worse (when
+        known) and setup WNS lost <= tol. DRC is judged by the caller."""
+        if not (min_gain > 0 and eco.ok and b_hold is not None and b_hold < 0.0
+                and eco.hold_wns is not None and eco.hold_wns < 0.0
+                and b_setup is not None and eco.setup_wns is not None):
+            return False
+        if eco.hold_wns - b_hold < min_gain or b_setup - eco.setup_wns > tol:
+            return False
+        pre_htns = getattr(eco, "pre_hold_tns", None)
+        h_tns = getattr(eco, "hold_tns", None)
+        return not (pre_htns is not None and h_tns is not None and h_tns < pre_htns)
+
+    # ----- §232: hold-vs-setup exchange rule for post-route hold ECO --------
+    # Replaces the fixed 5 ps setup give-back (§149/§228). Rationale:
+    #  * hold is functional at EVERY frequency; setup only costs fmax and is
+    #    recoverable (setup ECO, or ship at a lower clock). So a hold ps is
+    #    worth more than a setup ps -> exchange rate K (hold gain >= K x setup
+    #    loss). K=2 (asymmetry, plus RCX noise ~1-3 ps on either metric).
+    #  * the budget is the setup MARGIN left to the block target (JANUS signoff
+    #    target setup >= -80 ps = 2.8 % of clk_user 2857 ps): the ECO may spend
+    #    up to LOSS_FRAC (50 %) of (setup_before + M) but never push setup past
+    #    -M. When setup is already beyond -M only the FLOOR (5 ps, the RCX
+    #    re-extraction band) is allowed: the block is setup-limited.
+    #    setup -20 -> min(40, 60) = 40 ps; -60 -> 10 ps; -139.9 -> 5 ps.
+    #  * a loss <= FLOOR is always tradeable (noise band), larger losses need
+    #    the K exchange; a pass that does not CLOSE hold must also gain
+    #    >= MIN_GAIN (§228, 20 ps) so it is clearly not noise.
+    #  * aggregate guards: hold TNS must not worsen, hold violator count must
+    #    not rise (when reported), setup TNS may worsen by <= TNS_LOSS_FRAC
+    #    (25 %) of |TNS_before| (or by the WNS budget when TNS_before ~ 0).
+    #  * DRC is judged by the caller.
+    # Heuristic source: JANUS hold ECOs so far (ara 20261018: hold closed with
+    # 0..2.7 ps setup shift; soc_top 210551: -193 -> -121 for 2.7 ps) and the
+    # common high-perf-core practice of signing off hold with margin first and
+    # buying back setup with sizing/VT after (repair_timing -setup keeps hold).
+    _ECO_TRADEOFF_DEFAULTS = {
+        "JANUS_ECO_SETUP_MARGIN_PS": 80.0,     # M: setup target is -M
+        "JANUS_ECO_SETUP_LOSS_FRAC": 0.5,      # spend <= 50 % of remaining margin
+        "JANUS_ECO_SETUP_LOSS_FLOOR_PS": 5.0,  # RCX noise band, always allowed
+        "JANUS_ECO_HOLD_EXCHANGE_K": 2.0,      # hold gain >= K x setup loss
+        "JANUS_ECO_SETUP_TNS_LOSS_FRAC": 0.25, # setup TNS worsens <= 25 %
+        "JANUS_ECO_HOLD_SPARE_PS": 5.0,        # hold >= this -> setup recovery
+                                               # (= RCX band; half the 10 ps ECO
+                                               # over-fix, so a normal hold ECO
+                                               # result qualifies)
+    }
+
+    def _eco_tradeoff_knobs(self, block: str) -> Dict[str, float]:
+        kn = dict(self._ECO_TRADEOFF_DEFAULTS)
+        for k in kn:
+            v = self._janus_knob(block, k)
+            try:
+                if v:
+                    kn[k] = float(v)
+            except ValueError:
+                pass
+        kn["JANUS_ECO_HOLD_MIN_GAIN_PS"] = self._eco_hold_min_gain(block)
+        return kn
+
+    @staticmethod
+    def _eco_setup_allowance(b_setup: float, kn: Dict[str, float]) -> float:
+        """Setup WNS loss (ps) a hold pass may spend:
+        max(FLOOR, min(FRAC*M, b_setup + M)) - see the §232 block comment."""
+        m = kn["JANUS_ECO_SETUP_MARGIN_PS"]
+        floor = kn["JANUS_ECO_SETUP_LOSS_FLOOR_PS"]
+        return max(floor, min(kn["JANUS_ECO_SETUP_LOSS_FRAC"] * m, b_setup + m))
+
+    @staticmethod
+    def _eco_hold_tradeoff(eco, b_setup: Optional[float], b_hold: Optional[float],
+                           kn: Dict[str, float]) -> Tuple[bool, str]:
+        """§232 pure rule for a HOLD pass: (accept, reason). Covers both the
+        hold-closed and the partial (still open, big gain) case."""
+        if not (eco.ok and b_hold is not None and b_hold < 0.0
+                and eco.hold_wns is not None and b_setup is not None
+                and eco.setup_wns is not None):
+            return False, "trade-off n/a (hold was closed or numbers missing)"
+        gain = eco.hold_wns - b_hold
+        loss = max(0.0, b_setup - eco.setup_wns)
+        closed = eco.hold_wns >= 0.0
+        min_gain = kn["JANUS_ECO_HOLD_MIN_GAIN_PS"]
+        if gain <= 0.0:
+            return False, f"hold did not improve ({gain:+.2f} ps)"
+        if not closed and (min_gain <= 0 or gain < min_gain):
+            return False, (f"hold gain {gain:.2f} ps < min {min_gain:g} ps and hold "
+                           "not closed")
+        allow = JANUSAutonomousAgent._eco_setup_allowance(b_setup, kn)
+        if loss > allow:
+            return False, (f"setup loss {loss:.2f} ps > allowance {allow:.2f} ps "
+                           f"(margin to -{kn['JANUS_ECO_SETUP_MARGIN_PS']:g})")
+        k = kn["JANUS_ECO_HOLD_EXCHANGE_K"]
+        if loss > kn["JANUS_ECO_SETUP_LOSS_FLOOR_PS"] and gain < k * loss:
+            return False, (f"hold gain {gain:.2f} ps < {k:g} x setup loss "
+                           f"{loss:.2f} ps")
+        pre_htns, h_tns = getattr(eco, "pre_hold_tns", None), eco.hold_tns
+        if pre_htns is not None and h_tns is not None and h_tns < pre_htns - 1.0:
+            return False, f"hold TNS worse ({pre_htns:g} -> {h_tns:g})"
+        pv, v = getattr(eco, "pre_hold_viol", None), getattr(eco, "hold_viol", None)
+        if pv is not None and v is not None and v > pv:
+            return False, f"hold violators rose ({pv} -> {v})"
+        pre_stns, s_tns = getattr(eco, "pre_setup_tns", None), eco.setup_tns
+        if pre_stns is not None and s_tns is not None:
+            budget = max(kn["JANUS_ECO_SETUP_TNS_LOSS_FRAC"] * abs(pre_stns), allow)
+            if pre_stns - s_tns > budget:
+                return False, (f"setup TNS worse by {pre_stns - s_tns:.1f} ps "
+                               f"> {budget:.1f} ps")
+        state = "CLOSED" if closed else "IMPROVED"
+        return True, (f"hold {state} {b_hold:+.3f}->{eco.hold_wns:+.3f} ps (gain "
+                      f"{gain:.2f}); setup {b_setup:+.3f}->{eco.setup_wns:+.3f} ps "
+                      f"(loss {loss:.2f} <= allowance {allow:.2f}, K {k:g})")
 
     def _eco_outputs(self, res_dir: str, mode: str) -> Dict[str, str]:
         tag = f"janus_eco_{mode}"
@@ -2521,22 +2662,29 @@ class JANUSAutonomousAgent:
         b_setup = eco.pre_setup if eco.pre_setup is not None else setup
         b_hold = eco.pre_hold if eco.pre_hold is not None else hold
         verdict, why = decide_timing(before_setup=b_setup, before_hold=b_hold, after=eco)
-        # Hold is the must-fix (user rule): a hold pass that CLOSES hold is kept
-        # even if RCX moves setup down by <= _ECO_HOLD_SETUP_TOL_PS (repair_timing
-        # -hold already refuses buffers that would break setup on their path;
-        # the residual is re-extraction shift on neighbouring nets).
-        if (verdict == "discard" and mode == "hold" and eco.ok
-                and b_hold is not None and b_hold < 0.0
-                and eco.hold_wns is not None and eco.hold_wns >= 0.0
-                and b_setup is not None and eco.setup_wns is not None
-                and b_setup - eco.setup_wns <= self._ECO_HOLD_SETUP_TOL_PS):
-            verdict, why = "adopt", (f"hold CLOSED {b_hold:+.3f}->{eco.hold_wns:+.3f} ps; "
-                                     f"setup {b_setup:+.3f}->{eco.setup_wns:+.3f} ps "
-                                     f"(within {self._ECO_HOLD_SETUP_TOL_PS:g} ps tolerance)")
+        # Hold is the must-fix (user rule). §232: a hold pass that decide_timing
+        # rejected for setup give-back is judged by the hold-vs-setup exchange
+        # rule (setup budget = 50 % of margin to -80 ps, hold gain >= 2x setup
+        # loss, TNS/violator guards). Replaces §149's closed-hold 5 ps
+        # tolerance and §228's partial rule on the same 5 ps (run
+        # 20261109_210551: hold -193.44 -> -120.73, TNS -31427 -> -646, setup
+        # -139.94 -> -142.62 was DISCARDED).
+        if verdict == "discard" and mode == "hold":
+            ok, twhy = self._eco_hold_tradeoff(eco, b_setup, b_hold,
+                                               self._eco_tradeoff_knobs(block))
+            if ok:
+                verdict, why = "adopt", twhy
+            else:
+                why = f"{why}; §232 trade-off: {twhy}"
         # a setup pass must never open hold that was closed (noise band incl.)
         if (verdict == "adopt" and mode == "setup" and b_hold is not None
                 and b_hold >= 0.0 and (eco.hold_wns is None or eco.hold_wns < 0.0)):
             verdict, why = "discard", f"setup ECO opened hold ({eco.hold_wns} ps)"
+        # §232 setup recovery must actually recover setup
+        if (verdict == "adopt" and mode == "setup" and b_setup is not None
+                and eco.setup_wns is not None and eco.setup_wns <= b_setup):
+            verdict, why = "discard", (f"setup ECO did not improve setup "
+                                       f"({b_setup:+.3f}->{eco.setup_wns:+.3f} ps)")
         # §163: a setup pass that gained setup but opened hold gets ONE hold
         # pass on top of its own output; the combined result is judged against
         # the original pre-ECO numbers with the same hold-first rules.
@@ -3617,6 +3765,7 @@ class JANUSAutonomousAgent:
                             logf.write(banner.encode())
                     if transitioned:
                         _push_dash("RUNNING")
+                        self._gdrive_age_tick(f"{block}:{stg}")  # §231, daily dedupe
                     if ms is not None:
                         self._send_milestones(block, ms.feed(line, state["stage"]))
                         # §175: one stage-table email per completed ORFS stage
@@ -5058,6 +5207,66 @@ class JANUSAutonomousAgent:
             threading.Thread(target=_go, name=f"stage-{block}-{done_key}", daemon=True).start()
         except Exception as e:
             self._notify_log(f"stage email {block}/{done_key} error: {e}")
+
+    def _gdrive_preflight_startup(self, email_problem: str = "") -> str:
+        """§229: real Drive check at launch (token refresh + root lookup), not
+        only the cheap file/import check. Run 20261109_210551 found the
+        revoked token only after 19h38m. On failure an immediate email is sent
+        (stage emails come hours later); the message is kept on the notifier so
+        every later Drive status line repeats it. JANUS_GDRIVE_PREFLIGHT=0 =
+        cheap check only. Never raises; '' = OK."""
+        nt = self.notifier
+        try:
+            if os.environ.get("JANUS_GDRIVE_PREFLIGHT", "1") == "0":
+                return nt.gdrive_problem()
+            msg = nt.gdrive_preflight()
+        except Exception as e:  # never block a launch on Drive
+            msg = f"preflight error: {e}"
+        if msg and nt.enabled and not email_problem:
+            body = (f"Google Drive preflight FAILED at launch:\n  {msg}\n\n"
+                    "The run continues; the bundle stays on EC2 disk. After "
+                    "fixing the token, upload it with:\n  python3 "
+                    "asic_flow/utils/gdrive_upload.py --block <block> "
+                    "--subfolder <YYYY-MM-DD_HH-MM-SS> <bundle.tar.gz>\n")
+            try:
+                ok = nt.send_email("[JANUS] Google Drive preflight FAILED - "
+                                   "fix the token before the run ends", body)
+                self._notify_log(f"startup: gdrive preflight email sent={ok}")
+            except Exception as e:
+                self._notify_log(f"startup: gdrive preflight email error: {e}")
+        return msg
+
+    def _gdrive_age_tick(self, where: str) -> None:
+        """§231: email once a day when the Drive OAuth creds file is >=
+        JANUS_GDRIVE_TOKEN_WARN_DAYS (6) old ('Testing' tokens die at 7 d).
+        Called at launch and on every major-stage transition; a stat() + stamp
+        read when nothing is due; the SMTP send runs in a daemon thread so the
+        log stream / launch never waits on it. Never raises."""
+        try:
+            nt = self.notifier
+            creds = getattr(nt, "gdrive_creds", None)
+            now = time.time()
+            if now - getattr(self, "_gta_last", 0.0) < 600:  # cheap rate limit
+                return
+            self._gta_last = now
+            age = _gta.token_age_days(_gta.creds_path(creds), now)
+            if age is None or age < _gta._env_f("JANUS_GDRIVE_TOKEN_WARN_DAYS", 6.0):
+                return
+
+            def _send(subj: str, body: str) -> bool:
+                if not (nt.enabled and nt.email_configured):
+                    return False
+                return bool(nt.send_email(subj, body))
+
+            def _run() -> None:
+                st = _gta.check(creds, send=_send, log=self._notify_log)
+                self._notify_log(f"{where}: gdrive token age {age:.1f} d -> {st}")
+            threading.Thread(target=_run, name="gdrive-age", daemon=True).start()
+        except Exception as e:
+            try:
+                self._notify_log(f"{where}: gdrive token age check error: {e}")
+            except Exception:
+                pass
 
     def _notify_log(self, msg: str) -> None:
         """§136: every notification line -> <run_dir>/notify.log (+ debug UI).

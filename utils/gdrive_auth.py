@@ -14,6 +14,15 @@ with a browser (your laptop), then copy the output to the EC2 box:
 
 The token holds a refresh token, so the agent keeps working unattended.
 Keep it private (chmod 600): it grants Drive access as you.
+
+§229 IMPORTANT: publish the OAuth app first (Cloud Console -> APIs & Services
+-> OAuth consent screen -> Publishing status -> PUBLISH APP / "In production").
+While it is in "Testing", Google expires the refresh token 7 days after consent
+(the drive scope is not exempt) and every later upload fails with
+"invalid_grant: Token has been expired or revoked". Unverified production apps
+just show an "unverified app" warning at consent (click Advanced -> continue).
+Then re-run this script once and check on EC2:
+    python3 asic_flow/utils/gdrive_upload.py --check
 """
 import argparse
 import os

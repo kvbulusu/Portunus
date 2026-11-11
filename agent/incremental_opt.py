@@ -64,6 +64,10 @@ class ECOResult:
     pre_hold: Optional[float] = None
     slew_viol: Optional[int] = None        # §183 drv mode: max-slew count after (RCX)
     pre_slew_viol: Optional[int] = None    # §183 drv mode: max-slew count before
+    pre_setup_tns: Optional[float] = None  # §232 JANUS_PR_PRE setup/hold tns
+    pre_hold_tns: Optional[float] = None
+    hold_viol: Optional[int] = None        # §232 hold violating endpoints after
+    pre_hold_viol: Optional[int] = None    # ... and before
 
 
 _RE_PRE = re.compile(r"^JANUS_PR_PRE\s+(setup|hold)\s+wns\s+(-?\d+(?:\.\d+)?)", re.M)
@@ -77,6 +81,11 @@ def parse_eco_pre(out: str) -> Tuple[Optional[float], Optional[float]]:
 
 _RE_SLEW = re.compile(r"^JANUS_PR\s+drv\s+slew\s+(-?\d+)", re.M)
 _RE_PRE_SLEW = re.compile(r"^JANUS_PR_PRE\s+drv\s+slew\s+(-?\d+)", re.M)
+
+
+_RE_PRE_TNS = re.compile(r"^JANUS_PR_PRE\s+(setup|hold)\s+tns\s+(-?\d+(?:\.\d+)?)", re.M)
+_RE_HVIOL = re.compile(r"^JANUS_PR\s+hold\s+viol\s+(-?\d+)", re.M)
+_RE_PRE_HVIOL = re.compile(r"^JANUS_PR_PRE\s+hold\s+viol\s+(-?\d+)", re.M)
 
 
 def _slew_count(rx: "re.Pattern[str]", out: str) -> Optional[int]:
@@ -98,6 +107,9 @@ def parse_eco(out: str, mode: str = "timing", out_odb: str = "") -> ECOResult:
     """Parse post_route_opt.tcl output. Never raises."""
     r = ECOResult(mode=mode, out_odb=out_odb, raw=out)
     r.pre_slew_viol = _slew_count(_RE_PRE_SLEW, out)
+    for kind, val in _RE_PRE_TNS.findall(out):
+        setattr(r, f"pre_{kind}_tns", float(val))
+    r.pre_hold_viol = _slew_count(_RE_PRE_HVIOL, out)
     m = _RE_ERR.search(out)
     if m:
         r.error = m.group(1).strip()
@@ -108,6 +120,7 @@ def parse_eco(out: str, mode: str = "timing", out_odb: str = "") -> ECOResult:
     if md:
         r.drc = int(md.group(1))
     r.slew_viol = _slew_count(_RE_SLEW, out)
+    r.hold_viol = _slew_count(_RE_HVIOL, out)
     mw = _RE_WROTE.search(out)
     r.wrote = bool(mw)
     if mw and not out_odb:
