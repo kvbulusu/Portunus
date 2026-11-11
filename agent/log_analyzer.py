@@ -95,6 +95,27 @@ _RE_PROV_NOGIT = re.compile(r"^GIT PROVENANCE: ")
 # error) matched r"\bERROR\b". These lines are skipped by the text heuristics.
 _RE_JANUS_HOOK = re.compile(r"^\s*(?:\[JANUS-[A-Z0-9_-]+\]|JANUS_[A-Z0-9_]+:)")
 
+# §235: a tool ERROR raised INSIDE a JANUS hook's catch is followed by the
+# hook's own "JANUS_<HOOK>: WARNING <...code...>; reverting/skipped" line. It
+# did not error the stage (make rc=0) and must not mark the block FAILED: run
+# 20261110_203249 ([ERROR EST-0104] in JANUS_CTS_AGENT_BAL) was flagged FAILED
+# on rc=0, which skipped the whole DONE path (post-route hold ECO, signoff,
+# golden). Pure; shared with utils/report_bundle.find_first_error.
+_RE_JANUS_CAUGHT = re.compile(r"^\s*JANUS_[A-Z0-9_]+:.*\bWARN(?:ING)?\b")
+
+
+def hook_caught(lines: List[str], i: int, code: Optional[str]) -> bool:
+    """True when the ERROR at lines[i] is caught by a JANUS hook (next
+    non-empty line within 3 is a JANUS_* WARNING naming the code or saying
+    revert/skip/harmless)."""
+    for nxt in lines[i + 1:i + 4]:
+        t = nxt.strip()
+        if not t:
+            continue
+        return bool(_RE_JANUS_CAUGHT.search(t) and (
+            (code and code in t) or re.search(r"revert|skipp|harmless", t, re.I)))
+    return False
+
 # Metric extractors (best-effort; ORFS report formats vary by version).
 #
 # UNITS: for the ASAP7 PDK the standard-cell Liberty declares time_unit = 1ps,
@@ -414,6 +435,9 @@ class LogAnalyzer:
             tag = _RE_MSG_TAG.search(line)
             if tag:
                 sev = tag.group(1).upper()
+                if sev == "ERROR" and hook_caught(lines, i, tag.group(0).split()[-1].rstrip("]")):
+                    rep.warning_count += 1
+                    continue
                 if sev in ("ERROR", "FATAL"):
                     rep.failed = True
                     ctx = lines[max(0, i - 1): i + 2]

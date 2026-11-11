@@ -622,16 +622,28 @@ def _ignored(line: str) -> bool:
     return False
 
 
+def _caught_by_hook(lines: List[str], i: int, code: Optional[str]) -> bool:
+    """§235: tool ERROR caught by a JANUS hook (see log_analyzer.hook_caught);
+    run 20261110_203249 reported the caught EST-0104 as the first error."""
+    if _la is not None and hasattr(_la, "hook_caught"):
+        return _la.hook_caught(lines, i, code)
+    return False
+
+
 def find_first_error(text: str) -> Tuple[Optional[str], Optional[str], List[str]]:
-    """(first real error line, tool code or None, last error lines)."""
+    """(first real error line, tool code or None, last error lines). Errors a
+    JANUS hook caught and logged as a WARNING on the next line are skipped."""
     first = None
     code = None
     errs: List[str] = []
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
         s = line.rstrip()
         if not s or _ignored(s):
             continue
         mt = _RE_TAGGED_ERR.search(s)
+        if mt and _caught_by_hook(lines, i, mt.group(2)):
+            continue
         if mt or _RE_UNTAGGED_ERR.search(s.strip()):
             errs.append(s.strip()[:300])
             if first is None:

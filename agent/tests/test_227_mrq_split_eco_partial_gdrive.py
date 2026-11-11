@@ -101,7 +101,7 @@ def test_split_wiring_in_hook():
     one = s[s.index("proc janus_pf::split_one "):s.index("proc janus_pf::split_all ")]
     assert "setPlacementStatus PLACED" in one and "FIRM" not in one   # not locked
     assert "janus_pf::pass_other $s" in one      # Q side follows the QN inverter
-    assert "janus_pf::macro_pins $net $mac $maxfo" in one
+    assert "janus_pf::d_macro_pins $net $mac $maxfo" in one   # §235 multi-hop D walk
     assert "janus_pf::clamp $tx $ty $core" in one
     assert "moved 0 insts" in one
     # whole hook still parses (no OpenROAD -> run is not invoked)
