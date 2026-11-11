@@ -71,3 +71,16 @@ def test_slew_triage_mock_run(tmp_path):
     assert "pll_locked_o" in s and "SETN" in s
     assert "u_x/_1_/Y" in s or "u_x/_1_" in s
     assert "SIGNAL" in s
+
+
+def test_234_pin_fence_keys_resume_from_place():
+    # §234: PR #143 mk delta vs run 20261109_210551 -> agent picks 3_place
+    for k in ("JANUS_PIN_FENCE", "JANUS_PIN_FENCE_SPLIT", "JANUS_PIN_FENCE_MODE",
+              "JANUS_PIN_FENCE_POST_BIND", "PRE_GLOBAL_PLACE_TCL",
+              "PRE_DETAIL_PLACE_TCL", "POST_DETAIL_PLACE_TCL"):
+        assert flow_state._earliest_stage_for_keys([k]) == "3_place", k
+    pr143 = ["JANUS_PIN_FENCE_SPLIT", "JANUS_CONST_FOLD_MIN_FANOUT",
+             "JANUS_CTS_AGENT_BAL", "JANUS_CTS_AGENT_BAL_PINS"]
+    assert flow_state._earliest_stage_for_keys(pr143) == "3_place"
+    # real synth keys still force synthesis
+    assert flow_state._earliest_stage_for_keys(pr143 + ["VERILOG_FILES"]) == "1_synth"
