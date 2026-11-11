@@ -102,9 +102,13 @@ set ::nb 0
 proc janus_cab_iterm { s } { return IT }
 proc janus_cab_arrival { it } { return [expr {674.9 + 17.5 * $::nb}] }
 proc janus_cab_macro_out { s } { return {-320.1 2000.0} }
-proc janus_cab_grow { spec it n cell } { incr ::nb $n; lassign $::janus_cab_chain($spec) a b
+set ::inv 0
+proc janus_cab_grow { spec it n cell } {
+  if { $::inv } { error "EST-0104" }
+  incr ::nb $n; lassign $::janus_cab_chain($spec) a b
   for {set i 0} {$i < $n} {incr i} { lappend b x }; set ::janus_cab_chain($spec) [list $a $b] }
-proc janus_cab_undo { spec it } { set ::nb 0; set ::janus_cab_chain($spec) [list N {}] }
+proc janus_cab_undo { spec it } { set ::nb 0; set ::inv 1; set ::janus_cab_chain($spec) [list N {}] }
+proc janus_cab_sync { } { set ::inv 0 }
 proc janus_cab_qor { } {
   set d [expr {17.5 * $::nb}]
   set hw [expr {max(-320.1 + $d, -288.8)}]
