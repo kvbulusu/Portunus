@@ -142,6 +142,7 @@ STAGE_TABLE: Dict[str, List[Tuple[str, str, int, str, int, str]]] = {
     "cts": [
         ("reports", "4_cts_final.rpt", 21, "head", 2 << 20, "CTS timing, skew/latency"),
         ("reports", "4_cts_pre_repair.rpt", 20, "head", 2 << 20, "post-CTS / pre-repair worst paths (expanded clocks)"),
+        ("reports", "4_cts_pre_repair_ends.rpt", 22, "head", 2 << 20, "every violating endpoint pre-repair (start end slack)"),
         ("logs", "4_*.log", 24, "tail", 1 << 20, "CTS log"),
         ("logs", "4_*.json", 40, "full", 1 << 20, "CTS metrics"),
         ("results", "4_*.sdc", 52, "full", 1 << 20, "CTS SDC (propagated clocks)"),

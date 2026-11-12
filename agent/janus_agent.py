@@ -130,6 +130,7 @@ import gdrive_token_age as _gta                                         # noqa: 
 from milestones import (MilestoneTracker, milestones_enabled,            # noqa: E402
                         config_uses_io_shadow, is_debug_event)
 import stage_report as _sr                                              # noqa: E402
+import janus_remote as _jr                                              # noqa: E402
 from timing_classifier import classify_routed_odb, render as tc_render   # noqa: E402
 from incremental_opt import (run_eco_pass, decide_timing, decide_drc,     # noqa: E402
                              adopt_odb, discard_odb, ECOResult,
@@ -5181,6 +5182,20 @@ class JANUSAutonomousAgent:
             pass
         return ctx
 
+    def _stage_digest(self, block: str, done_key: str, dirs, t0) -> str:
+        """§238 per-stage debug digest (worst paths, violating-endpoint family
+        histogram, JANUS_* hook lines) via utils/janus_remote.py, also saved
+        as <reports>/janus_digest_<stage>.txt. Never raises; '' = none."""
+        try:
+            dg = _jr.stage_digest(done_key, reports=dirs[1], logs=dirs[0], since=t0, block=block)
+            if dg and dirs[1] and os.path.isdir(dirs[1]):
+                with open(os.path.join(dirs[1], f"janus_digest_{done_key}.txt"), "w") as f:
+                    f.write(dg + "\n")
+            return dg
+        except Exception as e:
+            self._notify_log(f"stage digest {block}/{done_key} error: {e}")
+            return ""
+
     def _send_stage_email(self, block: str, done_key: str, current: Optional[str]) -> None:
         """Build + send the stage-table email on a daemon thread (the log
         reader never waits on parsing or SMTP). Never raises."""
@@ -5201,6 +5216,13 @@ class JANUSAutonomousAgent:
                                          current=current, reused=reused, run_start=t0,
                                          elapsed=(time.time() - t0) if t0 else None, ctx=ctx)
                     self._notify_log(f"stage email {block}/{done_key}: {r['subject']}")
+                    dg = self._stage_digest(block, done_key, dirs, t0)
+                    if dg:   # §238 default debug digest (JANUS_STAGE_DIGEST=0 = off)
+                        import html as _h
+                        r["text"] += f"\n\n===== {done_key} debug digest =====\n{dg}\n"
+                        r["html"] += (f"<p><b>{_h.escape(done_key)} debug digest</b></p>"
+                                      '<pre style="font-size:10px;white-space:pre-wrap">'
+                                      + _h.escape(dg) + "</pre>")
                     mn.send_email(r["subject"], r["text"], [], html=r["html"])
                 except Exception as e:
                     self._notify_log(f"stage email {block}/{done_key} error: {e}")

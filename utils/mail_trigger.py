@@ -33,6 +33,8 @@ janus_agent.py's argparse; a pytest fails if it drifts). Cross-option checks
     query : status        flow processes + autorun log tail
     query : hold 2        worst 2 pre-repair hold paths at 4_cts, condensed
     query : hist          endpoint/startpoint histogram (4_cts_pre_repair.rpt min)
+    query : ends min 2    §238 histogram over EVERY violating hold endpoint at 4_cts
+                          (4_cts_pre_repair_ends.rpt): end / start / start->end prefixes
     query : setup 1 janus_07_global_route_paths.rpt
     query : grep "RSZ-0032|JANUS_CTS" 4_1_cts.log 50
     query : hooks 3_            JANUS_* lines of logs 3_*.log
@@ -215,7 +217,8 @@ CMD_RE = re.compile(r"^\s*cmd\s*:\s*(.*)$", re.I)
 KILL_RE = re.compile(r"^\s*kill\s*:\s*(.*)$", re.I)
 QUERY_RE = re.compile(r"^\s*query\s*:\s*(.*)$", re.I)
 # §237 snapshot of janus_remote.py ACTIONS (it re-validates everything)
-QUERY_ACTIONS = ("status", "ls", "hold", "setup", "paths", "hist", "hooks", "grep", "tail")
+QUERY_ACTIONS = ("status", "ls", "hold", "setup", "paths", "hist", "ends", "hooks", "grep",
+                 "tail")
 REMOTE_TIMEOUT_S = 240
 
 
