@@ -24,6 +24,25 @@ AGENT_FLAGS / AGENT_VALUE_OPTS / AGENT_BLOCKS below (a snapshot of
 janus_agent.py's argparse; a pytest fails if it drifts). Cross-option checks
 (_validate_args) then happen on the box. local mode needs the repo.
 
+§237 kill / query lines (same tag, same sender check; no cooldown):
+
+    kill : now            stop the running flow (tmux + process groups); the box
+                          idle-stops ~IDLE_MIN later unless a cmd follows
+    kill : now hold       ... and touch ~/.janus_no_autostop (box stays up)
+    kill : dry            list what would be killed
+    query : status        flow processes + autorun log tail
+    query : hold 2        worst 2 pre-repair hold paths at 4_cts, condensed
+    query : hist          endpoint/startpoint histogram (4_cts_pre_repair.rpt min)
+    query : setup 1 janus_07_global_route_paths.rpt
+    query : grep "RSZ-0032|JANUS_CTS" 4_1_cts.log 50
+    query : hooks 3_            JANUS_* lines of logs 3_*.log
+    query : ls / tail FILE N / paths FILE min|max N
+
+Order in one mail: kill -> queries -> cmd (so "kill + cmd" = kill and relaunch;
+the cooldown is skipped when a kill comes first). They run via
+`janus_ec2.sh remote -- ...` (wsl2) or asic_flow/utils/janus_remote.py (local);
+outputs come back in the reply mail. The box is never started for them.
+
 Every matching mail is marked read first (a mail can never start two runs),
 and a short accepted/rejected reply goes to JANUS_MAIL_REPLY_TO.
 
@@ -193,6 +212,11 @@ META = set(";|&$`<>(){}\\\n\r")
 DENY_OPTS = {"--smtp-host", "--smtp-port", "--smtp-user", "--smtp-pass",
              "--gdrive-creds", "--interactive", "--dashboard-host", "--help", "-h"}
 CMD_RE = re.compile(r"^\s*cmd\s*:\s*(.*)$", re.I)
+KILL_RE = re.compile(r"^\s*kill\s*:\s*(.*)$", re.I)
+QUERY_RE = re.compile(r"^\s*query\s*:\s*(.*)$", re.I)
+# §237 snapshot of janus_remote.py ACTIONS (it re-validates everything)
+QUERY_ACTIONS = ("status", "ls", "hold", "setup", "paths", "hist", "hooks", "grep", "tail")
+REMOTE_TIMEOUT_S = 240
 
 
 def env(k, d=""):
@@ -265,6 +289,60 @@ def extract_cmd(body):
             parts.append(s)
         return " ".join(p for p in parts if p)
     return None
+
+
+def _quoted_or_sig(s):
+    return s.startswith(">") or s == "--" or s.startswith("-- ") or bool(re.match(r"^On .* wrote:$", s))
+
+
+def extract_actions(body):
+    """§237 -> (kill words list or None, [query strings]) from the body,
+    stopping at the first quoted / signature line (never re-runs a quoted mail)."""
+    kill, queries = None, []
+    for ln in body.splitlines():
+        s = ln.strip()
+        if _quoted_or_sig(s):
+            break
+        m = KILL_RE.match(ln)
+        if m and kill is None:
+            kill = m.group(1).lower().split()
+            continue
+        m = QUERY_RE.match(ln)
+        if m and m.group(1).strip():
+            queries.append(m.group(1).strip())
+    return kill, queries[:10]
+
+
+def validate_kill(words):
+    """-> (janus_remote args, None) or (None, reason)."""
+    w = set(words or [])
+    if not w or not w <= {"now", "yes", "run", "hold", "dry"}:
+        return None, "kill line must be 'kill : now' (optional 'hold') or 'kill : dry'"
+    args = ["kill"]
+    if "hold" in w:
+        args.append("--hold")
+    if "dry" in w:
+        args.append("--dry-run")
+    return args, None
+
+
+def validate_query(q):
+    """-> (janus_remote args, None) or (None, reason). Never shelled locally;
+    janus_ec2.sh %q-quotes for the ssh hop and janus_remote.py re-validates."""
+    if any(c in q for c in "\n\r\0`"):
+        return None, f"bad characters in query {q!r}"
+    try:
+        tok = shlex.split(q)
+    except ValueError as e:
+        return None, f"cannot split query {q!r}: {e}"
+    if not tok or tok[0].lower() not in QUERY_ACTIONS:
+        return None, f"query must start with one of: {' '.join(QUERY_ACTIONS)}"
+    tok[0] = tok[0].lower()
+    files = tok[2:3] if tok[0] == "grep" else tok[1:]
+    for t in files:
+        if "/" in t or t.startswith((".", "~")):
+            return None, f"query file/arg must be a plain basename: {t!r}"
+    return tok, None
 
 
 def _agent_module():
@@ -417,6 +495,36 @@ def launch(args, mode):
     return True, f"pid {p.pid}, log {lf}"
 
 
+def remote_argv(args, mode):
+    """§237 argv running janus_remote.py <args> on the box."""
+    if norm_mode(mode) == "local":
+        if REPO is None:
+            raise RuntimeError("local mode needs the repo (JANUS_REPO)")
+        return [sys.executable, str(REPO / "asic_flow/utils/janus_remote.py")] + args
+    return ["bash", str(launch_target(mode)[0]), "remote", "--"] + args
+
+
+def remote(args, mode):
+    """Synchronous; -> (ok, output)."""
+    try:
+        argv = remote_argv(args, mode)
+        cwd = REPO if norm_mode(mode) == "local" else launch_target(mode)[1]
+    except RuntimeError as e:
+        return False, str(e)
+    envd = dict(os.environ)
+    if norm_mode(mode) == "local" and REPO is not None:
+        envd["JANUS_REPO"] = str(REPO)
+    try:
+        r = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=REMOTE_TIMEOUT_S, env=envd)
+    except subprocess.TimeoutExpired:
+        return False, f"timed out after {REMOTE_TIMEOUT_S}s"
+    except OSError as e:
+        return False, str(e)
+    out = (r.stdout + (("\n[stderr]\n" + r.stderr[-3000:]) if r.stderr.strip() else "")).strip()
+    return r.returncode == 0, out[-60000:] if len(out) > 60000 else out
+
+
 def reply(to, subject, text):
     host, user, pw = env("SMTP_HOST", "smtp.gmail.com"), env("SMTP_USER"), env("SMTP_PASS")
     if not (to and user and pw):
@@ -442,11 +550,59 @@ def handle(msg, cfg, st, dry=False):
         return "skip", "own status reply"
     if not sender_ok(frm, cfg["allow"]):
         return "reject", f"sender {frm} not in JANUS_MAIL_ALLOW_FROM"
-    args, why = validate_cmd(extract_cmd(body_text(msg)))
-    if why:
-        return "reject", why
+    body = body_text(msg)
+    kill, queries = extract_actions(body)
+    cmd = extract_cmd(body)
+    if kill is None and not queries:
+        args, why = validate_cmd(cmd)
+        if why:
+            return "reject", why
+        return _launch_step(args, cfg, st, dry, after_kill=False)
+    # §237: validate everything first; nothing runs if any line is bad
+    steps = []
+    if kill is not None:
+        a, why = validate_kill(kill)
+        if why:
+            return "reject", why
+        steps.append(("kill", a))
+    for q in queries:
+        a, why = validate_query(q)
+        if why:
+            return "reject", why
+        steps.append(("query", a))
+    args = None
+    if cmd:
+        args, why = validate_cmd(cmd)
+        if why:
+            return "reject", why
+    parts, ok_all, killed = [], True, False
+    for kind, a in steps:
+        try:
+            shown = " ".join(shlex.quote(x) for x in remote_argv(a, cfg["mode"]))
+        except RuntimeError as e:
+            return "error", str(e)
+        if dry:
+            parts.append(f"[{kind}] would run: {shown}")
+            continue
+        ok, out = remote(a, cfg["mode"])
+        ok_all &= ok
+        killed |= kind == "kill" and ok and "--dry-run" not in a
+        parts.append(f"===== {kind}: {' '.join(a)}  ({'ok' if ok else 'FAILED'})\n{out}")
+    if kill is not None and not dry and not killed and args:
+        parts.append("===== cmd NOT launched: the kill step failed")
+        return "error", "\n\n".join(parts)
+    if args:
+        status, detail = _launch_step(args, cfg, st, dry, after_kill=killed or (dry and kill is not None))
+        parts.append(f"===== cmd ({status})\n{detail}")
+        ok_all &= status in ("launched", "dry")
+    if dry:
+        return "dry", "\n".join(parts)
+    return ("done" if ok_all else "error"), "\n\n".join(parts)
+
+
+def _launch_step(args, cfg, st, dry, after_kill):
     last = st.get("last_launch", 0)
-    if not dry and time.time() - last < cfg["cooldown"] * 60:
+    if not dry and not after_kill and time.time() - last < cfg["cooldown"] * 60:
         return "reject", (f"cooldown: last run launched "
                           f"{int((time.time() - last) / 60)} min ago (< {cfg['cooldown']})")
     try:
@@ -501,7 +657,8 @@ def poll(cfg, dry=False):
             if status in ("skip", "dup") or dry:
                 continue
             save_state(st)
-            word2 = {"launched": "STARTED", "reject": "REJECTED"}.get(status, "FAILED")
+            word2 = {"launched": "STARTED", "reject": "REJECTED",
+                     "done": "DONE"}.get(status, "FAILED")
             plain = re.sub(re.escape(cfg["tag"]), "", subj, flags=re.I).strip()
             reply(cfg["reply_to"], f"JANUS mail-trigger {word2}: {plain}",
                   f"{word2}\nfrom: {msg.get('From', '')}\nmode: {cfg['mode']}\n\n{detail}\n")
