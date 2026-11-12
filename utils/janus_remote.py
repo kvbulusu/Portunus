@@ -21,7 +21,12 @@ Actions:
   setup [N] [FILE]            worst N max paths, condensed (default janus_06_cts_paths.rpt)
   paths FILE [min|max] [N]    condensed paths from any report
   hist [FILE] [min|max] [DEPTH]  start/endpoint histogram by hierarchy prefix
-                              (count + worst slack) over the paths in FILE
+                              (count + worst slack) over the FULL paths in FILE
+                              (4_cts_pre_repair.rpt holds only 5 per group: use ends)
+  ends [min|max] [DEPTH] [FILE]  §238 histogram over EVERY violating endpoint
+                              (4_cts_pre_repair_ends.rpt, report_checks -format
+                              summary): count / worst / TNS by end prefix, start
+                              prefix and start->end pair (which family is it?)
   hooks [PREFIX]              JANUS_* hook lines from logs PREFIX*.log (default all)
   grep REGEX FILE [MAX]       Python-regex lines (FILE = name or glob, no '/')
   tail FILE [N]               last N lines
@@ -39,7 +44,8 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-ACTIONS = ("kill", "status", "ls", "hold", "setup", "paths", "hist", "hooks", "grep", "tail")
+ACTIONS = ("kill", "status", "ls", "hold", "setup", "paths", "hist", "ends", "hooks", "grep",
+           "tail")
 MAX_OUT = 60000
 HOLD_FILE = Path.home() / ".janus_no_autostop"
 KILL_PATS = [re.compile(p) for p in (
@@ -52,6 +58,17 @@ KEEP_PATS = [re.compile(p) for p in (r"idle_stop\.py", r"mail_trigger\.py", r"ja
 
 class UsageError(Exception):
     pass
+
+
+class Ctx:
+    """§238 in-process use (agent stage digest): explicit dirs + staleness
+    floor (files older than `since` epoch belong to a previous run)."""
+    def __init__(self, block="janus_soc_top", reports=None, logs=None, since=None):
+        self.block, self.reports, self.logs, self.since = block, reports, logs, since
+
+
+def bname(b):
+    return b.block if isinstance(b, Ctx) else b
 
 
 # ------------------------------------------------------------ locations ---
@@ -76,6 +93,9 @@ def flow_dir():
 
 
 def block_dirs(block, platform="asap7", variant="base"):
+    if isinstance(block, Ctx) and (block.reports or block.logs):
+        return [Path(d) if d and Path(d).is_dir() else None for d in (block.reports, block.logs)]
+    block = bname(block)
     f = flow_dir()
     out = []
     for kind in ("reports", "logs"):
@@ -98,8 +118,12 @@ def find_file(name, block):
         hits = sorted((p for p in d.iterdir() if p.is_file() and fnmatch.fnmatch(p.name, name)),
                       key=lambda p: p.stat().st_mtime, reverse=True)
         if hits:
+            since = getattr(block, "since", None)
+            if since and hits[0].stat().st_mtime < since - 60:
+                raise UsageError(f"{hits[0].name}: stale (written {time.ctime(hits[0].stat().st_mtime)}, "
+                                 "before this run started)")
             return hits[0]
-    raise UsageError(f"{name}: not found in reports/logs of {block} (try: ls)")
+    raise UsageError(f"{name}: not found in reports/logs of {bname(block)} (try: ls)")
 
 
 def as_int(v, what, lo=1, hi=1000):
@@ -186,7 +210,8 @@ def q_hist(block, fname, ptype, depth):
     ps = [x for x in split_paths(p.read_text(errors="replace")) if ptype in (None, x["type"])]
     if not ps:
         return f"{p.name}: no {ptype or ''} paths"
-    out = [f"== {p.name}: {len(ps)} {ptype or ''} path(s) (only what the report holds), depth {depth}"]
+    out = [f"== {p.name} ({time.ctime(p.stat().st_mtime)}): {len(ps)} {ptype or ''} path(s) "
+           f"(only what the report holds), depth {depth}"]
     for side in ("end", "start"):
         agg = OrderedDict()
         for x in ps:
@@ -200,6 +225,46 @@ def q_hist(block, fname, ptype, depth):
     return "\n".join(out)
 
 
+_DIR = r"(?:\s+\((?:input|output|inout|bidirect|internal)\))?"
+_SUMMARY = re.compile(r"^(\S+)" + _DIR + r"\s+(\S+)" + _DIR + r"\s+(-?\d+(?:\.\d+)?)\s*$")
+
+
+def parse_ends(text):
+    """§238 '## min' / '## max' sections of report_checks -format summary
+    lines (startpoint endpoint slack) -> {"min": [(s, e, slack)], "max": [...]}."""
+    out, cur = {"min": [], "max": []}, None
+    for l in text.splitlines():
+        h = re.match(r"^##\s*(min|max)\b", l)
+        if h:
+            cur = h.group(1)
+            continue
+        m = _SUMMARY.match(l)
+        if cur and m and m.group(1) != "Startpoint":
+            out[cur].append((m.group(1), m.group(2), float(m.group(3))))
+    return out
+
+
+def q_ends(block, ptype, depth, fname):
+    p = find_file(fname, block)
+    rows = parse_ends(p.read_text(errors="replace"))[ptype]
+    hdr = f"== {p.name} ({time.ctime(p.stat().st_mtime)}): {len(rows)} violating {ptype} endpoint(s)"
+    if not rows:
+        return hdr + " (none, or report empty)"
+    out = [hdr + f", TNS {sum(r[2] for r in rows):.1f} ps, worst {min(r[2] for r in rows):.1f} ps, "
+           f"depth {depth}"]
+    for title, key in (("endpoints", lambda r: prefix(r[1], depth)),
+                       ("startpoints", lambda r: prefix(r[0], depth)),
+                       ("start -> end", lambda r: prefix(r[0], depth) + "  ->  " + prefix(r[1], depth))):
+        agg = {}
+        for r in rows:
+            c, w, t = agg.get(key(r), (0, 0.0, 0.0))
+            agg[key(r)] = (c + 1, min(w, r[2]), t + r[2])
+        out.append(f"\n-- {title} --\n  count  worst(ps)     TNS(ps)  prefix")
+        for k, (c, w, t) in sorted(agg.items(), key=lambda kv: kv[1][2])[:20]:
+            out.append(f"  {c:5d}  {w:9.1f}  {t:10.1f}  {k}")
+    return "\n".join(out)
+
+
 # ------------------------------------------------------------- misc --------
 def q_hooks(block, pfx):
     _, logs = block_dirs(block)
@@ -207,7 +272,10 @@ def q_hooks(block, pfx):
         raise UsageError("logs dir not found")
     pfx = safe_name(pfx) if pfx else ""
     out = []
+    since = getattr(block, "since", None)
     for f in sorted(logs.glob(f"{pfx}*.log")):
+        if since and f.stat().st_mtime < since - 60:
+            continue
         hits = [l.rstrip() for l in f.read_text(errors="replace").splitlines() if l.startswith("JANUS_")]
         if hits:
             out.append(f"== {f.name} ({len(hits)})")
@@ -336,11 +404,55 @@ def q_kill(hold=False, dry=False, grace=20):
     return "\n".join(out)
 
 
+# --------------------------------------------------------- stage digest ---
+# §238 default per-stage digest appended to the agent's stage email. Files
+# older than the block start are skipped (no stale data from a previous run).
+# JANUS_STAGE_DIGEST=0 turns it off; JANUS_STAGE_DIGEST_<STAGE>="q1;q2" (e.g.
+# JANUS_STAGE_DIGEST_4_CTS="ends min 3;hold 3") replaces a stage's list.
+STAGE_DIGEST = {
+    "3_place": ["setup 2 janus_05_detail_place_paths.rpt", "hooks 3_"],
+    "4_cts": ["ends min 1", "ends min 2", "ends max 1", "hold 2", "setup 1 janus_06_cts_paths.rpt",
+              "hooks 4_"],
+    "5_grt": ["setup 2 janus_07_global_route_paths.rpt", "hold 1 janus_07_global_route_paths.rpt",
+              "hooks 5_1"],
+    "5_drt": ["setup 1 janus_08_detail_route_paths.rpt", "hooks 5_"],
+    "6_finish": ["hooks 6_"],
+}
+DIGEST_MAX = 20000
+
+
+def stage_queries(stage):
+    if os.environ.get("JANUS_STAGE_DIGEST", "1").strip() == "0":
+        return []
+    ov = os.environ.get("JANUS_STAGE_DIGEST_" + re.sub(r"\W", "_", str(stage)).upper())
+    qs = ov.split(";") if ov is not None else STAGE_DIGEST.get(stage, [])
+    return [q.strip() for q in qs if q.strip() and not q.strip().startswith("kill")]
+
+
+def stage_digest(stage, reports=None, logs=None, since=None, block="janus_soc_top"):
+    """-> digest text ('' when nothing to show). Never raises."""
+    out = []
+    for q in stage_queries(stage):
+        try:
+            r = run(q.split(), Ctx(block, reports, logs, since))
+        except UsageError as e:
+            r = f"(skipped: {e})"
+        except Exception as e:
+            r = f"(error: {type(e).__name__}: {e})"
+        out.append(f"########## {q}\n{r}")
+    txt = "\n\n".join(out)
+    return txt[:DIGEST_MAX] + (f"\n... [digest truncated at {DIGEST_MAX} chars]" if len(txt) > DIGEST_MAX else "")
+
+
 # ------------------------------------------------------------- dispatch ---
-def run(argv):
-    block = "janus_soc_top"
+def run(argv, ctx=None):
+    block = ctx or "janus_soc_top"
     if len(argv) >= 2 and argv[0] == "--block":
-        block = safe_name(argv[1]); argv = argv[2:]
+        if isinstance(block, Ctx):
+            block.block = safe_name(argv[1])
+        else:
+            block = safe_name(argv[1])
+        argv = argv[2:]
     if not argv or argv[0] not in ACTIONS:
         raise UsageError(f"action must be one of: {' '.join(ACTIONS)}")
     a, rest = argv[0], argv[1:]
@@ -370,6 +482,12 @@ def run(argv):
             raise UsageError("hist type must be min or max")
         d = as_int(rest[2], "DEPTH", 1, 8) if len(rest) > 2 else 2
         return q_hist(block, f, t, d)
+    if a == "ends":
+        t = rest[0] if rest else "min"
+        if t not in ("min", "max"):
+            raise UsageError("ends [min|max] [DEPTH] [FILE]")
+        d = as_int(rest[1], "DEPTH", 1, 8) if len(rest) > 1 else 2
+        return q_ends(block, t, d, rest[2] if len(rest) > 2 else "4_cts_pre_repair_ends.rpt")
     if a == "hooks":
         return q_hooks(block, rest[0] if rest else "")
     if a == "grep":
