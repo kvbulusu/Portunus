@@ -196,6 +196,9 @@ def q_paths(block, fname, ptype, n):
     ps = [x for x in split_paths(p.read_text(errors="replace")) if ptype in (None, x["type"])]
     if not ps:
         return f"{p.name}: no {ptype or ''} paths"
+    # §239 worst first: report_checks orders by path group, so the first min
+    # path in 4_cts_pre_repair.rpt was in2reg +707 while reg2reg was -405.
+    ps.sort(key=lambda x: (x["slack"] is None, x["slack"] if x["slack"] is not None else 0.0))
     hdr = f"== {p.name} ({time.ctime(p.stat().st_mtime)}): {len(ps)} {ptype or ''} path(s), showing {min(n, len(ps))}"
     return "\n\n".join([hdr] + ["\n".join(condense(x["lines"])) for x in ps[:n]])
 
@@ -225,7 +228,9 @@ def q_hist(block, fname, ptype, depth):
     return "\n".join(out)
 
 
-_DIR = r"(?:\s+\((?:input|output|inout|bidirect|internal)\))?"
+# §239 non-port pins carry their cell: "u/x_reg/QN (DFFASRHQNx1_ASAP7_75t_SL)"
+# (run 20261112_125523: the port-direction-only regex parsed 0 of 4592 lines).
+_DIR = r"(?:\s+\([^\s()]+\))?"
 _SUMMARY = re.compile(r"^(\S+)" + _DIR + r"\s+(\S+)" + _DIR + r"\s+(-?\d+(?:\.\d+)?)\s*$")
 
 
