@@ -134,6 +134,8 @@ _KEY_STAGE_EXACT: Dict[str, str] = {
     "JANUS_CLKROOT_UPSIZE": "3_place",
     "JANUS_CLKROOT_RELOCATE": "3_place",
     "JANUS_CLKROOT_ALLOW_CLONING": "3_place",
+    # §244 ORFS load.tcl sources it in every OpenROAD stage (first: 2_1).
+    "LAYER_PARASITICS_FILE": "2_floorplan",
 }
 _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("SYNTH_", "1_synth"),
@@ -162,6 +164,9 @@ _KEY_STAGE_PREFIX: List[Tuple[str, str]] = [
     ("JANUS_CTS_", "4_cts"),
     ("JANUS_RSZ_", "5_route"),           # §167 PRE_GLOBAL_ROUTE repair_design knobs
     ("JANUS_PIN_FENCE", "3_place"),      # §234 janus_pin_fence.tcl knobs (read at 3_3 PRE_GLOBAL_PLACE only)
+    ("JANUS_SOC_SDC_", "2_floorplan"),   # §242 janus_soc_sdc_complete.tcl (first applied at 2_1 POST)
+    ("JANUS_SOC_LAYER_RC", "2_floorplan"),  # §244 selects LAYER_PARASITICS_FILE
+    ("JANUS_TIE_RELOCATE", "3_place"),   # §243 tie relocation in the 3_4 PRE_RESIZE hook
     ("JANUS_CONST_FOLD", "3_place"),     # §161 PRE_RESIZE constant-net fold knobs             # §114/§160 PRE_CTS hook knobs
 ]
 
