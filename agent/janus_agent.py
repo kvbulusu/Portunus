@@ -2832,6 +2832,13 @@ class JANUSAutonomousAgent:
                 rc_all = rc_all or 3
                 continue
             self._classify_timing(b)
+            eco0 = self._eco_adopted_timing(b)   # §150: fallback baseline = RCX of the ECO'd 6_final in force
+            if eco0:
+                if eco0.get("setup_ws") is not None:
+                    res.wns_ns = eco0["setup_ws"]
+                if eco0.get("hold_ws") is not None:
+                    res.hold_ps = eco0["hold_ws"]
+                res.timing_source = eco0.get("source")
             note0 = res.note
             self._eco_pass_orfs(b, "hold", res.wns_ns, res.hold_ps)
             if self.args.dry_run:
