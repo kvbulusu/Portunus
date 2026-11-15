@@ -50,17 +50,17 @@ def _mk(k):
 # --- PART A: RTL ----------------------------------------------------------------------
 def test_link_slice_mode5():
     s = LINK.read_text()
-    assert "MODE_SM  = (MODE == 5) ? 0 : MODE" in s       # AW/W/AR pass-through
-    assert "MODE_MS5 = (MODE == 5) ? 3 : MODE" in s       # B/R ingress regs
+    assert "MODE_SM  = (MODE == 5) ? 0 : (MODE == 6) ? 4 : MODE" in s  # AW/W/AR pass-through (§245: 6 -> egress)
+    assert "MODE_MS5 = (MODE == 5 || MODE == 6) ? 3 : MODE" in s  # B/R ingress regs
     assert re.search(r"MODE_MS\s*=\s*\(MODE == 3\) \? 4 : MODE", s)  # §216 unchanged
-    assert "MODE inside {1, 2, 3, 5}" in s
+    assert "MODE inside {1, 2, 3, 5, 6}" in s
 
 
 def test_top_ucut_s3n_inside_ifndef():
     s = TOP.read_text()
     i_if = s.index("`ifndef JANUS_SOC_NO_UCUT")
     i_s3 = s.index("axi4_link_slice u_ucut_s3 (")
-    i_s3n = s.index("axi4_link_slice #(.MODE(5), .INGRESS_BYPASS(1'b1)) u_ucut_s3n (")
+    i_s3n = s.index("axi4_link_slice #(.MODE(6), .INGRESS_BYPASS(1'b1)) u_ucut_s3n (")  # §245
     i_else = s.index("`else", i_s3n)
     i_end = s.index("`endif", i_s3n)
     assert i_if < i_s3 < i_s3n < i_else < i_end
