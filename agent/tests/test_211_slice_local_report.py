@@ -56,8 +56,8 @@ def test_link_slice_param_and_top_usage():
     # §216: AW/W/AR use MODE_SM (= MODE), B/R MODE_MS (= MODE unless MODE 3)
     cl = _code(LS)
     # §224: MODE 5 = AW/W/AR pass-through (0), B/R ingress (3)
-    assert re.search(r"MODE_SM\s*=\s*\(MODE == 5\) \? 0 : MODE;", cl)
-    assert re.search(r"MODE_MS5\s*=\s*\(MODE == 5\) \? 3 : MODE;", cl)
+    assert re.search(r"MODE_SM\s*=\s*\(MODE == 5\) \? 0 : \(MODE == 6\) \? 4 : MODE;", cl)  # §245
+    assert re.search(r"MODE_MS5\s*=\s*\(MODE == 5 \|\| MODE == 6\) \? 3 : MODE;", cl)
     assert re.search(r"MODE_MS\s*=\s*\(MODE == 3\) \? 4 : MODE_MS5;", cl)
     assert cl.count(".MODE(MODE_SM), .CTRL_SLICE_W(CTRL_SLICE_W)") == 3
     assert cl.count(".MODE(MODE_MS), .CTRL_SLICE_W(CTRL_SLICE_W)") == 2

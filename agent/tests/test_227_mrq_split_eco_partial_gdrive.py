@@ -55,7 +55,8 @@ def test_split_spec_in_mk_targets_mrq_only():
     s = _mk("JANUS_PIN_FENCE_SPLIT").split()
     assert s == ["mrq:u_user:u_ucut_mn/u_r/g_egress/mr_q*:0.4"]
     # the §226 fence is unchanged (mr_q stays out of the ingress fence)
-    assert "g_egress" not in _mk("JANUS_PIN_FENCE")
+    # (§245 adds only u_ucut_s3n egress mr_q, region ucut_s3e)
+    assert not [x for x in _mk("JANUS_PIN_FENCE").split() if "g_egress" in x and "u_ucut_s3n" not in x]
     assert not re.search(r"(?m)^export JANUS_PIN_FENCE_SPLIT\s*\?=", MK)
 
 
