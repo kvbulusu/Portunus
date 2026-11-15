@@ -113,7 +113,7 @@ AGENT_FLAGS = frozenset("""
 --skip-stamp-check --dry-run --triage-slew --signoff-only --post-triage-slew
 --estimate --no-llm --interactive --no-git-commit --git-push --reason
 --no-physical --no-sram-regen --no-abstract --no-post-route-opt --eco-drv
---eco-drv-only --abstract-only --no-debug-dump --no-debug-images --no-golden
+--eco-drv-only --eco-hold-only --abstract-only --no-debug-dump --no-debug-images --no-golden
 --golden-include-heavy --no-signoff --verbose -v --tmux --gdrive-upload
 --dashboard --no-signoff-sta --post-custom-on-fail --debug-on-fail
 """.split())
