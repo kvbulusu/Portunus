@@ -2531,7 +2531,12 @@ class JANUSAutonomousAgent:
         targets += list(extra or [])          # §248 e.g. JANUS_PR_HOLD_STRATEGY=pin
         if mode == "drv":
             targets += [f"JANUS_PR_DRV_MAX_WIRE_UM={self._eco_drv_max_wire_um(block)}",
-                        f"JANUS_PR_DRV_SCOPE={self._eco_drv_scope(block)}"]
+                        f"JANUS_PR_DRV_SCOPE={self._eco_drv_scope(block)}",
+                        # §249 scope viol: RCX-setup guard + margin cap
+                        "JANUS_PR_DRV_SETUP_GUARD_PS="
+                        f"{self._eco_drv_float_knob(block, 'JANUS_ECO_DRV_SETUP_GUARD_PS', 50.0):g}",
+                        "JANUS_PR_DRV_MAX_MARGIN="
+                        f"{self._eco_drv_float_knob(block, 'JANUS_ECO_DRV_MAX_MARGIN', 60.0):g}"]
         spef = in_spef or os.path.join(res_dir, "6_final.spef")
         if os.path.isfile(spef):
             targets.append(f"JANUS_SPEF={spef}")
@@ -2818,7 +2823,14 @@ class JANUSAutonomousAgent:
 
     def _eco_drv_scope(self, block: str) -> str:
         v = (self._janus_knob(block, "JANUS_ECO_DRV_SCOPE") or "").strip().lower()
-        return v if v in ("ports", "all") else "ports"
+        return v if v in ("ports", "all", "viol") else "ports"
+
+    def _eco_drv_float_knob(self, block: str, name: str, dflt: float) -> float:
+        v = self._janus_knob(block, name)
+        try:
+            return float(v) if v not in (None, "") else dflt
+        except ValueError:
+            return dflt
 
     def _eco_drv_pass(self, block: str) -> bool:
         """Run + judge one drv ECO. Adopts only when max-slew count drops and
@@ -2839,7 +2851,8 @@ class JANUSAutonomousAgent:
         b_setup = eco.pre_setup if eco.pre_setup is not None else res.wns_ns
         b_hold = eco.pre_hold if eco.pre_hold is not None else res.hold_ps
         b_drc = res.drc_violations or 0
-        verdict, why = decide_drv(b_setup, b_hold, b_drc, eco)
+        tol = self._eco_drv_float_knob(block, "JANUS_ECO_DRV_SETUP_TOL_PS", 5.0)  # §249
+        verdict, why = decide_drv(b_setup, b_hold, b_drc, eco, setup_tol_ps=tol)
         if verdict == "adopt" and self._adopt_eco_orfs(block, outs):
             res.wns_ns, res.hold_ps = eco.setup_wns, eco.hold_wns
             if eco.setup_tns is not None:
@@ -2879,13 +2892,29 @@ class JANUSAutonomousAgent:
             if not self._find_routed_odb(b):
                 self.ui.err(f"{b}: no routed .odb (block must have finished routing)")
                 rc_all = rc_all or 3
+                if not self.args.dry_run:      # §249: mail-triggered runs only see the email
+                    res.status = "FAILED"
+                    res.note = "eco-drv-only exit 3: no routed .odb (block must have finished routing)"
+                    self._notify_settled(b, res)
                 continue
             self._classify_timing(b)
+            eco0 = self._eco_adopted_timing(b)   # §249: baseline = ECO'd 6_final in force
+            if eco0:
+                if eco0.get("setup_ws") is not None:
+                    res.wns_ns = eco0["setup_ws"]
+                if eco0.get("hold_ws") is not None:
+                    res.hold_ps = eco0["hold_ws"]
+                res.timing_source = eco0.get("source")
             if self.args.dry_run:
                 self._eco_drv_pass(b)
                 continue
+            note0 = res.note
             if not self._eco_drv_pass(b):
                 rc_all = rc_all or 5
+                res.status = "DONE"            # previous 6_final stays in force
+                res.note = ((note0 + "; ") if note0 else "") + \
+                    "eco-drv-only exit 5: drv ECO DISCARDED, previous 6_final kept"
+                self._notify_settled(b, res)
                 continue
             res.status = "DONE"
             self._run_abstract(b)
@@ -2895,6 +2924,8 @@ class JANUSAutonomousAgent:
             except Exception as e:
                 self.ui.warn(f"{b}: sign-off after drv ECO failed: {e}")
             self._archive_golden(b, res)
+            res.note = (res.note + "; " if res.note else "") + "eco-drv-only exit 0: drv ECO ADOPTED"
+            self._notify_settled(b, res)       # §249: email + Drive bundle
         return rc_all
 
     def _eco_hold_only(self) -> int:
