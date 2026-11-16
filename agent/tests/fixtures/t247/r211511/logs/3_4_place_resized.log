@@ -1,0 +1,16 @@
+[WARNING STA-1140] results/asap7/security/base/janus_kv_secure_subsystem_fast.lib line 1, library janus_kv_secure_subsystem already exists.
+[WARNING STA-1140] results/asap7/noc/base/axi4_crossbar_fast.lib line 1, library axi4_crossbar already exists.
+[WARNING STA-1140] results/asap7/ampo/base/ampo_top_fast.lib line 1, library ampo_top already exists.
+[WARNING STA-1140] results/asap7/agent_domain/base/agent_cluster_top_fast.lib line 1, library agent_cluster_top already exists.
+[WARNING STA-1140] results/asap7/user_domain/base/user_cluster_top_fast.lib line 1, library user_cluster_top already exists.
+[INFO RSZ-0034] Found 1287 slew violations.
+[INFO RSZ-0036] Found 144 capacitance violations.
+[INFO RSZ-0039] Resized 277 instances.
+[INFO RSZ-0038] Inserted 3631 buffers in 1253 nets.
+[WARNING RSZ-0020] found 2 floating nets.
+[INFO RSZ-0098] No setup violations found
+[INFO RSZ-0033] No hold violations found.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 7200 x 4381.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 7200 x 4381.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 7200 x 4381.
+Elapsed time: 3:46.19[h:]min:sec. CPU time: user 381.72 sys 50.40 (191%). Peak memory: 3699640KB.

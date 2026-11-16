@@ -35,6 +35,11 @@ import re
 from collections import Counter
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+try:   # §247 post-route ECO rows (sibling module; flat import like the agent)
+    import eco_history as _eh
+except ImportError:  # pragma: no cover - package-style import
+    from . import eco_history as _eh  # type: ignore
+
 DASH = "—"
 DEFAULT_TAIL_LINES = 50
 
@@ -777,7 +782,8 @@ def red_flags(rows: List[Dict[str, object]]) -> List[Tuple[str, str]]:
 def _last_qor_row(rows: List[Dict[str, object]], upto: Optional[str] = None):
     best = None
     for r in rows:
-        if r.get("status") in ("DONE", "REUSED", "RUNNING", "FAILED") and r.get("setup_ws") is not None:
+        if r.get("status") in ("DONE", "REUSED", "RUNNING", "FAILED", "IN FORCE") \
+                and r.get("setup_ws") is not None:
             best = r
         if upto and r.get("key") == upto:
             break
@@ -799,7 +805,9 @@ def key_qor(r: Dict[str, object]) -> str:
     if k == "5_grt" and r.get("grt_overflow") is not None:
         parts.append(f"ovfl {r['grt_overflow']}")
     if k == "5_drt" and r.get("drt_viol") is not None:
-        parts.append(f"DRC {fmt_int(r['drt_viol'])}")
+        parts.append(f"DRC {fmt_int(r['drt_viol'])}"
+                     + (f" (superseded: ECO DRC {r['drt_superseded']})"
+                        if r.get("drt_superseded") is not None else ""))
     if r.get("pre_repair"):
         parts.append("pre-repair")
     return " · ".join(parts) or DASH
@@ -814,7 +822,116 @@ _ST_SHORT = {"DONE": "done", "RUNNING": "running", "FAILED": "FAILED",
              "REUSED": "reused", "PENDING": "·"}
 
 
+# ---------------------------------------------------------------------------
+# §247 post-route ECO rows (one per attempt + the ECO in force) after 6_finish
+# ---------------------------------------------------------------------------
+IN_FORCE_MARK = "◀ in force"
+
+
+def _p2(v) -> str:
+    """ECO slacks at 0.01 ps (-7.31, not -7.3): the residual is a few ps."""
+    if v is None:
+        return DASH
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return DASH
+    if abs(f) >= 100:
+        return fmt_ps(f)
+    return ("+" if f > 0 else "") + f"{f:.2f}"
+
+
+def _eco_wall(r) -> str:
+    w = fmt_dur(r.get("wall"))
+    return ("~" + w) if r.get("wall_est") and r.get("wall") is not None else w
+
+
+def _eco_pre(r) -> str:
+    pre = r.get("pre") or {}
+    if pre.get("setup_ws") is None and pre.get("hold_ws") is None:
+        return ""
+    s = f"pre S {_p2(pre.get('setup_ws'))} H {_p2(pre.get('hold_ws'))}"
+    if pre.get("hold_viol") is not None:
+        s += f" #{fmt_int(pre['hold_viol'])}"
+    return s + (f" ({r['pre_src']})" if r.get("pre_src") else "")
+
+
+def _eco_margin(r) -> str:
+    try:
+        if r.get("margin") is None:
+            return "margin n/a"
+        return f"margin {float(r['margin']):g}" + (" (cfg)" if r.get("margin_cfg") else "")
+    except (TypeError, ValueError):
+        return "margin n/a"
+
+
+def _eco_key_qor(r) -> str:
+    drc = r.get("eco_drc")
+    if r.get("_eco") == "in_force":
+        return (f"S {_p2(r.get('setup_ws'))} · H {_p2(r.get('hold_ws'))}"
+                f" · DRC {fmt_int(drc)} {IN_FORCE_MARK}")
+    pre = r.get("pre") or {}
+    parts = [f"S {_p2(pre.get('setup_ws'))}->{_p2(r.get('setup_ws'))}",
+             f"H {_p2(pre.get('hold_ws'))}->{_p2(r.get('hold_ws'))}", _eco_margin(r)]
+    if drc is not None:
+        parts.append(f"DRC {fmt_int(drc)}")
+    if r.get("why"):
+        parts.append(str(r["why"])[:90])
+    return " · ".join(parts)
+
+
+def _eco_det_notes(r) -> str:
+    if r.get("_eco") == "in_force":
+        return f"IN FORCE · DRC {fmt_int(r.get('eco_drc'))} · @{r.get('at') or '?'}"
+    bits = [f"{r.get('status')}: {r.get('why') or '?'}", _eco_pre(r), _eco_margin(r),
+            f"wall {_eco_wall(r)}"]
+    return " · ".join(b for b in bits if b)
+
+
+def merge_eco_rows(rows: List[Dict[str, object]],
+                   eco: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    """Insert the ECO rows right after 6_finish (and its post-script rows)."""
+    if not eco:
+        return rows
+    out = list(rows)
+    idx = next((i for i, r in enumerate(out) if r.get("key") == "6_finish"), None)
+    if idx is None:
+        idx = next((i for i, r in enumerate(out) if r.get("key") == "signoff"), len(out))
+    else:
+        idx += 1
+        while idx < len(out) and out[idx].get("_post"):
+            idx += 1
+    return out[:idx] + list(eco) + out[idx:]
+
+
+def supersede_flags(flags: List[Tuple[str, str]], rows: List[Dict[str, object]]
+                    ) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """The 5_drt DRC count is pre-ECO; the in-force ECO re-ran detailed_route
+    and counted the whole design again. ECO DRC 0 -> the 5_drt RED flag is
+    stale: dropped, and noted as superseded (rows annotated in place)."""
+    inf = next((r for r in rows if r.get("_eco") == "in_force"), None)
+    drc = inf.get("eco_drc") if inf else None
+    if not isinstance(drc, int) or isinstance(drc, bool) or drc != 0:
+        return flags, []
+    keep: List[Tuple[str, str]] = []
+    notes: List[str] = []
+    for lv, t in flags:
+        if t.startswith("5_drt:") and "DRT violations" in t:
+            notes.append(f"{t} -> superseded by {inf.get('key')}: ECO reroute DRC {drc}"
+                         f" (@{inf.get('at') or '?'})")
+        else:
+            keep.append((lv, t))
+    if notes:
+        for r in rows:
+            if r.get("key") == "5_drt":
+                r["drt_superseded"] = drc
+    return keep, notes
+
+
 def _main_cells(r) -> List[str]:
+    if r.get("_eco"):   # §247
+        return [str(r.get("key")), str(r.get("status")), _eco_wall(r), DASH, DASH,
+                _eco_key_qor(r)]
     if r.get("_post"):   # §214
         return [str(r.get("key")), _post_status(r), fmt_dur(r.get("wall")),
                 fmt_dur(r.get("cpu")), fmt_mem(r.get("peak_kb")), r.get("post_note") or DASH]
@@ -831,6 +948,13 @@ def _det_cells(r) -> List[str]:
     if r.get("_post"):   # §214
         return [str(r.get("key")), DASH, DASH, DASH, DASH,
                 r.get("post_note") or _post_status(r)]
+    if r.get("_eco"):    # §247: 0.01 ps slacks, violator counts, verdict/reason
+        def wt2(w, t, n):
+            return f"{_p2(w)}/{_p2(t)} {fmt_int(n) if n is not None else ''}".strip()
+        hb = r.get("hold_bufs_eco")
+        return [str(r.get("key")), wt2(r.get("setup_ws"), r.get("setup_tns"), r.get("setup_viol")),
+                wt2(r.get("hold_ws"), r.get("hold_tns"), r.get("hold_viol")), DASH,
+                f"{fmt_int(hb)}/{DASH}" if hb is not None else DASH, _eco_det_notes(r)]
     util = r.get("util")
     cu = f"{fmt_int(r.get('cells'))}·{(f'{float(util) * 100:.0f}%' if isinstance(util, (int, float)) and util <= 1.5 else fmt_int(util) if util is not None else DASH)}"
     notes = []
@@ -970,7 +1094,8 @@ def _txt_table(head: Sequence[str], body: List[List[str]]) -> str:
 
 _TD = "border:1px solid #bbb;padding:2px 4px;"
 _STC = {"DONE": "#d4edda", "FAILED": "#f8d7da", "RUNNING": "#cce5ff", "REUSED": "#e2e3e5",
-        "SKIPPED": "#fff3cd"}
+        "SKIPPED": "#fff3cd", "IN FORCE": "#b8e0c2", "ADOPTED": "#d4edda",
+        "DISCARDED": "#fff3cd", "NOT ADOPTED": "#fff3cd"}
 
 
 def _html_table(head: Sequence[str], rows_cells: List[List[str]], statuses: List[str],
@@ -1066,6 +1191,20 @@ def build_report(block: str, kind: str, *, stage: Optional[str] = None,
         flags = red_flags(rows)
         rows = merge_post_rows(rows, post_scripts,
                                failed if kind == "failed" else stage if kind == "stage" else None)
+        # §247: post-route ECO rows (each attempt + the ECO in force) after a
+        # finished 6_finish; the 5_drt DRC flag yields to the in-force ECO DRC.
+        notes: List[str] = []
+        fin_row = next((r for r in rows if r.get("key") == "6_finish"), None)
+        if fin_row is not None and fin_row.get("status") in ("DONE", "REUSED"):
+            eco = _eh.eco_rows(reports_dir, logs_dir, agent_log, run_start,
+                               margin_hint=ctx.get("eco_hold_margin"))
+            inf = next((r for r in eco if r.get("_eco") == "in_force"), None)
+            if inf is not None:
+                rpt = os.path.join(reports_dir or "#", f"janus_eco_{inf.get('mode') or 'hold'}.rpt")
+                if _eh.rpt_from_adopted(reports_dir, rpt):
+                    inf["paths"] = parse_paths(_read(rpt))
+            rows = merge_eco_rows(rows, eco)
+            flags, notes = supersede_flags(flags, rows)
         # failure details
         errs: List[str] = []
         tail: List[str] = []
@@ -1086,8 +1225,8 @@ def build_report(block: str, kind: str, *, stage: Optional[str] = None,
                                flags, code, elapsed)
 
         main_body = [_main_cells(r) for r in rows]
-        det_rows = [r for r in rows if r.get("_post") or (r.get("key") in STAGE_KEYS
-                                                           and r.get("status") != "PENDING")]
+        det_rows = [r for r in rows if r.get("_post") or r.get("_eco") or (
+            r.get("key") in STAGE_KEYS and r.get("status") != "PENDING")]
         det_body = [_det_cells(r) for r in det_rows]
         focus_key = failed or (stage if kind == "stage" else None)
         if focus_key is None:
@@ -1107,6 +1246,8 @@ def build_report(block: str, kind: str, *, stage: Optional[str] = None,
             if prev:
                 ds = float(focus["setup_ws"]) - float(prev["setup_ws"])
                 delta = f"vs {prev['key']}: setup {ds:+.1f} ps"
+                if focus.get("_eco"):   # §247: delta of the timing in force
+                    delta = f"{focus['key']} " + delta
                 if focus.get("hold_ws") is not None and prev.get("hold_ws") is not None:
                     delta += f", hold {float(focus['hold_ws']) - float(prev['hold_ws']):+.1f} ps"
 
@@ -1114,6 +1255,10 @@ def build_report(block: str, kind: str, *, stage: Optional[str] = None,
         if flags:
             T.append("RED FLAGS")
             T += [f"  [{lv}] {t}" for lv, t in flags]
+            T.append("")
+        if notes:
+            T.append("NOTES")
+            T += [f"  {n}" for n in notes]
             T.append("")
         if kind == "failed":
             T.append(f"FAILED STAGE: {failed or '?'}")
@@ -1155,6 +1300,9 @@ def build_report(block: str, kind: str, *, stage: Optional[str] = None,
         if flags:
             H.append('<p style="background:#f8d7da;padding:4px">'
                      + "<br>".join(f"<b>[{lv}]</b> {_h.escape(t)}" for lv, t in flags) + "</p>")
+        if notes:
+            H.append('<p style="background:#e2e3e5;padding:4px">'
+                     + "<br>".join(_h.escape(n) for n in notes) + "</p>")
         if kind == "failed":
             H.append(f"<p><b>Failed stage:</b> {_h.escape(str(failed or '?'))}<br><b>First error(s):</b></p>"
                      '<pre style="font-size:11px;white-space:pre-wrap;color:#b00">'
@@ -1180,7 +1328,8 @@ def build_report(block: str, kind: str, *, stage: Optional[str] = None,
                      + _h.escape("\n".join(tail) or "(log not found)") + "</pre>")
         H.append("</div>")
         return {"subject": subject, "text": text, "html": "".join(H), "rows": rows,
-                "flags": flags, "failed_stage": failed, "errors": errs, "tail": tail}
+                "flags": flags, "notes": notes, "failed_stage": failed, "errors": errs,
+                "tail": tail}
     except Exception as e:  # never crash the flow
         subj = f"[JANUS] {block} {'FAILED' if kind == 'failed' else (stage or '') + ' DONE'}".replace("  ", " ")
         msg = f"{subj}\n\n(stage report unavailable: {type(e).__name__}: {e})\n"

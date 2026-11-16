@@ -1,0 +1,5 @@
+[WARNING] LEF Cell 'fakeram7_2048x128' ignored. Matches GDS_ALLOW_EMPTY.
+[WARNING] LEF Cell 'fakeram7_256x128' ignored. Matches GDS_ALLOW_EMPTY.
+[WARNING] LEF Cell 'fakeram7_8192x8' ignored. Matches GDS_ALLOW_EMPTY.
+[WARNING] LEF Cell 'fakeram7_64x8' ignored. Matches GDS_ALLOW_EMPTY.
+Elapsed time: 8:34.69[h:]min:sec. CPU time: user 499.38 sys 13.00 (99%). Peak memory: 14721868KB.

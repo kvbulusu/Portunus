@@ -1,0 +1,10 @@
+[WARNING STA-1140] results/asap7/security/base/janus_kv_secure_subsystem_fast.lib line 1, library janus_kv_secure_subsystem already exists.
+[WARNING STA-1140] results/asap7/noc/base/axi4_crossbar_fast.lib line 1, library axi4_crossbar already exists.
+[WARNING STA-1140] results/asap7/ampo/base/ampo_top_fast.lib line 1, library ampo_top already exists.
+[WARNING STA-1140] results/asap7/agent_domain/base/agent_cluster_top_fast.lib line 1, library agent_cluster_top already exists.
+[WARNING STA-1140] results/asap7/user_domain/base/user_cluster_top_fast.lib line 1, library user_cluster_top already exists.
+[WARNING MPL-0074] -halo_width/-halo_height are deprecated, use the set_macro_base_halo command instead.
+[ERROR GUI-0056] Invalid syntax for -filter. Use -filter attribute=value.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 7200 x 4279.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 7200 x 4279.
+Elapsed time: 0:56.90[h:]min:sec. CPU time: user 118.12 sys 25.73 (252%). Peak memory: 1947748KB.

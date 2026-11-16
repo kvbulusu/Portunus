@@ -1,0 +1,8 @@
+[WARNING STA-1140] results/asap7/security/base/janus_kv_secure_subsystem_fast.lib line 1, library janus_kv_secure_subsystem already exists.
+[WARNING STA-1140] results/asap7/noc/base/axi4_crossbar_fast.lib line 1, library axi4_crossbar already exists.
+[WARNING STA-1140] results/asap7/ampo/base/ampo_top_fast.lib line 1, library ampo_top already exists.
+[WARNING STA-1140] results/asap7/agent_domain/base/agent_cluster_top_fast.lib line 1, library agent_cluster_top already exists.
+[WARNING STA-1140] results/asap7/user_domain/base/user_cluster_top_fast.lib line 1, library user_cluster_top already exists.
+[WARNING GUI-0066] Heat map "IR Drop" has not been populated with data.
+[WARNING GUI-0066] Heat map "Routing Congestion" has not been populated with data.
+Elapsed time: 1:36:46.73[h:]min:sec. CPU time: user 6342.58 sys 110.09 (111%). Peak memory: 59809844KB.

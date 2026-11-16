@@ -1,0 +1,113 @@
+[WARNING STA-1140] results/asap7/security/base/janus_kv_secure_subsystem_fast.lib line 1, library janus_kv_secure_subsystem already exists.
+[WARNING STA-1140] results/asap7/noc/base/axi4_crossbar_fast.lib line 1, library axi4_crossbar already exists.
+[WARNING STA-1140] results/asap7/ampo/base/ampo_top_fast.lib line 1, library ampo_top already exists.
+[WARNING STA-1140] results/asap7/agent_domain/base/agent_cluster_top_fast.lib line 1, library agent_cluster_top already exists.
+[WARNING STA-1140] results/asap7/user_domain/base/user_cluster_top_fast.lib line 1, library user_cluster_top already exists.
+[INFO DRT-0267] cpu time = 00:32:39, elapsed time = 00:02:30, memory = 18580.20 (MB), peak = 22889.47 (MB)
+[INFO DRT-0267] cpu time = 00:00:08, elapsed time = 00:00:02, memory = 19206.02 (MB), peak = 22889.47 (MB)
+[INFO DRT-0267] cpu time = 00:05:30, elapsed time = 00:01:14, memory = 24079.87 (MB), peak = 24573.98 (MB)
+[INFO DRT-0267] cpu time = 00:00:02, elapsed time = 00:00:02, memory = 25146.31 (MB), peak = 25144.70 (MB)
+[INFO DRT-0199]   Number of violations = 48795.
+[INFO DRT-0267] cpu time = 08:41:27, elapsed time = 00:44:47, memory = 37922.01 (MB), peak = 41535.59 (MB)
+[INFO DRT-0199]   Number of violations = 6974.
+[INFO DRT-0267] cpu time = 09:24:26, elapsed time = 00:51:06, memory = 38115.70 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 3916.
+[INFO DRT-0267] cpu time = 01:32:39, elapsed time = 00:12:59, memory = 37196.15 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 137.
+[INFO DRT-0267] cpu time = 00:33:53, elapsed time = 00:06:17, memory = 37065.45 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 10.
+[INFO DRT-0267] cpu time = 00:01:59, elapsed time = 00:01:02, memory = 37065.45 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 4.
+[INFO DRT-0267] cpu time = 00:01:33, elapsed time = 00:01:29, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 2.
+[INFO DRT-0267] cpu time = 00:02:20, elapsed time = 00:02:19, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 2.
+[INFO DRT-0267] cpu time = 00:00:01, elapsed time = 00:00:00, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:04:12, elapsed time = 00:00:20, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:01:07, elapsed time = 00:00:05, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:01:09, elapsed time = 00:00:05, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:06, elapsed time = 00:00:03, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:01:08, elapsed time = 00:00:05, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:01:13, elapsed time = 00:00:06, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:09, elapsed time = 00:00:02, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:01:09, elapsed time = 00:00:05, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:01:12, elapsed time = 00:00:06, memory = 37065.67 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:19, elapsed time = 00:00:04, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:01:11, elapsed time = 00:00:06, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:01:11, elapsed time = 00:00:06, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:19, elapsed time = 00:00:04, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:01:40, elapsed time = 00:00:08, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:01:39, elapsed time = 00:00:08, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:15, elapsed time = 00:00:03, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:02:35, elapsed time = 00:00:13, memory = 37071.68 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:18, elapsed time = 00:00:04, memory = 37072.66 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37072.66 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:00:00, elapsed time = 00:00:00, memory = 37072.66 (MB), peak = 41793.01 (MB)
+[INFO DRT-0199]   Number of violations = 1.
+[INFO DRT-0267] cpu time = 00:04:21, elapsed time = 00:00:20, memory = 37072.66 (MB), peak = 41793.01 (MB)
+[INFO DRT-0267] cpu time = 20:44:07, elapsed time = 02:02:45, memory = 37072.72 (MB), peak = 41793.01 (MB)
+[WARNING GRT-0246] No diode with LEF class CORE ANTENNACELL found.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 7200 x 4381.
+[WARNING GUI-0066] Heat map "Routing Congestion" has not been populated with data.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 7200 x 4381.
+Elapsed time: 2:14:22.78[h:]min:sec. CPU time: user 74794.21 sys 3630.22 (972%). Peak memory: 42900904KB.

@@ -61,6 +61,10 @@ try:
     from stage_timing_analyzer import parse_drc as _parse_drc  # type: ignore
 except Exception:  # pragma: no cover
     _parse_drc = None
+try:  # §247 ECO in force: violator counts / superseded route DRC
+    import eco_history as _eh  # type: ignore
+except Exception:  # pragma: no cover
+    _eh = None
 
 # ---------------------------------------------------------------------------
 # Stage model
@@ -915,14 +919,23 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
                              "hold_worst_slack": timing["hold_worst_slack"],
                              "violators": dict(timing["violators"])}
         sw, hw = eco.get("setup_ws"), eco.get("hold_ws")
+        # §247 violator counts of the ECO in force (JSON, else matching ECO
+        # log / pre-adoption janus_eco_<mode>.rpt) instead of "n/a"
+        sv, hv = (None, None)
+        if _eh is not None:
+            try:
+                sv, hv = _eh.adopted_violators(reports_dir, logs_dir)
+            except Exception:
+                sv, hv = None, None
         if sw is not None:
             timing["setup_worst_slack"] = sw
             timing["setup_wns"] = min(sw, 0.0)
             timing["setup_tns"] = eco.get("setup_tns")
-            timing["violators"]["setup"] = None if sw < 0 else 0
+            timing["violators"]["setup"] = sv if sv is not None else (None if sw < 0 else 0)
         if hw is not None:
             timing["hold_worst_slack"] = hw
-            timing["violators"]["hold"] = None if hw < 0 else 0
+            timing["hold_tns"] = eco.get("hold_tns")
+            timing["violators"]["hold"] = hv if hv is not None else (None if hw < 0 else 0)
         timing["source"] = "post-route ECO RCX"
         timing["source_file"] = ECO_ADOPTED_JSON
         timing["eco"] = eco
@@ -993,6 +1006,10 @@ def build_qor(block: str, status: str, logs_dir: Optional[str],
                    "source": "5_2_route.log (DRT-0199 last iteration)"}
     if drc is not None and failed in _STAGE_IDX and _STAGE_IDX[failed] < _STAGE_IDX["route"]:
         drc = None   # §197c: route DRC left by an older run
+    # §247: the in-force ECO re-ran detailed_route and counted the whole
+    # design; its DRC supersedes the pre-ECO 5_route_drc.rpt count.
+    if drc is not None and eco and isinstance(eco.get("drc"), int) and drc.get("total"):
+        drc = dict(drc, superseded_by_eco=eco["drc"])
     q["route_drc"] = drc
     ant = None
     for name, txt in (("drt_antennas.log", _read(os.path.join(reports_dir or "#", "drt_antennas.log"))),
@@ -1076,7 +1093,9 @@ def render_email_body(q: Dict[str, object]) -> str:
     v = t.get("violators") or {}
     L.append(f"  Setup      : worst slack {_f(t.get('setup_worst_slack'))}  WNS {_f(t.get('setup_wns'))}  "
              f"TNS {_f(t.get('setup_tns'))}  violators {_f(v.get('setup'), '{}')}")
-    L.append(f"  Hold       : worst slack {_f(t.get('hold_worst_slack'))}  violators {_f(v.get('hold'), '{}')}")
+    L.append(f"  Hold       : worst slack {_f(t.get('hold_worst_slack'))}"
+             + (f"  TNS {_f(t.get('hold_tns'))}" if t.get("hold_tns") is not None else "")
+             + f"  violators {_f(v.get('hold'), '{}')}")
     L.append(f"  Verdict    : {t.get('verdict') or 'UNKNOWN'}")
     if t.get("stale_dropped"):
         L.append(f"  NOTE       : {t['stale_dropped']} is "
@@ -1107,7 +1126,9 @@ def render_email_body(q: Dict[str, object]) -> str:
     drc = q.get("route_drc")
     if drc:
         bt = ", ".join(f"{k} {v}" for k, v in sorted((drc.get("by_type") or {}).items(), key=lambda kv: -kv[1])[:5])
-        L.append(f"  Route DRC  : {drc['total']}{' (' + bt + ')' if bt else ''} [{drc.get('source')}]")
+        L.append(f"  Route DRC  : {drc['total']}{' (' + bt + ')' if bt else ''} [{drc.get('source')}]"
+                 + (f" -> superseded: post-route ECO reroute DRC {drc['superseded_by_eco']} "
+                    f"[{ECO_ADOPTED_JSON}]" if drc.get("superseded_by_eco") is not None else ""))
     else:
         L.append("  Route DRC  : n/a (no 5_route_drc.rpt / DRT log)")
     a = q.get("antenna")

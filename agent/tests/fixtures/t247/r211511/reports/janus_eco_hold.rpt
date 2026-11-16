@@ -1,0 +1,225 @@
+Startpoint: fetch_enable_i (input port clocked by clk_user)
+Endpoint: u_user (rising edge-triggered flip-flop clocked by clk_user)
+Path Group: in2reg
+Path Type: min
+         569.00   slack (MET)
+Startpoint: gpio_in_i[0] (input port clocked by clk_user)
+Endpoint: u_periph/u_plic/g_gw[4].g_src.u_gw.sync_q[0]$_DFF_PN0_
+Path Group: in2reg
+Path Type: min
+         947.45   slack (MET)
+Startpoint: uart_rx_i (input port clocked by clk_user)
+Endpoint: u_periph/u_uart.rx_sync_q[0]$_DFF_PN1_
+Path Group: in2reg
+Path Type: min
+         947.89   slack (MET)
+Startpoint: gpio_in_i[2] (input port clocked by clk_user)
+Endpoint: u_periph/u_plic/g_gw[6].g_src.u_gw.sync_q[0]$_DFF_PN0_
+Path Group: in2reg
+Path Type: min
+         952.86   slack (MET)
+Startpoint: gpio_in_i[1] (input port clocked by clk_user)
+Endpoint: u_periph/u_plic/g_gw[5].g_src.u_gw.sync_q[0]$_DFF_PN0_
+Path Group: in2reg
+Path Type: min
+         955.51   slack (MET)
+Startpoint: gpio_in_i[3] (input port clocked by clk_user)
+Endpoint: u_periph/u_plic/g_gw[7].g_src.u_gw.sync_q[0]$_DFF_PN0_
+Path Group: in2reg
+Path Type: min
+         960.55   slack (MET)
+Startpoint: temp_sensor_i[7] (input port clocked by clk_agent)
+Endpoint: u_thermal.temp_q[7]$_DFFE_PN0P_
+Path Group: in2reg
+Path Type: min
+        1419.44   slack (MET)
+Startpoint: temp_sensor_i[8] (input port clocked by clk_agent)
+Endpoint: u_thermal.temp_q[8]$_DFFE_PN0P_
+Path Group: in2reg
+Path Type: min
+        1419.53   slack (MET)
+Startpoint: temp_sensor_i[10] (input port clocked by clk_agent)
+Endpoint: u_thermal.temp_q[10]$_DFFE_PN0P_
+Path Group: in2reg
+Path Type: min
+        1421.25   slack (MET)
+Startpoint: temp_sensor_i[11] (input port clocked by clk_agent)
+Endpoint: u_thermal.temp_q[11]$_DFFE_PN0P_
+Path Group: in2reg
+Path Type: min
+        1422.34   slack (MET)
+Startpoint: u_periph/tensor_boost_o$_DFF_PN0_
+Endpoint: tensor_boost_o (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: min
+         984.05   slack (MET)
+Startpoint: u_periph/u_sysctrl.sys_state_o[1]$_DFFE_PN0P_
+Endpoint: gpio_out_o[1] (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: min
+        1054.10   slack (MET)
+Startpoint: u_periph/u_sysctrl.sys_state_o[1]$_DFFE_PN0P_
+Endpoint: sys_state_o[1] (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: min
+        1054.14   slack (MET)
+Startpoint: u_periph/u_sysctrl.sys_state_o[0]$_DFFE_PN1P_
+Endpoint: gpio_out_o[0] (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: min
+        1058.08   slack (MET)
+Startpoint: u_periph/u_sysctrl.sys_state_o[0]$_DFFE_PN1P_
+Endpoint: sys_state_o[0] (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: min
+        1058.16   slack (MET)
+Startpoint: u_periph/u_sysctrl.boot_src_o$_DFFE_PN0P_
+Endpoint: boot_src_o (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: min
+        1061.63   slack (MET)
+Startpoint: u_periph/u_sysctrl.boot_src_o$_DFFE_PN0P_
+Endpoint: gpio_out_o[3] (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: min
+        1062.23   slack (MET)
+Startpoint: u_periph/u_uart.tx_shift_q[0]$_DFFE_PN1P_
+Endpoint: uart_tx_o (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: min
+        1065.00   slack (MET)
+Startpoint: u_periph/u_sysctrl.sys_state_o[2]$_DFFE_PN0P_
+Endpoint: gpio_out_o[2] (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: min
+        1065.68   slack (MET)
+Startpoint: u_periph/u_sysctrl.sys_state_o[2]$_DFFE_PN0P_
+Endpoint: sys_state_o[2] (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: min
+        1065.77   slack (MET)
+Startpoint: u_ucut_s3n.u_w/g_egress.g_e[0].ent_q[100]$_DFFE_PN0P_
+Endpoint: u_user (rising edge-triggered flip-flop clocked by clk_user)
+Path Group: reg2reg
+Path Type: min
+          -7.31   slack (VIOLATED)
+Startpoint: u_ucut_npu/u_r.m_data_o[78]$_DFFE_PN0P_
+Endpoint: u_user (rising edge-triggered flip-flop clocked by clk_user)
+Path Group: reg2reg
+Path Type: min
+          -3.78   slack (VIOLATED)
+Startpoint: u_periph/u_kv_key_csr/prov_key_o[94]$_DFFE_PN0P_
+Endpoint: u_kv_secure_subsystem
+Path Group: reg2reg
+Path Type: min
+           5.48   slack (MET)
+Startpoint: u_ucut_s3n.u_w/g_egress.g_e[0].ent_q[82]$_DFFE_PN0P_
+Endpoint: u_user (rising edge-triggered flip-flop clocked by clk_user)
+Path Group: reg2reg
+Path Type: min
+           5.51   slack (MET)
+Startpoint: u_ucut_s3n.u_w/g_egress.g_e[1].ent_q[68]$_DFFE_PN0P_
+Endpoint: u_user (rising edge-triggered flip-flop clocked by clk_user)
+Path Group: reg2reg
+Path Type: min
+           6.37   slack (MET)
+Startpoint: u_periph/u_kv_key_csr/prov_key_o[81]$_DFFE_PN0P_
+Endpoint: u_kv_secure_subsystem
+Path Group: reg2reg
+Path Type: min
+           6.37   slack (MET)
+Startpoint: u_ucut_s3n.u_ar/g_egress.g_e[2].ent_q[66]$_DFFE_PN0P_
+Endpoint: u_user (rising edge-triggered flip-flop clocked by clk_user)
+Path Group: reg2reg
+Path Type: min
+           6.71   slack (MET)
+Startpoint: u_periph/u_kv_key_csr/prov_key_o[250]$_DFFE_PN0P_
+Endpoint: u_kv_secure_subsystem
+Path Group: reg2reg
+Path Type: min
+           6.79   slack (MET)
+Startpoint: u_periph/u_jobsched/u_arbiter.l_job_q[100]$_DFF_PN0_
+Endpoint: u_user (rising edge-triggered flip-flop clocked by clk_user)
+Path Group: reg2reg
+Path Type: min
+           6.89   slack (MET)
+Startpoint: u_ucut_mn.u_r/g_egress.g_e[0].ent_q[2]$_DFFE_PN0P_
+Endpoint: u_user (rising edge-triggered flip-flop clocked by clk_user)
+Path Group: reg2reg
+Path Type: min
+           7.19   slack (MET)
+Startpoint: tensor_phase_i[0] (input port clocked by clk_user)
+Endpoint: u_periph/phase_ext_a0[0]$_DFF_PN0_
+Path Group: in2reg
+Path Type: max
+        1128.31   slack (MET)
+Startpoint: tensor_phase_i[1] (input port clocked by clk_user)
+Endpoint: u_periph/phase_ext_a0[1]$_DFF_PN0_
+Path Group: in2reg
+Path Type: max
+        1128.70   slack (MET)
+Startpoint: tensor_phase_valid_i (input port clocked by clk_user)
+Endpoint: u_periph/phase_ext_valid_a0$_DFF_PN0_
+Path Group: in2reg
+Path Type: max
+        1132.73   slack (MET)
+Startpoint: gpio_in_i[3] (input port clocked by clk_user)
+Endpoint: u_periph/u_plic/g_gw[7].g_src.u_gw.sync_q[0]$_DFF_PN0_
+Path Group: in2reg
+Path Type: max
+        1577.64   slack (MET)
+Startpoint: gpio_in_i[2] (input port clocked by clk_user)
+Endpoint: u_periph/u_plic/g_gw[6].g_src.u_gw.sync_q[0]$_DFF_PN0_
+Path Group: in2reg
+Path Type: max
+        1592.55   slack (MET)
+Startpoint: u_user (rising edge-triggered flip-flop clocked by clk_user)
+Endpoint: ara_busy_o (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: max
+         170.23   slack (MET)
+Startpoint: u_debug.i_dm_top.i_dm_csrs/hartsel_o[2]$_DFFE_PN0P_
+Endpoint: agent_core_sleep_o[2] (output port clocked by clk_agent)
+Path Group: reg2out
+Path Type: max
+        1121.14   slack (MET)
+Startpoint: u_periph/u_sysctrl.boot_mode_o[1]$_DFFE_PN0P_
+Endpoint: boot_mode_o[1] (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: max
+        1448.47   slack (MET)
+Startpoint: u_periph/u_uart.tx_busy_q$_DFF_PN0_
+Endpoint: uart_tx_o (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: max
+        1456.86   slack (MET)
+Startpoint: u_periph/u_sysctrl.boot_mode_o[0]$_DFFE_PN0P_
+Endpoint: boot_mode_o[0] (output port clocked by clk_user)
+Path Group: reg2out
+Path Type: max
+        1467.57   slack (MET)
+Startpoint: u_user (rising edge-triggered flip-flop clocked by clk_user)
+Endpoint: u_ucut_mn.u_r/g_egress.mr_q$_DFF_PN0_
+Path Group: reg2reg
+Path Type: max
+         -68.67   slack (VIOLATED)
+Startpoint: u_ucut_npun/u_aw.m_data_o[55]$_DFFE_PN0P_
+Endpoint: u_ucut_npun/u_aw.m_data_o[19]$_DFFE_PN0P_
+Path Group: reg2reg
+Path Type: max
+          61.52   slack (MET)
+Startpoint: u_ucut_npun/u_aw.m_data_o[55]$_DFFE_PN0P_
+Endpoint: u_ucut_npun/u_aw.m_data_o[20]$_DFFE_PN0P_
+Path Group: reg2reg
+Path Type: max
+          61.77   slack (MET)
+Startpoint: u_ucut_npun/u_aw.m_data_o[55]$_DFFE_PN0P_
+Endpoint: u_ucut_npun/u_aw.m_data_o[10]$_DFFE_PN0P_
+Path Group: reg2reg
+Path Type: max
+          65.05   slack (MET)
+Startpoint: u_ucut_npun/u_aw.m_data_o[55]$_DFFE_PN0P_
+Endpoint: u_ucut_npun/u_aw.m_data_o[18]$_DFFE_PN0P_
+Path Group: reg2reg
+Path Type: max
+          83.01   slack (MET)
