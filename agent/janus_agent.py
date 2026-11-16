@@ -2808,6 +2808,54 @@ class JANUSAutonomousAgent:
             self._archive_golden(b, res)
         return rc_all
 
+    def _eco_hold_only(self) -> int:
+        """§246 --eco-hold-only: ONE more post-route hold ECO on each --blocks
+        block's EXISTING (possibly already ECO'd) 6_final.{odb,spef}; if
+        adopted, re-run abstract, sign-off and golden. No stamp check, no
+        build. soc_top 20261114_200411: the in-flow hold ECO took -170.6 ->
+        -7.31 ps (2 endpoints, TNS -11.1, DRC 0); a second pass starts from
+        that result's fresh RCX SPEF instead of a 12 h rebuild. Note: a second
+        adoption overwrites *.preeco with the first ECO's result.
+        Exit 0 = adopted for all, 5 = discarded, 3 = no routed odb."""
+        blocks = list(self.args.blocks or [])
+        if not blocks:
+            self.ui.err("--eco-hold-only needs --blocks <block> (e.g. --blocks janus_soc_top)")
+            return 2
+        os.makedirs(self.run_dir, exist_ok=True)
+        rc_all = 0
+        for b in blocks:
+            if b not in self.results:
+                self.results[b] = BlockResult(block=b)
+            res = self.results[b]
+            if not self._find_routed_odb(b):
+                self.ui.err(f"{b}: no routed .odb (block must have finished routing)")
+                rc_all = rc_all or 3
+                continue
+            self._classify_timing(b)
+            eco0 = self._eco_adopted_timing(b)   # §150: fallback baseline = RCX of the ECO'd 6_final in force
+            if eco0:
+                if eco0.get("setup_ws") is not None:
+                    res.wns_ns = eco0["setup_ws"]
+                if eco0.get("hold_ws") is not None:
+                    res.hold_ps = eco0["hold_ws"]
+                res.timing_source = eco0.get("source")
+            note0 = res.note
+            self._eco_pass_orfs(b, "hold", res.wns_ns, res.hold_ps)
+            if self.args.dry_run:
+                continue
+            if res.note == note0:              # _eco_pass_orfs appends only on adopt
+                rc_all = rc_all or 5
+                continue
+            res.status = "DONE"
+            self._run_abstract(b)
+            try:
+                self.args.no_signoff = False
+                self._run_signoff(b)
+            except Exception as e:
+                self.ui.warn(f"{b}: sign-off after hold ECO failed: {e}")
+            self._archive_golden(b, res)
+        return rc_all
+
     @staticmethod
     def _eco_setup_gain_hold_lost(eco: ECOResult, b_setup: Optional[float],
                                   b_hold: Optional[float]) -> bool:
@@ -4601,6 +4649,8 @@ class JANUSAutonomousAgent:
             return self._signoff_only()
         if getattr(self.args, "eco_drv_only", False):
             return self._eco_drv_only()
+        if getattr(self.args, "eco_hold_only", False):
+            return self._eco_hold_only()
         if getattr(self.args, "abstract_only", False):
             return self._abstract_only()
         self._preflight()
@@ -6180,7 +6230,7 @@ _RESUME_FROM_IDX = {"1_synth": 0, "2_floorplan": 1, "3_place": 2, "4_cts": 3,
                     "5_route": 4, "6_final": 6}
 
 _EXCLUSIVE_MODES = ("status", "gc", "gc_dry_run", "resume_preview", "estimate",
-                    "signoff_only", "triage_slew", "eco_drv_only", "abstract_only")
+                    "signoff_only", "triage_slew", "eco_drv_only", "eco_hold_only", "abstract_only")
 _ADAPTIVE_MAX_PASSES_CAP = 5
 
 
@@ -6481,6 +6531,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="§183: run ONLY the max-slew ECO on the EXISTING routed result "
                         "of each --blocks block; if adopted, re-run abstract, sign-off "
                         "and golden. Exit 0 adopted, 5 discarded, 3 no routed odb.")
+    p.add_argument("--eco-hold-only", action="store_true",
+                   help="§246: run ONE more post-route hold ECO on the EXISTING "
+                        "(possibly already ECO'd) 6_final of each --blocks block "
+                        "(margin JANUS_ECO_HOLD_MARGIN_PS); if adopted, re-run "
+                        "abstract, sign-off and golden. Exit 0 adopted, 5 "
+                        "discarded, 3 no routed odb.")
     p.add_argument("--abstract-only", action="store_true",
                    help="§202: regenerate ONLY the .lef/.lib abstract of each --blocks "
                         "block from its EXISTING 6_final (one openroad session per "
