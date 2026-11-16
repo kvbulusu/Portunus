@@ -15,7 +15,7 @@ def _wire(a, res, calls, adopt):
     a._find_routed_odb = lambda b: str(res / "6_final.odb")
     a._classify_timing = lambda b: None
 
-    def _pass(b, mode, s, h):
+    def _pass(b, mode, s, h, strategy="repair"):          # §248 strategy kw
         calls.append(mode)
         if adopt:
             a.results[b].note += "  +eco(hold) RCX WS -68.7/+3.1"

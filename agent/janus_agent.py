@@ -2357,6 +2357,21 @@ class JANUSAutonomousAgent:
 
     _ECO_HOLD_MIN_GAIN_PS = 20.0  # §228 partial hold-pass adoption threshold
 
+    def _eco_hold_only_strategy(self, block: str) -> str:
+        """§248 --eco-hold-only strategy: "repair" (repair_timing -hold with
+        JANUS_ECO_HOLD_MARGIN_PS, §246) or "pin" (pad ONLY the RCX hold
+        violators' input pins, no repair_timing; janus_hold_pin_pad). Knob
+        JANUS_ECO_HOLD_ONLY_STRATEGY (post-flow, no restamp); unknown -> repair."""
+        v = (self._janus_knob(block, "JANUS_ECO_HOLD_ONLY_STRATEGY") or "").strip().lower()
+        return v if v in ("repair", "pin") else "repair"
+
+    def _eco_pin_target(self, block: str) -> Optional[float]:
+        v = self._janus_knob(block, "JANUS_ECO_HOLD_PIN_TARGET_PS")
+        try:
+            return float(v) if v else 30.0
+        except ValueError:
+            return 30.0
+
     def _eco_hold_min_gain(self, block: str) -> float:
         """§228: min hold-WNS gain (ps) for keeping a hold ECO that does not
         close hold. Override with JANUS_ECO_HOLD_MIN_GAIN_PS (<= 0 disables)."""
@@ -2486,7 +2501,8 @@ class JANUSAutonomousAgent:
 
     def _run_eco_orfs(self, block: str, mode: str, in_odb: str = "6_final.odb",
                       in_spef: Optional[str] = None,
-                      tag_mode: Optional[str] = None) -> Tuple[ECOResult, Dict[str, str]]:
+                      tag_mode: Optional[str] = None,
+                      extra: Optional[List[str]] = None) -> Tuple[ECOResult, Dict[str, str]]:
         """One ECO pass (hold|setup) via ORFS `make run` on results/<in_odb>
         (default 6_final.odb; §163 chains a hold pass on janus_eco_setup.odb).
         Writes janus_eco_<tag_mode or mode>.{odb,spef,def,v} beside it; never
@@ -2512,6 +2528,7 @@ class JANUSAutonomousAgent:
                    f"JANUS_OUT_DEF={outs['def']}", f"JANUS_OUT_V={outs['v']}",
                    f"JANUS_PR_RPT={os.path.join(rpt_dir, tag + '.rpt')}",
                    f"JANUS_PR_DRC_RPT={os.path.join(rpt_dir, tag + '_drc.rpt')}"]
+        targets += list(extra or [])          # §248 e.g. JANUS_PR_HOLD_STRATEGY=pin
         if mode == "drv":
             targets += [f"JANUS_PR_DRV_MAX_WIRE_UM={self._eco_drv_max_wire_um(block)}",
                         f"JANUS_PR_DRV_SCOPE={self._eco_drv_scope(block)}"]
@@ -2631,8 +2648,11 @@ class JANUSAutonomousAgent:
                 "source": f"post-route ECO RCX (janus_eco_{mode})",
                 "at": datetime.now().isoformat(timespec="seconds")}
         if mode == "hold":
+            strategy = getattr(self, "_eco_strategy", "repair")
+            body["strategy"] = strategy
             try:
-                body["margin"] = float(self._eco_hold_margin(block))
+                body["margin"] = (self._eco_pin_target(block) if strategy == "pin"
+                                  else float(self._eco_hold_margin(block)))
             except Exception:                     # knob lookup never blocks the record
                 body["margin"] = None
         try:
@@ -2657,12 +2677,18 @@ class JANUSAutonomousAgent:
                 lg = _eh.parse_eco_log(os.path.join(self._logs_dir(block) or "#",
                                                     f"janus_eco_{mode}.log"))
                 err = _eh.short_error(err, int(lg.get("open_nets") or 0))
+            strategy = getattr(self, "_eco_strategy", "repair") if mode == "hold" else None
             try:
-                margin = float(self._eco_hold_margin(block)) if mode == "hold" else None
+                if mode != "hold":
+                    margin = None
+                elif strategy == "pin":
+                    margin = self._eco_pin_target(block)
+                else:
+                    margin = float(self._eco_hold_margin(block))
             except Exception:
                 margin = None
             ent = {"mode": mode, "verdict": verdict, "why": (why or "")[:300],
-                   "error": err, "margin": margin,
+                   "error": err, "margin": margin, "strategy": strategy,
                    "wall_s": round(time.time() - t0, 1) if t0 else None,
                    "t": time.time(), "at": datetime.now().isoformat(timespec="seconds"),
                    "pre": {"setup_ws": g("pre_setup"), "setup_tns": g("pre_setup_tns"),
@@ -2671,7 +2697,7 @@ class JANUSAutonomousAgent:
                    "post": {"setup_ws": g("setup_wns"), "setup_tns": g("setup_tns"),
                             "setup_viol": g("setup_viol"), "hold_ws": g("hold_wns"),
                             "hold_tns": g("hold_tns"), "hold_viol": g("hold_viol"),
-                            "drc": g("drc")}}
+                            "drc": g("drc"), "slew_viol": g("slew_viol")}}
             _eh.append_history(rep, ent)
         except Exception as e:                       # never fatal
             self.ui.debug(f"{block}: eco history append failed: {e}")
@@ -2698,15 +2724,24 @@ class JANUSAutonomousAgent:
         return d
 
     def _eco_pass_orfs(self, block: str, mode: str, setup: Optional[float],
-                       hold: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
+                       hold: Optional[float],
+                       strategy: str = "repair") -> Tuple[Optional[float], Optional[float]]:
         """Run + judge one pass. Before = JANUS_PR_PRE (same session, same
         6_final.spef) when present, else the 6_finish numbers. Returns the
         (setup, hold) in force afterwards."""
         res = self.results[block]
-        self._eco_log(block, f"{mode} ECO via ORFS make run (hold margin "
-                             f"{self._eco_hold_margin(block)} ps, incremental reroute + RCX)")
+        pin = mode == "hold" and strategy == "pin"
+        if pin:
+            self._eco_log(block, f"{mode} ECO via ORFS make run (§248 strategy pin: pad only "
+                                 f"RCX hold violators to +{self._eco_pin_target(block):g} ps, "
+                                 "no repair_timing, incremental reroute + RCX)")
+        else:
+            self._eco_log(block, f"{mode} ECO via ORFS make run (hold margin "
+                                 f"{self._eco_hold_margin(block)} ps, incremental reroute + RCX)")
         t0 = time.time()
-        eco, outs = self._run_eco_orfs(block, mode)
+        self._eco_strategy = strategy if mode == "hold" else "repair"
+        eco, outs = self._run_eco_orfs(block, mode,
+                                       extra=["JANUS_PR_HOLD_STRATEGY=pin"] if pin else None)
         b_setup = eco.pre_setup if eco.pre_setup is not None else setup
         b_hold = eco.pre_hold if eco.pre_hold is not None else hold
         verdict, why = decide_timing(before_setup=b_setup, before_hold=b_hold, after=eco)
@@ -2898,7 +2933,8 @@ class JANUSAutonomousAgent:
                     res.hold_ps = eco0["hold_ws"]
                 res.timing_source = eco0.get("source")
             note0 = res.note
-            self._eco_pass_orfs(b, "hold", res.wns_ns, res.hold_ps)
+            strategy = self._eco_hold_only_strategy(b)   # §248
+            self._eco_pass_orfs(b, "hold", res.wns_ns, res.hold_ps, strategy=strategy)
             if self.args.dry_run:
                 continue
             if res.note == note0:              # _eco_pass_orfs appends only on adopt
