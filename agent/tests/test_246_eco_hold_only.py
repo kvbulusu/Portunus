@@ -65,11 +65,12 @@ def test_eco_hold_only_parser_and_exclusive():
     assert "eco_hold_only" in ja._EXCLUSIVE_MODES
 
 
-def test_soc_top_eco_hold_margin_25():
+def test_soc_top_eco_hold_margin_10_after_247():
+    """§246 set 25; §247 back to 10 (25 on the ECO'd 6_final -> DRT-0206, 370 opens)."""
     with open(os.path.join(_ROOT, "asic_flow", "configs", "janus_soc_top.mk")) as fh:
         mk = fh.read()
     m = re.search(r"^export\s+JANUS_ECO_HOLD_MARGIN_PS\s*=\s*(\S+)", mk, re.M)
-    assert m and float(m.group(1)) == 25.0
+    assert m and float(m.group(1)) == 10.0
 
 
 def test_sr_apply_eco_rewrites_stale_subject_and_body():

@@ -1,0 +1,12 @@
+tns max -65.97
+wns max -65.97
+worst slack max -65.97
+ 808.08 setup skew
+3040.19 setup skew
+ 544.07 setup skew
+  60.70 setup skew
+max slew violation count 277
+max fanout violation count 0
+max cap violation count 0
+setup violation count 1
+hold violation count 422

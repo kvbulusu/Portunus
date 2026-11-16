@@ -1,0 +1,4 @@
+[janus-eco] 06:16:06 post-route ECO start: setup WS -65.97 ps, hold WS -170.59 ps (6_finish RCX)
+[janus-eco] 06:16:06 hold ECO via ORFS make run (hold margin 10 ps, incremental reroute + RCX)
+[janus-eco] 08:28:43 hold ECO ADOPTED — hold IMPROVED -170.591->-7.313 ps (gain 163.28); setup -65.967->-68.674 ps (loss 2.71 <= allowance 14.03, K 2) (drc 0); 6_final.{odb,spef,def,v,gds} replaced, *.preeco kept
+[janus-eco] 08:28:43 setup ECO NOT attempted — hold still -7.313 ps (hold is closed first)

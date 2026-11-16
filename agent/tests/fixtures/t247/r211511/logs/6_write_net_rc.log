@@ -1,0 +1,25 @@
+[WARNING STA-1140] results/asap7/security/base/janus_kv_secure_subsystem_slow.lib line 1, library janus_kv_secure_subsystem already exists.
+[WARNING STA-1140] results/asap7/noc/base/axi4_crossbar_slow.lib line 1, library axi4_crossbar already exists.
+[WARNING STA-1140] results/asap7/ampo/base/ampo_top_slow.lib line 1, library ampo_top already exists.
+[WARNING STA-1140] results/asap7/agent_domain/base/agent_cluster_top_slow.lib line 1, library agent_cluster_top already exists.
+[WARNING STA-1140] results/asap7/user_domain/base/user_cluster_top_slow.lib line 1, library user_cluster_top already exists.
+[WARNING EST-0026] Missing route to pin u_cdc_agent.u_r/_07598_/Y in net u_cdc_agent.u_r/_03213_.
+[WARNING EST-0026] Missing route to pin u_cdc_agent.u_w/_08520_/A in net u_cdc_agent.u_w/_00344_.
+[WARNING EST-0026] Missing route to pin u_cdc_agent.u_w/_08520_/Y in net u_cdc_agent.u_w/_04188_.
+[WARNING EST-0026] Missing route to pin u_cdc_agent.u_w/_07767_/B in net u_cdc_agent.u_w/net83480.
+[WARNING EST-0026] Missing route to pin u_periph/u_kv_key_csr/_2491_/A2 in net u_periph/u_kv_key_csr/net80595.
+[WARNING EST-0026] Missing route to pin u_periph/u_kv_key_csr/_2618_/A in net u_periph/u_kv_key_csr/_0142_.
+[WARNING EST-0026] Missing route to pin u_periph/u_kv_key_csr/_2618_/Y in net u_periph/u_kv_key_csr/_1278_.
+[WARNING EST-0026] Missing route to pin u_ucut_mn.u_ar/_1649_/Y in net u_ucut_mn.u_ar/_1389_.
+[WARNING EST-0026] Missing route to pin u_ucut_mn.u_w/_3768_/A in net u_ucut_mn.u_w/_0071_.
+[WARNING EST-0026] Missing route to pin u_ucut_mn.u_w/_3861_/B in net u_ucut_mn.u_w/_0355_.
+[WARNING EST-0026] Missing route to pin u_ucut_mn.u_w/_3768_/Y in net u_ucut_mn.u_w/_1936_.
+[WARNING EST-0026] Missing route to pin u_ucut_mn.u_w/_3861_/Y in net u_ucut_mn.u_w/_2017_.
+[WARNING EST-0026] Missing route to pin u_ucut_mn.u_w/hold107711/Y in net u_ucut_mn.u_w/net107706.
+[WARNING EST-0026] Missing route to pin u_ucut_s1/_5014_/A1 in net u_ucut_s1/_2243_.
+[WARNING EST-0026] Missing route to pin u_ucut_mn.u_aw/g_ingress.g_e\[0\].ent_q\[29\]$_DFFE_PN0P__12462/H in net net12461.
+[WARNING EST-0026] Missing route to pin u_ucut_npun/u_w.m_data_o\[32\]$_DFFE_PN0P__15850/H in net net15849.
+[WARNING EST-0026] Missing route to pin u_ucut_s1/u_w.g_skid.skid_data_q\[141\]$_DFFE_PN0P__16401/H in net net16400.
+[WARNING EST-0026] Missing route to pin u_ucut_mn.u_ar/hold112822/Y in net u_ucut_mn.u_ar/net112817.
+[WARNING EST-0026] Missing route to pin u_ucut_npu/hold116925/A in net u_ucut_npu/net123478.
+Elapsed time: 2:47.74[h:]min:sec. CPU time: user 154.72 sys 7.06 (96%). Peak memory: 17207056KB.

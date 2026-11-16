@@ -1,0 +1,28 @@
+[WARNING STA-1140] results/asap7/security/base/janus_kv_secure_subsystem_fast.lib line 1, library janus_kv_secure_subsystem already exists.
+[WARNING STA-1140] results/asap7/noc/base/axi4_crossbar_fast.lib line 1, library axi4_crossbar already exists.
+[WARNING STA-1140] results/asap7/ampo/base/ampo_top_fast.lib line 1, library ampo_top already exists.
+[WARNING STA-1140] results/asap7/agent_domain/base/agent_cluster_top_fast.lib line 1, library agent_cluster_top already exists.
+[WARNING STA-1140] results/asap7/user_domain/base/user_cluster_top_fast.lib line 1, library user_cluster_top already exists.
+[INFO RSZ-0034] Found 681 slew violations.
+[INFO RSZ-0036] Found 145 capacitance violations.
+[INFO RSZ-0037] Found 580 long wires.
+[INFO RSZ-0039] Resized 20 instances.
+[INFO RSZ-0038] Inserted 2073 buffers in 679 nets.
+[INFO RSZ-0034] Found 348 slew violations.
+[INFO RSZ-0037] Found 291 long wires.
+[INFO RSZ-0038] Inserted 538 buffers in 348 nets.
+[INFO RSZ-0034] Found 112 slew violations.
+[INFO RSZ-0037] Found 85 long wires.
+[INFO RSZ-0038] Inserted 153 buffers in 112 nets.
+[INFO RSZ-0034] Found 26 slew violations.
+[INFO RSZ-0037] Found 20 long wires.
+[INFO RSZ-0038] Inserted 27 buffers in 26 nets.
+[INFO RSZ-0098] No setup violations found
+[INFO RSZ-0034] Found 21 slew violations.
+[INFO RSZ-0037] Found 17 long wires.
+[INFO RSZ-0038] Inserted 21 buffers in 21 nets.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 7200 x 4381.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 7200 x 4381.
+[WARNING GUI-0066] Heat map "Placement Density" has not been populated with data.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 7200 x 4381.
+Elapsed time: 11:58.88[h:]min:sec. CPU time: user 977.90 sys 75.18 (146%). Peak memory: 14581160KB.

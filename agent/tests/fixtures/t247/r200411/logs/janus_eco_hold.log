@@ -1,0 +1,88 @@
+JANUS_PR loader orfs 6_final.odb
+JANUS_PR_BEGIN hold
+JANUS_PR parasitics spef /home/ubuntu/projects/janus/janus-ai-soc/asic_flow/OpenROAD-flow-scripts/flow/results/asap7/janus_soc_top/base/6_final.spef
+JANUS_PR_PRE setup wns -65.967
+JANUS_PR_PRE setup tns -65.967
+JANUS_PR_PRE hold wns -170.591
+JANUS_PR_PRE hold tns -15532.366
+JANUS_PR_PRE hold viol 422
+JANUS_PR hold_pad start cell BUFx2_ASAP7_75t_SL scope macro target 10 guard 50 max_stages 24 pins 64
+JANUS_PR hold_pad pin u_user/npu_l_job_i[25] hold -170.590546 -> -174.451569 setup 1288.178955 -> 1280.457520 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[38] hold -163.838272 -> -167.431961 setup 1469.968140 -> 1464.583130 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[28] hold -162.956985 -> -164.896988 setup 1415.061401 -> 1405.579712 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[23] hold -160.505615 -> -160.779053 setup 1520.126221 -> 1511.744995 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[44] hold -154.685593 -> -158.772446 setup 1472.498535 -> 1464.763916 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[8] hold -154.248062 -> -160.970245 setup 1506.478516 -> 1504.336182 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[27] hold -148.632660 -> -158.061127 setup 1407.354248 -> 1403.478271 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[14] hold -144.006699 -> -144.161011 setup 1491.617554 -> 1484.072021 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[30] hold -143.436813 -> -151.358597 setup 1388.957886 -> 1384.256226 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[13] hold -139.970810 -> -150.451874 setup 1426.707642 -> 1427.920044 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[26] hold -139.270035 -> -149.399597 setup 1379.053345 -> 1376.658325 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[42] hold -139.255386 -> -153.311813 setup 1421.257812 -> 1425.665405 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[29] hold -137.570175 -> -152.738052 setup 1431.683716 -> 1436.604126 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[22] hold -137.559631 -> -146.027191 setup 1424.255371 -> 1424.942871 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[15] hold -134.631866 -> -137.030060 setup 1427.243652 -> 1421.304810 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[12] hold -134.455673 -> -137.912231 setup 1430.205688 -> 1425.313232 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[47] hold -132.387436 -> -144.442795 setup 1395.269653 -> 1393.570190 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[41] hold -129.861893 -> -141.951340 setup 1391.471436 -> 1393.902832 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[40] hold -126.667786 -> -142.169724 setup 1398.608765 -> 1404.587524 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[24] hold -122.505898 -> -137.580719 setup 1336.209839 -> 1337.224609 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[16] hold -119.885437 -> -125.595200 setup 1362.641113 -> 1359.065796 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[11] hold -118.627106 -> -123.320023 setup 1430.214600 -> 1425.225708 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[45] hold -113.277496 -> -120.359612 setup 1228.916992 -> 1221.922119 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[46] hold -108.717369 -> -117.459930 setup 1346.736450 -> 1345.965576 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[43] hold -103.367538 -> -113.895447 setup 1326.359497 -> 1323.858398 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[167] hold -101.898712 -> -110.195961 setup 1784.518799 -> 1780.222656 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/mailbox_irq_i hold -91.626816 -> -97.701843 setup 2251.386963 -> 2247.097900 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[32] hold -90.519478 -> -109.694252 setup 1316.967407 -> 1323.998291 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[129] hold -89.573906 -> 14.159562 setup 1738.359253 -> 1564.814087 bufs 12 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[166] hold -87.566399 -> 16.585178 setup 1642.915161 -> 1470.132935 bufs 12 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[206] hold -85.989662 -> 17.049473 setup 1648.172729 -> 1474.177246 bufs 12 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[205] hold -85.551346 -> 10.678348 setup 1659.517456 -> 1499.051147 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[164] hold -85.180305 -> -104.402710 setup 1792.762817 -> 1798.457886 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[144] hold -85.155327 -> 10.076162 setup 1708.944580 -> 1547.972900 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_l_job_i[18] hold -84.115601 -> 12.231105 setup 1370.229248 -> 1192.361328 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_l_job_i[33] hold -83.727356 -> 11.582291 setup 1372.217407 -> 1209.313965 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[174] hold -83.456573 -> -97.255646 setup 1687.090088 -> 1690.658325 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_m_s2m_i[50] hold -83.428490 -> 16.113111 setup 2490.089600 -> 2318.748779 bufs 12 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[138] hold -82.820976 -> 12.592594 setup 1732.819702 -> 1573.912964 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[140] hold -82.816528 -> -102.555298 setup 1752.479492 -> 1762.734863 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[207] hold -81.256554 -> 14.856339 setup 1629.814941 -> 1470.040527 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[139] hold -81.061493 -> 15.271339 setup 1636.273315 -> 1473.706909 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[69] hold -81.046944 -> -89.212418 setup 1686.550903 -> 1686.439453 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[196] hold -79.991455 -> 16.218138 setup 1658.140747 -> 1498.147339 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[142] hold -79.925514 -> 16.817659 setup 1640.322144 -> 1469.580078 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[130] hold -79.607880 -> -104.426025 setup 1877.765503 -> 1894.180786 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[199] hold -79.514954 -> 16.095570 setup 1630.247070 -> 1470.054321 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[208] hold -79.174110 -> 17.335022 setup 1624.562744 -> 1463.412109 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[147] hold -78.518417 -> 17.377655 setup 1633.066162 -> 1472.604736 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[145] hold -77.806870 -> 16.691759 setup 1619.179932 -> 1458.118530 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[203] hold -77.613693 -> -100.510818 setup 1894.461060 -> 1907.269409 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_l_job_i[75] hold -77.062355 -> -77.287064 setup 1047.506470 -> 1033.769043 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[149] hold -77.042595 -> -108.341888 setup 1822.821045 -> 1842.932495 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[170] hold -76.937675 -> 18.481106 setup 1711.398193 -> 1550.482910 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[151] hold -76.644249 -> 17.952084 setup 1641.247559 -> 1481.913208 bufs 11 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[217] hold -76.515129 -> 11.223467 setup 1745.924316 -> 1599.224731 bufs 10 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[195] hold -76.192833 -> 11.831203 setup 1635.535767 -> 1487.872559 bufs 10 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[134] hold -75.773277 -> 12.022827 setup 1733.778442 -> 1586.276855 bufs 10 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[216] hold -75.537575 -> 12.505108 setup 1788.130493 -> 1639.195923 bufs 10 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[218] hold -75.340843 -> 10.280221 setup 1615.437622 -> 1472.567017 bufs 10 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[215] hold -74.680260 -> 12.349899 setup 1719.506348 -> 1575.195923 bufs 10 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[148] hold -74.467651 -> 12.661427 setup 1670.824341 -> 1523.566162 bufs 10 stop target
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[194] hold -74.210197 -> -85.495277 setup 1869.133789 -> 1870.444214 bufs 1 stop no_gain
+JANUS_PR hold_pad pin u_user/npu_ctrl_m2s_i[180] hold -73.895004 -> 12.357116 setup 1613.813965 -> 1470.672974 bufs 10 stop target
+JANUS_PR hold_pad done pins 64 buffers 330
+[INFO RSZ-0046] Found 2420 endpoints with hold violations.
+[INFO RSZ-0032] Inserted 2982 hold buffers.
+[INFO DRT-0267] cpu time = 16:25:10, elapsed time = 01:45:04, memory = 55504.61 (MB), peak = 59623.57 (MB)
+JANUS_PR drc 0
+JANUS_PR spef /home/ubuntu/projects/janus/janus-ai-soc/asic_flow/OpenROAD-flow-scripts/flow/results/asap7/janus_soc_top/base/janus_eco_hold.spef
+JANUS_PR setup wns -68.674
+JANUS_PR setup tns -68.674
+JANUS_PR hold wns -7.313
+JANUS_PR hold tns -11.094
+JANUS_PR hold viol 2
+JANUS_PR def /home/ubuntu/projects/janus/janus-ai-soc/asic_flow/OpenROAD-flow-scripts/flow/results/asap7/janus_soc_top/base/janus_eco_hold.def
+JANUS_PR verilog /home/ubuntu/projects/janus/janus-ai-soc/asic_flow/OpenROAD-flow-scripts/flow/results/asap7/janus_soc_top/base/janus_eco_hold.v
+JANUS_PR wrote /home/ubuntu/projects/janus/janus-ai-soc/asic_flow/OpenROAD-flow-scripts/flow/results/asap7/janus_soc_top/base/janus_eco_hold.odb
+JANUS_PR_END hold

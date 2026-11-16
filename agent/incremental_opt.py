@@ -68,6 +68,8 @@ class ECOResult:
     pre_hold_tns: Optional[float] = None
     hold_viol: Optional[int] = None        # §232 hold violating endpoints after
     pre_hold_viol: Optional[int] = None    # ... and before
+    setup_viol: Optional[int] = None       # §247 setup violating endpoints after
+    pre_setup_viol: Optional[int] = None   # ... and before (email rows only)
 
 
 _RE_PRE = re.compile(r"^JANUS_PR_PRE\s+(setup|hold)\s+wns\s+(-?\d+(?:\.\d+)?)", re.M)
@@ -86,6 +88,8 @@ _RE_PRE_SLEW = re.compile(r"^JANUS_PR_PRE\s+drv\s+slew\s+(-?\d+)", re.M)
 _RE_PRE_TNS = re.compile(r"^JANUS_PR_PRE\s+(setup|hold)\s+tns\s+(-?\d+(?:\.\d+)?)", re.M)
 _RE_HVIOL = re.compile(r"^JANUS_PR\s+hold\s+viol\s+(-?\d+)", re.M)
 _RE_PRE_HVIOL = re.compile(r"^JANUS_PR_PRE\s+hold\s+viol\s+(-?\d+)", re.M)
+_RE_SVIOL = re.compile(r"^JANUS_PR\s+setup\s+viol\s+(-?\d+)", re.M)
+_RE_PRE_SVIOL = re.compile(r"^JANUS_PR_PRE\s+setup\s+viol\s+(-?\d+)", re.M)
 
 
 def _slew_count(rx: "re.Pattern[str]", out: str) -> Optional[int]:
@@ -110,6 +114,7 @@ def parse_eco(out: str, mode: str = "timing", out_odb: str = "") -> ECOResult:
     for kind, val in _RE_PRE_TNS.findall(out):
         setattr(r, f"pre_{kind}_tns", float(val))
     r.pre_hold_viol = _slew_count(_RE_PRE_HVIOL, out)
+    r.pre_setup_viol = _slew_count(_RE_PRE_SVIOL, out)
     m = _RE_ERR.search(out)
     if m:
         r.error = m.group(1).strip()
@@ -121,6 +126,7 @@ def parse_eco(out: str, mode: str = "timing", out_odb: str = "") -> ECOResult:
         r.drc = int(md.group(1))
     r.slew_viol = _slew_count(_RE_SLEW, out)
     r.hold_viol = _slew_count(_RE_HVIOL, out)
+    r.setup_viol = _slew_count(_RE_SVIOL, out)
     mw = _RE_WROTE.search(out)
     r.wrote = bool(mw)
     if mw and not out_odb:

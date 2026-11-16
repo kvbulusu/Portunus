@@ -1,0 +1,11 @@
+{
+  "block": "janus_soc_top",
+  "mode": "hold",
+  "setup_ws": -68.674,
+  "setup_tns": -68.674,
+  "hold_ws": -7.313,
+  "hold_tns": -11.094,
+  "drc": 0,
+  "source": "post-route ECO RCX (janus_eco_hold)",
+  "at": "2026-11-15T08:28:43"
+}

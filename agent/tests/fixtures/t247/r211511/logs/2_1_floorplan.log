@@ -1,0 +1,17 @@
+[WARNING STA-1140] results/asap7/security/base/janus_kv_secure_subsystem_fast.lib line 1, library janus_kv_secure_subsystem already exists.
+[WARNING STA-1140] results/asap7/noc/base/axi4_crossbar_fast.lib line 1, library axi4_crossbar already exists.
+[WARNING STA-1140] results/asap7/ampo/base/ampo_top_fast.lib line 1, library ampo_top already exists.
+[WARNING STA-1140] results/asap7/agent_domain/base/agent_cluster_top_fast.lib line 1, library agent_cluster_top already exists.
+[WARNING STA-1140] results/asap7/user_domain/base/user_cluster_top_fast.lib line 1, library user_cluster_top already exists.
+[WARNING IFP-0028] Core area lower left (20.000, 20.000) snapped to (20.034, 20.250).
+[INFO RSZ-0042] Inserted 991 tie TIELOx1_ASAP7_75t_R instances.
+[INFO RSZ-0042] Inserted 18870 tie TIEHIx1_ASAP7_75t_R instances.
+[WARNING EST-0027] no estimated parasitics. Using wire load models.
+[INFO RSZ-0094] Found 20866 endpoints with setup violations.
+[INFO RSZ-0099] Repairing 20866 out of 20866 (100.00%) violating endpoints...
+[INFO RSZ-0051] Resized 25 instances: 23 up, 0 up match, 0 down, 2 VT
+[WARNING RSZ-0062] Unable to repair all setup violations.
+[ERROR GUI-0056] Invalid syntax for -filter. Use -filter attribute=value.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 1448 x 7200.
+[WARNING GUI-0094] Resolution results in illegal size (max width/height is 7200 pixels). Saving image with dimensions = 1448 x 7200.
+Elapsed time: 9:35.63[h:]min:sec. CPU time: user 695.79 sys 46.30 (128%). Peak memory: 1954556KB.

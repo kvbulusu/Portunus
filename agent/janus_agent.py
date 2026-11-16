@@ -130,6 +130,7 @@ import gdrive_token_age as _gta                                         # noqa: 
 from milestones import (MilestoneTracker, milestones_enabled,            # noqa: E402
                         config_uses_io_shadow, is_debug_event)
 import stage_report as _sr                                              # noqa: E402
+import eco_history as _eh                                               # noqa: E402
 import janus_remote as _jr                                              # noqa: E402
 from timing_classifier import classify_routed_odb, render as tc_render   # noqa: E402
 from incremental_opt import (run_eco_pass, decide_timing, decide_drc,     # noqa: E402
@@ -2622,13 +2623,58 @@ class JANUSAutonomousAgent:
         body = {"block": block, "mode": mode, "setup_ws": eco.setup_wns,
                 "setup_tns": eco.setup_tns, "hold_ws": eco.hold_wns,
                 "hold_tns": eco.hold_tns, "drc": eco.drc,
+                # §247 violator counts (email rows / report bundle "violators")
+                "setup_viol": getattr(eco, "setup_viol", None),
+                "hold_viol": getattr(eco, "hold_viol", None),
+                "pre_setup_ws": getattr(eco, "pre_setup", None),
+                "pre_hold_ws": getattr(eco, "pre_hold", None),
                 "source": f"post-route ECO RCX (janus_eco_{mode})",
                 "at": datetime.now().isoformat(timespec="seconds")}
+        if mode == "hold":
+            try:
+                body["margin"] = float(self._eco_hold_margin(block))
+            except Exception:                     # knob lookup never blocks the record
+                body["margin"] = None
         try:
             with open(os.path.join(rep, self._ECO_ADOPTED_JSON), "w") as fh:
                 json.dump(body, fh, indent=2)
         except OSError as e:
             self.ui.debug(f"{block}: {self._ECO_ADOPTED_JSON} write failed: {e}")
+
+    # §247: every ECO pass (adopt AND discard) is appended to
+    # reports/janus_eco_history.json so the email stage table can show one row
+    # per attempt across runs (soc_top 20261115_211511 discarded its
+    # eco-hold-only pass on DRT-0206 and the email showed no trace of it).
+    def _eco_history_append(self, block: str, mode: str, verdict: str, why: str,
+                            eco: Optional[ECOResult], t0: Optional[float] = None) -> None:
+        try:
+            rep = self._reports_dir(block)
+            if not rep or getattr(eco, "error", "") == "dry-run":
+                return
+            g = (lambda k: getattr(eco, k, None)) if eco is not None else (lambda k: None)
+            err = g("error") or ""
+            if "DRT-0206" in err:
+                lg = _eh.parse_eco_log(os.path.join(self._logs_dir(block) or "#",
+                                                    f"janus_eco_{mode}.log"))
+                err = _eh.short_error(err, int(lg.get("open_nets") or 0))
+            try:
+                margin = float(self._eco_hold_margin(block)) if mode == "hold" else None
+            except Exception:
+                margin = None
+            ent = {"mode": mode, "verdict": verdict, "why": (why or "")[:300],
+                   "error": err, "margin": margin,
+                   "wall_s": round(time.time() - t0, 1) if t0 else None,
+                   "t": time.time(), "at": datetime.now().isoformat(timespec="seconds"),
+                   "pre": {"setup_ws": g("pre_setup"), "setup_tns": g("pre_setup_tns"),
+                           "setup_viol": g("pre_setup_viol"), "hold_ws": g("pre_hold"),
+                           "hold_tns": g("pre_hold_tns"), "hold_viol": g("pre_hold_viol")},
+                   "post": {"setup_ws": g("setup_wns"), "setup_tns": g("setup_tns"),
+                            "setup_viol": g("setup_viol"), "hold_ws": g("hold_wns"),
+                            "hold_tns": g("hold_tns"), "hold_viol": g("hold_viol"),
+                            "drc": g("drc")}}
+            _eh.append_history(rep, ent)
+        except Exception as e:                       # never fatal
+            self.ui.debug(f"{block}: eco history append failed: {e}")
 
     def _eco_adopted_timing(self, block: str) -> Optional[dict]:
         """Timing of the ECO'd 6_final.* in force, or None (no ECO adopted, or
@@ -2659,6 +2705,7 @@ class JANUSAutonomousAgent:
         res = self.results[block]
         self._eco_log(block, f"{mode} ECO via ORFS make run (hold margin "
                              f"{self._eco_hold_margin(block)} ps, incremental reroute + RCX)")
+        t0 = time.time()
         eco, outs = self._run_eco_orfs(block, mode)
         b_setup = eco.pre_setup if eco.pre_setup is not None else setup
         b_hold = eco.pre_hold if eco.pre_hold is not None else hold
@@ -2710,12 +2757,15 @@ class JANUSAutonomousAgent:
             self._eco_log(block, f"{mode} ECO ADOPTED — {why} (drc {eco.drc}); "
                                  "6_final.{odb,spef,def,v,gds} replaced, *.preeco kept")
             self.ui.good(f"{block}: post-route {mode} ECO ADOPTED — {why}")
+            self._eco_history_append(block, eco.mode or mode, "ADOPTED", why, eco, t0)
             return eco.setup_wns, eco.hold_wns
         for p in outs.values():
             discard_odb(p)
         if verdict == "adopt":
+            self._eco_history_append(block, mode, "DISCARDED", "adopt failed (see agent log)", eco, t0)
             return setup, hold                     # adopt failed; already logged
         self._eco_log(block, f"{mode} ECO DISCARDED — {why}")
+        self._eco_history_append(block, mode, "DISCARDED", why, eco, t0)
         return setup, hold
 
     # ----- §183: post-route max-slew (long output-port wire) ECO ------------
@@ -2747,6 +2797,7 @@ class JANUSAutonomousAgent:
         self._eco_log(block, f"drv ECO (max-slew) via ORFS make run: scope "
                              f"{self._eco_drv_scope(block)}, max wire "
                              f"{self._eco_drv_max_wire_um(block)} um, incremental reroute + RCX")
+        t0 = time.time()
         eco, outs = self._run_eco_orfs(block, "drv")
         if getattr(self.args, "dry_run", False):
             return False
@@ -2765,11 +2816,14 @@ class JANUSAutonomousAgent:
             self._eco_log(block, f"drv ECO ADOPTED — {why}; "
                                  "6_final.{odb,spef,def,v,gds} replaced, *.preeco kept")
             self.ui.good(f"{block}: post-route drv ECO ADOPTED — {why}")
+            self._eco_history_append(block, "drv", "ADOPTED", why, eco, t0)
             return True
         for p in outs.values():
             discard_odb(p)
         if verdict != "adopt":
             self._eco_log(block, f"drv ECO DISCARDED — {why}")
+        self._eco_history_append(block, "drv", "DISCARDED",
+                                 why if verdict != "adopt" else "adopt failed", eco, t0)
         return False
 
     def _eco_drv_only(self) -> int:
@@ -4928,7 +4982,8 @@ class JANUSAutonomousAgent:
                          f"@ {eco.get('at', '?')}): setup {eco.get('setup_ws')} ps "
                          f"(TNS {eco.get('setup_tns')}), hold {eco.get('hold_ws')} ps "
                          f"(TNS {eco.get('hold_tns')}), DRC {eco.get('drc')}. "
-                         f"The 6_finish row below is PRE-ECO.")
+                         f"The 6_finish row below is PRE-ECO; the row marked "
+                         f"'(in force)' is what 6_final.* holds now.")
         if note:
             lines.append(f"Agent note: {note}")
         if new == old and not lines:
@@ -5283,6 +5338,10 @@ class JANUSAutonomousAgent:
             ctx["resume"] = (getattr(self, "_resume_info", {}).get(block) or {}).get("text", "")
             ctx["prev_run"] = _sr.prev_done_summary(reports_dir or self._reports_dir(block))
             ctx["cmd"] = " ".join(sys.argv)[:400]
+        except Exception:
+            pass
+        try:   # §247 margin for an ECO row parsed from a tail-truncated janus_eco_hold.log
+            ctx["eco_hold_margin"] = self._eco_hold_margin(block)
         except Exception:
             pass
         return ctx
