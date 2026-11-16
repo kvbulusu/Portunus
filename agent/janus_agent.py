@@ -2830,6 +2830,10 @@ class JANUSAutonomousAgent:
             if not self._find_routed_odb(b):
                 self.ui.err(f"{b}: no routed .odb (block must have finished routing)")
                 rc_all = rc_all or 3
+                if not self.args.dry_run:      # §246b: mail-triggered runs only see the email
+                    res.status = "FAILED"
+                    res.note = "eco-hold-only exit 3: no routed .odb (block must have finished routing)"
+                    self._notify_settled(b, res)
                 continue
             self._classify_timing(b)
             eco0 = self._eco_adopted_timing(b)   # §150: fallback baseline = RCX of the ECO'd 6_final in force
@@ -2845,6 +2849,10 @@ class JANUSAutonomousAgent:
                 continue
             if res.note == note0:              # _eco_pass_orfs appends only on adopt
                 rc_all = rc_all or 5
+                res.status = "DONE"            # previous (first-ECO) 6_final stays in force
+                res.note = ((note0 + "; ") if note0 else "") + \
+                    "eco-hold-only exit 5: hold ECO DISCARDED, previous 6_final kept"
+                self._notify_settled(b, res)
                 continue
             res.status = "DONE"
             self._run_abstract(b)
@@ -2854,6 +2862,8 @@ class JANUSAutonomousAgent:
             except Exception as e:
                 self.ui.warn(f"{b}: sign-off after hold ECO failed: {e}")
             self._archive_golden(b, res)
+            res.note = (res.note + "; " if res.note else "") + "eco-hold-only exit 0: hold ECO ADOPTED"
+            self._notify_settled(b, res)       # §246b: email + Drive bundle (mail-triggered runs)
         return rc_all
 
     @staticmethod
@@ -4894,6 +4904,46 @@ class JANUSAutonomousAgent:
             # notify() rewrites qor.json; re-attach the plan to it.
             self._adaptive_write(block, adaptive)
 
+    @staticmethod
+    def _sr_apply_eco(sr: dict, eco: Optional[dict], note: str = "") -> None:
+        """§246b: an adopted post-route ECO replaces 6_final.* but not
+        6_finish.rpt, so the stage-table subject showed pre-ECO slack (soc_top
+        20261114_200411: subject hold -171 ps, ECO'd 6_final in force -7.31).
+        Rewrite the subject's WNS/hold to the adopted RCX numbers and put them
+        (plus the agent note, e.g. the eco-hold-only exit code) at the top of
+        the text/html body. In-place; no-op when nothing applies."""
+        import html as _html
+        old = sr.get("subject") or ""
+        new = old
+        if eco and (eco.get("setup_ws") is not None or eco.get("hold_ws") is not None):
+            def _f(v):
+                return "n/a" if v is None else f"{float(v):.1f}"
+            tag = f" · WNS {_f(eco.get('setup_ws'))}ps · hold {_f(eco.get('hold_ws'))}ps (post-ECO)"
+            new = re.sub(r" · WNS \S+ps( · hold \S+ps)?", "", old, count=1)
+            m = re.search(r" DONE", new)
+            new = (new[:m.end()] + tag + new[m.end():]) if m else new + tag
+        lines = []
+        if eco:
+            lines.append(f"Timing in force (post-ECO RCX, {eco.get('mode', '?')} ECO "
+                         f"@ {eco.get('at', '?')}): setup {eco.get('setup_ws')} ps "
+                         f"(TNS {eco.get('setup_tns')}), hold {eco.get('hold_ws')} ps "
+                         f"(TNS {eco.get('hold_tns')}), DRC {eco.get('drc')}. "
+                         f"The 6_finish row below is PRE-ECO.")
+        if note:
+            lines.append(f"Agent note: {note}")
+        if new == old and not lines:
+            return
+        sr["subject"] = new
+        txt = sr.get("text") or ""
+        body = txt[len(old):] if old and txt.startswith(old) else ("\n" + txt if txt else "")
+        sr["text"] = new + ("\n" + "\n".join(lines) if lines else "") + body
+        h = sr.get("html") or ""
+        if old and _html.escape(old) in h:
+            h = h.replace(_html.escape(old), _html.escape(new), 1)
+        if lines:
+            h = "".join(f"<p><b>{_html.escape(l)}</b></p>" for l in lines) + h
+        sr["html"] = h
+
     def _notify_settled(self, block: str, res: "BlockResult") -> None:
         """Email (and optionally Drive-upload) the settled block's logs+reports.
 
@@ -4957,6 +5007,11 @@ class JANUSAutonomousAgent:
                     sr["subject"] = sr["subject"].replace(" FAILED", f" {res.status}", 1)
             except Exception as e:
                 self._notify_log(f"{block}: stage report error (ignored): {e}")
+            if sr and res.status == "DONE":
+                try:   # §246b: subject/body show the ECO'd 6_final in force, not stale 6_finish
+                    self._sr_apply_eco(sr, self._eco_adopted_timing(block), res.note or "")
+                except Exception as e:
+                    self._notify_log(f"{block}: eco subject patch error (ignored): {e}")
             qor = self.notifier.notify(
                 stage_report=sr,
                 block=block,

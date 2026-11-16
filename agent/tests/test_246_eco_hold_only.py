@@ -24,6 +24,7 @@ def _wire(a, res, calls, adopt):
     a._run_abstract = lambda b: calls.append("abs")
     a._run_signoff = lambda b: calls.append("so") or "ok"
     a._archive_golden = lambda b, r=None: calls.append("gold")
+    a._notify_settled = lambda b, r: calls.append(("mail", r.status, r.note.split("; ")[-1]))
 
 
 def test_eco_hold_only_adopt_runs_abstract_signoff_golden(tmp_path):
@@ -32,7 +33,8 @@ def test_eco_hold_only_adopt_runs_abstract_signoff_golden(tmp_path):
     calls = []
     _wire(a, res, calls, adopt=True)
     assert a.run() == 0
-    assert calls == ["hold", "abs", "so", "gold"]
+    assert calls == ["hold", "abs", "so", "gold",
+                     ("mail", "DONE", "eco-hold-only exit 0: hold ECO ADOPTED")]
 
 
 def test_eco_hold_only_discard_returns_5_and_skips_downstream(tmp_path):
@@ -41,7 +43,8 @@ def test_eco_hold_only_discard_returns_5_and_skips_downstream(tmp_path):
     calls = []
     _wire(a, res, calls, adopt=False)
     assert a._eco_hold_only() == 5
-    assert calls == ["hold"]
+    assert calls == ["hold", ("mail", "DONE",
+                              "eco-hold-only exit 5: hold ECO DISCARDED, previous 6_final kept")]
 
 
 def test_eco_hold_only_needs_blocks_and_routed_odb(tmp_path):
@@ -50,7 +53,10 @@ def test_eco_hold_only_needs_blocks_and_routed_odb(tmp_path):
     assert a._eco_hold_only() == 2
     a.args.blocks = [BLK]
     a._find_routed_odb = lambda b: None
+    mails = []
+    a._notify_settled = lambda b, r: mails.append((r.status, r.note))
     assert a._eco_hold_only() == 3
+    assert mails and mails[0][0] == "FAILED" and "exit 3" in mails[0][1]
 
 
 def test_eco_hold_only_parser_and_exclusive():
@@ -64,3 +70,23 @@ def test_soc_top_eco_hold_margin_25():
         mk = fh.read()
     m = re.search(r"^export\s+JANUS_ECO_HOLD_MARGIN_PS\s*=\s*(\S+)", mk, re.M)
     assert m and float(m.group(1)) == 25.0
+
+
+def test_sr_apply_eco_rewrites_stale_subject_and_body():
+    """§246b: soc_top 20261114_200411 mailed 6_finish (pre-ECO) slack."""
+    subj = "[JANUS] janus_soc_top DONE · WNS -66.0ps · hold -171ps · 7/7 · 12h28m · RED FLAG"
+    sr = {"subject": subj, "text": subj + "\n\nSTAGES", "html": "<p><b>" + subj + "</b></p>"}
+    eco = {"mode": "hold", "setup_ws": -68.674, "setup_tns": -68.674, "hold_ws": -7.313,
+           "hold_tns": -11.094, "drc": 0, "at": "2026-11-15T08:28:43"}
+    ja.JANUSAutonomousAgent._sr_apply_eco(sr, eco, "eco-hold-only exit 0: hold ECO ADOPTED")
+    assert sr["subject"] == ("[JANUS] janus_soc_top DONE · WNS -68.7ps · hold -7.3ps (post-ECO)"
+                             " · 7/7 · 12h28m · RED FLAG")
+    assert sr["text"].startswith(sr["subject"] + "\nTiming in force")
+    assert "exit 0" in sr["text"] and sr["text"].endswith("\n\nSTAGES")
+    assert "-171" not in sr["html"] and "exit 0" in sr["html"]
+
+
+def test_sr_apply_eco_noop_without_eco_or_note():
+    sr = {"subject": "[JANUS] x DONE · WNS 1.0ps · 7/7", "text": "t", "html": "h"}
+    ja.JANUSAutonomousAgent._sr_apply_eco(sr, None, "")
+    assert sr == {"subject": "[JANUS] x DONE · WNS 1.0ps · 7/7", "text": "t", "html": "h"}
