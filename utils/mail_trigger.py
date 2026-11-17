@@ -76,6 +76,7 @@ import argparse
 import email
 import email.utils
 import imaplib
+import importlib.util
 import json
 import os
 import re
@@ -348,15 +349,49 @@ def validate_query(q):
     return tok, None
 
 
+_AGENT_CACHE = {}
+
+
 def _agent_module():
+    """§251: janus_agent.py as it is on disk NOW. A plain `import` is cached for
+    the life of the (looping) listener, so a `git pull` of new agent flags was
+    invisible until restart. Re-load a private copy whenever the file changes;
+    sys.modules["janus_agent"] is never touched."""
     if REPO is None:
         return None
+    path = REPO / AGENT_REL
     try:
-        sys.path.insert(0, str(REPO / "asic_flow" / "agent"))
-        import janus_agent  # noqa: E402
-        return janus_agent
+        key = (str(path), path.stat().st_mtime_ns)
+        if key not in _AGENT_CACHE:
+            d = str(path.parent)
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            name = "_mail_trigger_janus_agent"   # private name (dataclasses need sys.modules)
+            spec = importlib.util.spec_from_file_location(name, path)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mod
+            try:
+                spec.loader.exec_module(mod)
+            except Exception:
+                sys.modules.pop(name, None)
+                raise
+            _AGENT_CACHE.clear()
+            _AGENT_CACHE[key] = mod
+        return _AGENT_CACHE[key]
     except Exception:
         return None
+
+
+def _repo_head():
+    """Short git HEAD of the validating repo ('' if unknown) for reject replies."""
+    if REPO is None:
+        return ""
+    try:
+        r = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
 
 
 def _agent_parser():
@@ -410,7 +445,11 @@ def validate_cmd(cmd, parser="auto"):
         msg = str(e)
         if msg.startswith("unrecognized arguments"):
             msg = "unknown option(s)/argument(s): " + msg.split(":", 1)[-1].strip()
-        return None, f"janus_agent.py rejects the options: {msg}"
+        if ja is not None:
+            where = f"{REPO / AGENT_REL} @ {_repo_head() or '?'}"
+        else:
+            where = "built-in snapshot (standalone mail_trigger.py)"
+        return None, f"janus_agent.py rejects the options: {msg}\nvalidated by: {where}"
     graph = getattr(ja, "DEFAULT_GRAPH", None) if ja else AGENT_BLOCKS
     bad = [b for b in (getattr(ns, "blocks", None) or []) if graph and b not in graph]
     if bad:
