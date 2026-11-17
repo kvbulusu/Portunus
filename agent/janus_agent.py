@@ -69,6 +69,7 @@ Requires the env file written by the install scripts:
 from __future__ import annotations
 
 import argparse
+import copy
 import glob
 import json
 import os
@@ -2588,11 +2589,13 @@ class JANUSAutonomousAgent:
             parsed.error = f"make rc={proc.returncode}, no JANUS_PR slacks/write"
         return parsed, outs
 
-    def _adopt_eco_orfs(self, block: str, outs: Dict[str, str]) -> bool:
+    def _adopt_eco_orfs(self, block: str, outs: Dict[str, str], bak: str = ".preeco") -> bool:
         """Swap janus_eco_* over 6_final.{odb,spef,def,v} (backups *.preeco) and
         re-merge 6_final.gds from the new def (ORFS do-gds-merged), so abstract,
         sign-off RCX/STA and the parent's GDS all see the ECO'd layout. Any
-        failure restores every backup (all-or-nothing)."""
+        failure restores every backup (all-or-nothing). §250 bak != .preeco:
+        the backup is only for that restore and is deleted on success, so the
+        ORFS-original *.preeco survive."""
         res_dir = self._results_dir(block)
         missing = [k for k, p in outs.items() if not os.path.isfile(p)]
         if not res_dir or missing:
@@ -2606,11 +2609,11 @@ class JANUSAutonomousAgent:
 
         def _restore() -> None:
             for c in backups:
-                if os.path.isfile(c + ".preeco"):
-                    shutil.copy2(c + ".preeco", c)
+                if os.path.isfile(c + bak):
+                    shutil.copy2(c + bak, c)
         try:
             for c in backups:
-                shutil.copy2(c, c + ".preeco")
+                shutil.copy2(c, c + bak)
             for new, canon in pairs:
                 shutil.move(new, canon)
             if gds:
@@ -2625,6 +2628,10 @@ class JANUSAutonomousAgent:
                 if rc != 0 or not os.path.isfile(merged):
                     raise RuntimeError(f"do-gds-merged rc={rc}")
                 shutil.copy2(merged, gds)
+            if bak != ".preeco":                  # §250: restore-only backup
+                for c in backups:
+                    if os.path.isfile(c + bak):
+                        os.remove(c + bak)
             return True
         except Exception as e:
             _restore()
@@ -2730,10 +2737,14 @@ class JANUSAutonomousAgent:
 
     def _eco_pass_orfs(self, block: str, mode: str, setup: Optional[float],
                        hold: Optional[float],
-                       strategy: str = "repair") -> Tuple[Optional[float], Optional[float]]:
+                       strategy: str = "repair", in_odb: str = "6_final.odb",
+                       in_spef: Optional[str] = None,
+                       inforce: Optional[dict] = None) -> Tuple[Optional[float], Optional[float]]:
         """Run + judge one pass. Before = JANUS_PR_PRE (same session, same
         6_final.spef) when present, else the 6_finish numbers. Returns the
-        (setup, hold) in force afterwards."""
+        (setup, hold) in force afterwards. §250 inforce (not None) = the pass
+        starts from 6_final.*.preeco: it must also beat the ECO result in force
+        and its adoption keeps *.preeco (backup of the in-force files: .ecoprev)."""
         res = self.results[block]
         pin = mode == "hold" and strategy == "pin"
         if pin:
@@ -2745,7 +2756,7 @@ class JANUSAutonomousAgent:
                                  f"{self._eco_hold_margin(block)} ps, incremental reroute + RCX)")
         t0 = time.time()
         self._eco_strategy = strategy if mode == "hold" else "repair"
-        eco, outs = self._run_eco_orfs(block, mode,
+        eco, outs = self._run_eco_orfs(block, mode, in_odb=in_odb, in_spef=in_spef,
                                        extra=["JANUS_PR_HOLD_STRATEGY=pin"] if pin else None)
         b_setup = eco.pre_setup if eco.pre_setup is not None else setup
         b_hold = eco.pre_hold if eco.pre_hold is not None else hold
@@ -2788,7 +2799,11 @@ class JANUSAutonomousAgent:
             verdict, why = "discard", "ECO reroute DRC count unknown (no JANUS_PR drc)"
         if verdict == "adopt" and eco.drc is not None and eco.drc > b_drc:
             verdict, why = "discard", f"ECO reroute left {eco.drc} DRC(s) (before {b_drc})"
-        if verdict == "adopt" and self._adopt_eco_orfs(block, outs):
+        if verdict == "adopt" and inforce is not None:
+            ok, iwhy = self._eco_vs_inforce(eco, inforce, self._eco_tradeoff_knobs(block))
+            verdict, why = ("adopt", f"{why}; {iwhy}") if ok else ("discard", iwhy)
+        bak = ".ecoprev" if inforce is not None else ".preeco"
+        if verdict == "adopt" and self._adopt_eco_orfs(block, outs, bak=bak):
             res.wns_ns, res.hold_ps = eco.setup_wns, eco.hold_wns
             if eco.setup_tns is not None:
                 res.tns_ns = eco.setup_tns
@@ -2965,7 +2980,23 @@ class JANUSAutonomousAgent:
                 res.timing_source = eco0.get("source")
             note0 = res.note
             strategy = self._eco_hold_only_strategy(b)   # §248
-            self._eco_pass_orfs(b, "hold", res.wns_ns, res.hold_ps, strategy=strategy)
+            if getattr(self.args, "eco_from_preeco", False):
+                kw = self._eco_preeco_setup(b, eco0)     # §250 recovery
+                if kw is None:
+                    rc_all = rc_all or 3
+                    if not self.args.dry_run:
+                        res.status = "DONE"            # 6_final in force untouched
+                        res.note = ((note0 + "; ") if note0 else "") + \
+                            "eco-hold-only exit 3: --eco-from-preeco needs 6_final.{odb,spef}.preeco"
+                        self._notify_settled(b, res)
+                    continue
+                try:
+                    self._eco_pass_orfs(b, "hold", res.wns_ns, res.hold_ps,
+                                        strategy="repair", **kw)
+                finally:
+                    self._eco_preeco_cleanup(b)
+            else:
+                self._eco_pass_orfs(b, "hold", res.wns_ns, res.hold_ps, strategy=strategy)
             if self.args.dry_run:
                 continue
             if res.note == note0:              # _eco_pass_orfs appends only on adopt
@@ -2986,6 +3017,69 @@ class JANUSAutonomousAgent:
             res.note = (res.note + "; " if res.note else "") + "eco-hold-only exit 0: hold ECO ADOPTED"
             self._notify_settled(b, res)       # §246b: email + Drive bundle (mail-triggered runs)
         return rc_all
+
+    # ----- §250: --eco-from-preeco recovery ---------------------------------
+    # Every ECO odb adopted before §250 was written AFTER extract_parasitics
+    # (odb::orderWires re-encodes the wires), so a fresh TritonRoute session on
+    # it fails checkConnectivity -> DRT-0206 even with no netlist change (gcd:
+    # 48 broken nets in drc mode; soc_top 211511 370 / 184424 859 open nets).
+    # Recovery: re-run the hold ECO from the ORIGINAL ORFS 6_final.*.preeco
+    # with the recipe that produced the in-force result (strategy repair,
+    # JANUS_ECO_HOLD_MARGIN_PS), now written before RCX. Adopted only if it is
+    # not worse than the result in force (janus_eco_adopted.json); *.preeco
+    # (the ORFS originals) is never overwritten by this pass.
+    _PREECO_IN_ODB = "janus_preeco_in.odb"   # load_design needs a .odb name
+
+    def _eco_preeco_setup(self, block: str, inforce: Optional[dict]) -> Optional[dict]:
+        res_dir = self._results_dir(block)
+        need = [os.path.join(res_dir or "#", f"6_final.{k}.preeco") for k in ("odb", "spef")]
+        miss = [os.path.basename(p) for p in need if not os.path.isfile(p)]
+        if miss:
+            self.ui.err(f"{block}: --eco-from-preeco: missing {miss}")
+            self._eco_log(block, f"hold ECO from preeco skipped — missing {miss}")
+            return None
+        link = os.path.join(res_dir, self._PREECO_IN_ODB)
+        if not getattr(self.args, "dry_run", False):
+            if os.path.lexists(link):
+                os.remove(link)
+            os.symlink(os.path.basename(need[0]), link)
+        self._eco_log(block, "§250 hold ECO from 6_final.odb.preeco (ORFS original; "
+                             "strategy repair, margin "
+                             f"{self._eco_hold_margin(block)} ps); in force: "
+                             f"{(inforce or {}).get('setup_ws')}/{(inforce or {}).get('hold_ws')}")
+        return {"in_odb": self._PREECO_IN_ODB, "in_spef": need[1],
+                "inforce": inforce or {}}
+
+    def _eco_preeco_cleanup(self, block: str) -> None:
+        link = os.path.join(self._results_dir(block) or "#", self._PREECO_IN_ODB)
+        if os.path.islink(link):
+            os.remove(link)
+
+    @staticmethod
+    def _eco_vs_inforce(eco, inforce: dict, kn: Dict[str, float]) -> Tuple[bool, str]:
+        """§250 pure rule: a from-preeco pass replaces an ECO result already in
+        force, so it must not be worse than THAT: hold >= in-force - 1 ps and
+        setup >= in-force - FLOOR, or the §232 exchange rule against the
+        in-force numbers; DRC must not exceed the in-force DRC."""
+        s0, h0 = inforce.get("setup_ws"), inforce.get("hold_ws")
+        if s0 is None or h0 is None:
+            return True, "no ECO in force"
+        if eco.setup_wns is None or eco.hold_wns is None:
+            return False, "no post-ECO timing"
+        d0 = inforce.get("drc")
+        if d0 is not None and (eco.drc is None or eco.drc > d0):
+            return False, f"DRC {eco.drc} > in-force {d0}"
+        if (eco.hold_wns >= h0 - 1.0
+                and eco.setup_wns >= s0 - kn["JANUS_ECO_SETUP_LOSS_FLOOR_PS"]):
+            return True, (f"vs in force: hold {h0:+.3f}->{eco.hold_wns:+.3f}, "
+                          f"setup {s0:+.3f}->{eco.setup_wns:+.3f} ps")
+        e2 = copy.copy(eco)
+        e2.pre_hold_tns, e2.pre_setup_tns = inforce.get("hold_tns"), inforce.get("setup_tns")
+        e2.pre_hold_viol = inforce.get("hold_viol")
+        if h0 >= 0.0:                     # in-force hold closed: never reopen it
+            return False, f"vs in force: hold {h0:+.3f}->{eco.hold_wns:+.3f} ps"
+        ok, why = JANUSAutonomousAgent._eco_hold_tradeoff(e2, s0, h0, kn)
+        return ok, f"vs in force: {why}"
 
     @staticmethod
     def _eco_setup_gain_hold_lost(eco: ECOResult, b_setup: Optional[float],
@@ -4778,6 +4872,10 @@ class JANUSAutonomousAgent:
             return self._triage_slew()
         if getattr(self.args, "signoff_only", False):
             return self._signoff_only()
+        if (getattr(self.args, "eco_from_preeco", False)
+                and not getattr(self.args, "eco_hold_only", False)):
+            self.ui.err("--eco-from-preeco only works with --eco-hold-only")
+            return 2
         if getattr(self.args, "eco_drv_only", False):
             return self._eco_drv_only()
         if getattr(self.args, "eco_hold_only", False):
@@ -6718,6 +6816,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "(margin JANUS_ECO_HOLD_MARGIN_PS); if adopted, re-run "
                         "abstract, sign-off and golden. Exit 0 adopted, 5 "
                         "discarded, 3 no routed odb.")
+    p.add_argument("--eco-from-preeco", action="store_true",
+                   help="§250 (with --eco-hold-only): start the hold ECO from the "
+                        "ORFS-original 6_final.{odb,spef}.preeco instead of the "
+                        "ECO'd 6_final (pre-§250 ECO odbs were written after RCX "
+                        "and cannot be re-routed: DRT-0206). Strategy repair, "
+                        "margin JANUS_ECO_HOLD_MARGIN_PS; adopted only if not worse "
+                        "than the ECO result in force; *.preeco kept.")
     p.add_argument("--abstract-only", action="store_true",
                    help="§202: regenerate ONLY the .lef/.lib abstract of each --blocks "
                         "block from its EXISTING 6_final (one openroad session per "
