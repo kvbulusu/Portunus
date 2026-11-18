@@ -2871,26 +2871,92 @@ class JANUSAutonomousAgent:
         b_drc = res.drc_violations or 0
         tol = self._eco_drv_float_knob(block, "JANUS_ECO_DRV_SETUP_TOL_PS", 5.0)  # §249
         verdict, why = decide_drv(b_setup, b_hold, b_drc, eco, setup_tol_ps=tol)
+        mode = "drv"
+        # §253: drv fixed slew/setup/DRC but the reroute opened hold -> ONE
+        # hold pass on the drv output (pre-RCX odb, §250 -> re-routable).
+        if (verdict == "discard"
+                and self._eco_drv_float_knob(block, "JANUS_ECO_DRV_CHAIN_HOLD", 0.0) > 0
+                and self._eco_drv_hold_only_fail(eco, b_setup, b_drc, tol)):
+            self._eco_history_append(block, "drv", "DISCARDED",
+                                     f"{why}; §253 chaining a hold pass", eco, t0)
+            chained = self._eco_drv_chain_hold(block, eco, outs, b_setup, b_hold, b_drc, tol)
+            if chained is not None:
+                eco, outs, verdict, why = chained
+                mode = "drv_hold"
         if verdict == "adopt" and self._adopt_eco_orfs(block, outs):
             res.wns_ns, res.hold_ps = eco.setup_wns, eco.hold_wns
             if eco.setup_tns is not None:
                 res.tns_ns = eco.setup_tns
             if eco.drc is not None:
                 res.drc_violations = eco.drc
-            self._eco_record_adopted(block, "drv", eco)
-            res.note += f"  +eco(drv) slew {eco.pre_slew_viol}->{eco.slew_viol}"
-            self._eco_log(block, f"drv ECO ADOPTED — {why}; "
+            self._eco_record_adopted(block, mode, eco)
+            res.note += f"  +eco({mode}) slew {eco.pre_slew_viol}->{eco.slew_viol}"
+            self._eco_log(block, f"{mode} ECO ADOPTED — {why}; "
                                  "6_final.{odb,spef,def,v,gds} replaced, *.preeco kept")
-            self.ui.good(f"{block}: post-route drv ECO ADOPTED — {why}")
-            self._eco_history_append(block, "drv", "ADOPTED", why, eco, t0)
+            self.ui.good(f"{block}: post-route {mode} ECO ADOPTED — {why}")
+            self._eco_history_append(block, mode, "ADOPTED", why, eco, t0)
             return True
         for p in outs.values():
             discard_odb(p)
         if verdict != "adopt":
-            self._eco_log(block, f"drv ECO DISCARDED — {why}")
-        self._eco_history_append(block, "drv", "DISCARDED",
+            self._eco_log(block, f"{mode} ECO DISCARDED — {why}")
+        self._eco_history_append(block, mode, "DISCARDED",
                                  why if verdict != "adopt" else "adopt failed", eco, t0)
         return False
+
+    # ----- §253: drv ECO + chained hold pass ---------------------------------
+    # soc_top 20261117_230708 (§252 guard 75, 14735 cells locked): slew 253 ->
+    # 9, setup -63.73 -> -59.37, DRC 0, but hold +5.64 -> -13.97 on ONE endpoint
+    # (ent_q[66] -> u_user/npu_ctrl_m2s_i[68]): every cell unchanged, only the
+    # place80153->place80152 wire lost ~21.7 ps when detailed_route re-routed
+    # it (a lock cannot stop routing); l_job_q[86] also fell to +3.93. Same
+    # -13.97 in the unguarded 121711. The drv odb is written before RCX (§250),
+    # so a second session can pad hold on it and re-route; the combined result
+    # is judged by decide_drv against the ORIGINAL pre-drv numbers.
+    @staticmethod
+    def _eco_drv_hold_only_fail(eco: ECOResult, b_setup: Optional[float],
+                                b_drc: Optional[int], tol: float) -> bool:
+        """True when the drv result is trusted and passes every decide_drv gate
+        except hold: slew down, setup within tol, DRC not up, hold known."""
+        if not (eco.ok and eco.hold_wns is not None and eco.setup_wns is not None):
+            return False
+        if eco.drc is None or (b_drc is not None and eco.drc > b_drc):
+            return False
+        if eco.pre_slew_viol is None or eco.slew_viol is None or eco.slew_viol >= eco.pre_slew_viol:
+            return False
+        return b_setup is None or eco.setup_wns >= b_setup - tol
+
+    def _eco_drv_chain_hold(self, block: str, d_eco: ECOResult, d_outs: Dict[str, str],
+                            b_setup: Optional[float], b_hold: Optional[float],
+                            b_drc: Optional[int], tol: float):
+        """§253: hold pass on janus_eco_drv.{odb,spef}; returns (eco, outs,
+        verdict, why) for the combined result, or None (drv outputs left for
+        the caller to discard). Strategy = JANUS_ECO_HOLD_ONLY_STRATEGY (pin:
+        pad only endpoints with drv-RCX hold < JANUS_ECO_DRV_CHAIN_HOLD_SELECT_PS,
+        default 10, so endpoints that merely lost margin are covered too)."""
+        if not (os.path.isfile(d_outs.get("odb", "")) and os.path.isfile(d_outs.get("spef", ""))):
+            return None
+        strategy = self._eco_hold_only_strategy(block)
+        sel = self._eco_drv_float_knob(block, "JANUS_ECO_DRV_CHAIN_HOLD_SELECT_PS", 10.0)
+        extra = (["JANUS_PR_HOLD_STRATEGY=pin", f"JANUS_ECO_HOLD_PIN_SELECT_PS={sel:g}"]
+                 if strategy == "pin" else None)
+        self._eco_log(block, f"§253 drv ECO: slew {d_eco.pre_slew_viol}->{d_eco.slew_viol}, setup "
+                             f"{b_setup}->{d_eco.setup_wns}, DRC {d_eco.drc}, hold {b_hold}->"
+                             f"{d_eco.hold_wns} ps — chaining a hold pass (strategy {strategy}"
+                             + (f", select <{sel:g} ps" if extra else "") + ") on its output")
+        self._eco_strategy = strategy
+        h_eco, h_outs = self._run_eco_orfs(block, "hold", in_odb=os.path.basename(d_outs["odb"]),
+                                           in_spef=d_outs["spef"], tag_mode="drv_hold",
+                                           extra=extra)
+        for p in d_outs.values():
+            discard_odb(p)                 # intermediate; the chain output replaces it
+        # judge drv+hold against the pre-drv baseline (slew/viol counts too)
+        h_eco.mode = "drv_hold"
+        for k in ("pre_setup", "pre_hold", "pre_setup_tns", "pre_hold_tns",
+                  "pre_setup_viol", "pre_hold_viol", "pre_slew_viol"):
+            setattr(h_eco, k, getattr(d_eco, k, None))
+        verdict, why = decide_drv(b_setup, b_hold, b_drc, h_eco, setup_tol_ps=tol)
+        return h_eco, h_outs, verdict, "drv+hold chain: " + why
 
     def _eco_drv_only(self) -> int:
         """--eco-drv-only: §183 max-slew ECO on each --blocks block's EXISTING
