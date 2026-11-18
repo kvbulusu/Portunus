@@ -2537,7 +2537,10 @@ class JANUSAutonomousAgent:
                         "JANUS_PR_DRV_SETUP_GUARD_PS="
                         f"{self._eco_drv_float_knob(block, 'JANUS_ECO_DRV_SETUP_GUARD_PS', 50.0):g}",
                         "JANUS_PR_DRV_MAX_MARGIN="
-                        f"{self._eco_drv_float_knob(block, 'JANUS_ECO_DRV_MAX_MARGIN', 60.0):g}"]
+                        f"{self._eco_drv_float_knob(block, 'JANUS_ECO_DRV_MAX_MARGIN', 60.0):g}",
+                        # §252 RCX-hold guard + hold-critical cell lock (0 = off)
+                        "JANUS_PR_DRV_HOLD_GUARD_PS="
+                        f"{self._eco_drv_float_knob(block, 'JANUS_ECO_DRV_HOLD_GUARD_PS', 0.0):g}"]
         spef = in_spef or os.path.join(res_dir, "6_final.spef")
         if os.path.isfile(spef):
             targets.append(f"JANUS_SPEF={spef}")
